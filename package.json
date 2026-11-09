@@ -1,0 +1,9 @@
+{
+  "name": "isheach-ai-rule",
+  "version": "0.1.0",
+  "private": true,
+  "type": "module",
+  "description": "Portable Codex dispatch rules and a local DSH stdio MCP bridge",
+  "engines": { "node": ">=22" },
+  "scripts": { "test": "node --test tests/framework.test.mjs", "plan": "node scripts/manage.mjs", "verify": "node scripts/manage.mjs --verify" }
+}

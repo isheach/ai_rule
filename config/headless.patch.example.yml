@@ -1,0 +1,17 @@
+# REFERENCE ONLY. Do not overwrite an existing profile with this file.
+# User-validated baseline: DSH 0.2.2-rc.1, 2026-11-09.
+# No secrets. Requires a locally saved OPENCODE_GO_API_KEY credential reference.
+- id: llm-pi-ai
+  name: "@deepseek-ai/dsh-llm-pi-ai"
+  config:
+    providers:
+      opencode-go:
+        apiKeyEnv: OPENCODE_GO_API_KEY
+- id: agent-default-model
+  name: "@deepseek-ai/dsh-agent-default-model"
+  config:
+    provider: opencode-go
+    model: deepseek-v4.1-flash
+    reasoningEffort: max
+- id: credentials
+  disabled: false
