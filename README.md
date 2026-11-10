@@ -1,6 +1,6 @@
 # ai_rule
 
-两台 Windows 电脑共用的 Codex 调度规则、Skill 和 DSH MCP 桥接器。桥接器/安装器版本 **v0.1.0**；规则修订 **2026-11-10.session-mode-r1**。
+两台 Windows 电脑共用的 Codex 调度规则、Skill 和 DSH MCP 桥接器。桥接器/安装器版本 **v0.1.0**；规则修订 **2026-11-10.dispatch-chain-r2**。
 
 ## 已落地与尚未验收
 
@@ -8,6 +8,7 @@
 |---|---|
 | 跨会话全局规则、调度 Skill | 已实现，可安装；保留宿主安全策略 |
 | 会话模式保持 | 已写入 AGENTS/Skill；同一会话省略模式时沿用，明确选择才切换；不是程序强制路由 |
+| Astra → 真实 Sol → 外部 MCP | 本次补全实际调用者规则、证据与交接流程；不是技术工具隔离，修正后的真实链路待本机验收 |
 | 安装预览、合并、备份、冲突检测、回滚 | 已实现；不覆盖原有全局配置 |
 | DSH 原生 headless stdio MCP | 已实现；同步/异步提交、等待、取消、回执、幂等、独占锁 |
 | WorkBuddy 两个入口 | 原样保留；可注册用户已准备好的完整桥接器；电脑 B 暂不部署 |
@@ -19,8 +20,11 @@
 指定 HY4 / WorkBuddy DeepSeek / DSH：设为当前会话模式，Sol Max **只规划、调度、验收**；指定代理负责实际执行和自身监守，**不使用 Luna**。
 后续消息不写模式时仍沿用当前选择，不会每轮恢复 A。Astra 负责总体方向。外部后端失败不得自动切回 Sol 或其他模型。
 
-DSH 路径：`Codex → MCP → DSH 原生 Harness → OpenCode Go 模型 API`。
-**没有 OpenCode CLI / OpenCode Harness 这一层。**
+DSH 路径：**Astra 主代理 → 真实 Sol Max（max）子代理 → dsh-opencode-go MCP → DSH 原生 Harness → OpenCode Go 模型 API**。
+HY4 与 WorkBuddy DeepSeek 同样必须由真实 Sol 协调子代理调用；创建 Sol 却由 Astra 转发 MCP 不合格。
+**没有 OpenCode CLI / OpenCode Harness 这一层。** 主会话已经由宿主证实为 Sol 时不需要再套一个 Sol；Astra 不能模拟 Sol。
+
+用户在 2026-11-10 提供的审计显示：真实 Sol 子代理已创建且能看到工具，但 Astra 直接提交了 DSH 任务。本次针对这一调度缺口修正规则，不重新开发桥接器、不改变模型或权限，也不宣称仅改规则就保证调用链合规。详见 [docs/session-modes.md](docs/session-modes.md)。
 
 ## 电脑 A：已有 DSH 成功配置，直接安装
 
@@ -52,15 +56,17 @@ node .\scripts\manage.mjs --verify
 安装器自动识别 npm 全局 DSH 的 JavaScript 入口、用户目录和 Node 路径。识别失败时用 `-DshEntry "实际的\@deepseek-ai\dsh\lib\bin.js"`；不要传 `.cmd` 或 `.ps1` shim。
 它不会重新安装 DSH、修改 profile 或读取凭据文件；预检查会核实 headless 的配置路由与 JSON/权限选项。预检查不通过就停止。
 
-安装后**完全重启 Codex并新开会话**，再运行 `codex mcp list`。已有 HY4/WorkBuddy DeepSeek 配置不动。
+首次安装且没有活动任务时，完全重启 Codex 并新开会话，再运行 `codex mcp list`。已有 HY4/WorkBuddy DeepSeek 配置不动。
+已有任务仍在运行时，不为更新规则关闭宿主或原 MCP；采用下文的规则同步和显式重读流程。
 
 ### 第一次端到端验收
 
 在 Codex 新会话输入：
 
-> 使用 DSH。先调用 get_dsh_bridge_status，再在一个已经存在的空测试目录中，通过 run_dsh_task 做只读文本测试。提供任务 ID、退出码、final_reason 和回执，不要用模型的自我介绍证明身份。Sol Max 不代执行。
+> 本会话使用 DSH。Astra 先创建或恢复真实 Sol Max（max）子代理，由该子代理调用 get_dsh_bridge_status，再在已存在的空测试目录中用 run_dsh_task 做只读文本测试。提供协调者 ID、实际 MCP 发起方依据、任务 ID、退出码、final_reason 和回执。Astra 不转发，Sol 不代执行，不用模型自我介绍证明身份。
 
 目录必须是真实绝对路径。完成后再批准一个读取测试文件的任务，核实回执中的 native_tool_calls，而不是立刻开始真实项目写入。
+DSH 回执证明任务执行，不独立证明上游调用者；实际调用归属还须宿主记录。首次或换协调者时核实，日常保留最小证据，不反复扫描完整日志。
 
 ### 开放经批准的工作区写入
 
@@ -71,7 +77,7 @@ node .\scripts\manage.mjs --verify
 ```
 
 这只允许 MCP 接受 workspace-write 请求；每次任务仍需对应用户授权，传入 authorizationNote。它不是永久授权所有写入，更不授权安装、删除、提交或推送。宿主审批规则不修改。
-若要恢复只读，再执行不带 `-AllowWrite` 的安装命令并重启 Codex。
+若要恢复只读，再执行不带 `-AllowWrite` 的安装命令；需要重启时先确认没有活动任务。
 
 ## 新会话怎么用：一次选择，持续沿用
 
@@ -79,15 +85,16 @@ node .\scripts\manage.mjs --verify
 
 ```text
 本会话使用 DSH 模式。读取当前生效的 AGENTS.md 和 multi-agent-dispatch Skill。
-Astra 负责总体方向；Sol Max 只规划、调度与验收；DSH 负责实际执行、测试、修复及必要监守，不使用 Luna，不经过 OpenCode CLI。
+Astra 负责总体方向，并创建或恢复真实 Sol Max（max）子代理；由 Sol 在自己的上下文实际调用 DSH MCP，负责规划、等待、验收和修订派单。Astra 不直接调用 DSH，也不把 Sol 只当顾问。
+DSH 负责实际执行、测试、修复及必要监守；Sol 不代执行，不使用 Luna，不经过 OpenCode CLI。
 除非我明确切换模式，否则本会话后续任务一直沿用 DSH，不因我省略模式而恢复默认。
 只有全新会话从未指定模式时才使用默认 A；指定模式不等于授权所有写入，继续遵守每个任务的授权范围。
-先简短确认当前模式与后端是否可用。第一个任务：先只读分析当前项目结构。
+先简短确认当前模式与协调者。第一个任务：先只读分析当前项目结构。
 ```
 
 之后可以直接说“继续”“修改方案”“分析下一个模块”，无需重复选 DSH。更短的开场也可以是：
 
-> 本会话使用 DSH，除非我明确切换，否则后续一直沿用；先只读分析当前项目。
+> 本会话使用 DSH，由真实 Sol Max 子代理派单；除非我明确切换，否则后续一直沿用。先只读分析当前项目。
 
 | 用户表达 | 当前会话规则 |
 |---|---|
@@ -99,10 +106,10 @@ Astra 负责总体方向；Sol Max 只规划、调度与验收；DSH 负责实�
 | 已选 DSH，但 DSH 报错或不可用 | 报告阻塞，保留选择，不自动回退 A |
 
 全新会话未指定时仍为 A，不自动继承另一会话或另一台电脑的模式。恢复原会话时保留有证据的原选择。
-详细规则与手工验收场景见 [docs/session-modes.md](docs/session-modes.md)。
+详细规则、旧任务交接与手工验收场景见 [docs/session-modes.md](docs/session-modes.md)。
 
 规则安装到有效的全局 AGENTS 文件，Skill 安装到 `~/.agents/skills/multi-agent-dispatch`。若存在非空 `AGENTS.override.md`，合并到这个实际生效的文件，不另写一份被忽略的 AGENTS。
-文件只是持久行为规则，不会凭空增加模型权限或强制宿主实现不存在的子代理能力；项目级规则和当前指令仍可能影响行为，需新会话验收。
+文件只是持久行为规则，不会凭空增加模型权限或强制宿主实现不存在的子代理能力；项目级规则和当前指令仍可能影响行为，需实际调用验收。
 
 ## 电脑 B：当前只部署 DSH
 
@@ -115,22 +122,25 @@ Astra 负责总体方向；Sol Max 只规划、调度与验收；DSH 负责实�
 
 ## 更新、回滚与测试
 
-### 仅同步规则和 Skill（适用于本次会话模式修订）
+### 仅同步规则和 Skill（适用于本次调用链修订）
 
 在需要更新的每台电脑执行：
 
 ```powershell
-Set-Location "$env:USERPROFILE\ai_rule"
+Set-Location "$env:USERPROFILE\ai_rule" -ErrorAction Stop
 git pull --ff-only
-# 如果 pull 报错或本地有冲突，停止，不要 reset --hard 或覆盖本地修改。
+if ($LASTEXITCODE -ne 0) { throw "Git 同步失败，停止安装；不要强制覆盖本地修改。" }
 node .\scripts\manage.mjs
+if ($LASTEXITCODE -ne 0) { throw "预览失败，停止安装。" }
 # 预览应只有 AGENTS 和 Skill；确认后再执行。
 node .\scripts\manage.mjs --apply
+if ($LASTEXITCODE -ne 0) { throw "规则安装失败。" }
 node .\scripts\manage.mjs --verify
 ```
 
-不带 `--enable-dsh` 或 `--workbuddy-bridge` 时，仅更新规则和 Skill；不删除已有 DSH MCP，不重写 config.toml，也不改变已有 AllowWrite 设置、凭据或 DSH Profile。安装器仍显示 v0.1.0 是正常的，本次只修订规则。
-完成后重启 Codex 并打开新会话，让新规则加载。已在进行的会话可以直接发送上面的会话模式声明；不要假定远端提交会自动更新其上下文。
+不带 `--enable-dsh` 或 `--workbuddy-bridge` 时，仅更新规则和 Skill；不删除已有 DSH MCP，不重写 config.toml，也不改变已有 AllowWrite 设置、凭据或 DSH Profile。安装器仍显示 v0.1.0 是正常的，本次只修订规则。同步前确认远端没有超出本次规则修订的额外代码变更；意外改动 bridges/scripts 时停止并评估活动任务。
+
+**有活动任务时不要立即重启 Codex。** 在旧会话明确要求 Astra 与 Sol 分别读取更新后的有效 AGENTS 和 Skill；保留原 MCP 生命周期，按 Skill 交接现有任务，不重复提交。没有活动任务后，再重启或新建会话检查启动加载。远端提交和本地安装都不会自动重写已有会话上下文。
 
 ### 同时更新 MCP 注册配置
 
@@ -145,4 +155,4 @@ npm test
 安装会输出本机回滚 manifest 路径。用 `.\scripts\install.ps1 -RollbackManifest "该路径"` 回滚。文件在安装后又被修改时，回滚拒绝覆盖，需手工合并。
 备份保存在 Codex home 的 `ai-rule-backups`，可能包含已有配置中的秘密，仅保留本机，禁止上传。
 
-测试、权限边界和恢复说明见 [docs/implementation.md](docs/implementation.md)。其中 2026-11-09 的开发验收记录是当时状态，不应与后续用户反馈混为一谈。
+测试、权限边界和恢复说明见 [docs/implementation.md](docs/implementation.md)。其中 2026-11-09 的开发验收记录是当时状态，不应与后续用户反馈混为一谈。本次仅审查规则与文档差异，不把之前的 mock 测试或用户旧回执当作新调用链已通过的证明。
