@@ -124,3 +124,7 @@ completed 要求 DSH 进程退出 0 且 final.reason.kind 为 completed；它只
 本次是指令层修正，没有修改 MCP 桥接器、工具权限、认证或安装器，没有新增程序级调用者强制认证或主动完成通知。实际链路和等待效果需要宿主记录验证；无法取得证据就保留未核实状态。
 有活动任务时只同步规则并显式读取，不为加载规则强行重启宿主。任务安全结束后再重启或新建会话作完整验收。
 请求继续旧工作时，读取已有交接文件。对文件变更、安装与推送继续遵守用户授权。
+
+## 可选谷时规则（需本机明确启用）
+
+由真实 Sol 协调 DSH 时，沿用桥接器 `get_dsh_bridge_status` 返回的 schedule 状态；需要精确边界时用 `get_dsh_schedule_status`，不要把它变成高频轮询。如果 `accept_new_tasks=false`、预算越过峰时或返回 `schedule_stopped`，不要重复派发、不要自动改用 Sol/WorkBuddy/Luna。保留执行回执和 Session ID，先核验项目的部分变更与数据一致性；用户批准后在谷时继续。截止前的 checkpoint 是提前写入任务提示的建议，并不代表进程被强制结束时保证安全保存。详见 `docs/offpeak-schedule.md`。
