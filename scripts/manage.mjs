@@ -19,7 +19,7 @@ const repo = path.resolve(path.dirname(fileURLToPath(import.meta.url)), '..');
 const read = file => fs.existsSync(file) ? fs.readFileSync(file, 'utf8').replace(/^\uFEFF/, '') : '';
 const hash = data => crypto.createHash('sha256').update(data).digest('hex');
 function option(args, name) { const i = args.indexOf(name); if (i < 0) return undefined; if (!args[i + 1] || args[i + 1].startsWith('--')) throw Error(`Missing value for ${name}`); return args[i + 1]; }
-export function buildPlan({ home = os.homedir(), codexHome = process.env.CODEX_HOME || path.join(home, '.codex'), enableDsh = false, dshEntry, allowWrite = false, workbuddyBridge } = {}) {
+export function buildPlan({ home = os.homedir(), codexHome = process.env.CODEX_HOME || path.join(home, '.codex'), enableDsh = false, dshEntry, allowWrite = false, workbuddyBridge, offpeakSchedule = false, disableOffpeakSchedule = false } = {}) {
   codexHome = path.resolve(codexHome);
   const override = path.join(codexHome, 'AGENTS.override.md');
   const agentsPath = read(override).trim() ? override : path.join(codexHome, 'AGENTS.md');
@@ -33,10 +33,14 @@ export function buildPlan({ home = os.homedir(), codexHome = process.env.CODEX_H
   const configFile = path.join(codexHome, 'config.toml');
   const original = read(configFile);
   const parts = [];
+  if (offpeakSchedule && disableOffpeakSchedule) throw Error('Cannot enable and disable offpeak simultaneously.');
+  if ((offpeakSchedule || disableOffpeakSchedule) && !enableDsh) throw Error('Schedule options require --enable-dsh.');
+  const previousManaged = original.match(/# BEGIN isheach\/ai_rule managed[\s\S]*?# END isheach\/ai_rule managed/)?.[0] || '';
+  const useSchedule = !disableOffpeakSchedule && (offpeakSchedule || previousManaged.includes('--schedule-config'));
   if (enableDsh) {
     const cli = discoverDsh(dshEntry);
     modelCheck = preflight(cli);
-    const args = [path.join(repo, 'bridges', 'dsh', 'server.mjs'), ...(cli.prefix.length ? ['--dsh-entry', cli.prefix[0]] : []), ...(allowWrite ? ['--allow-write'] : [])];
+    const args = [path.join(repo, 'bridges', 'dsh', 'server.mjs'), ...(cli.prefix.length ? ['--dsh-entry', cli.prefix[0]] : []), ...(allowWrite ? ['--allow-write'] : []), ...(useSchedule ? ['--schedule-config', path.join(repo, 'config', 'offpeak.schedule.json')] : [])];
     parts.push('[mcp_servers.dsh-opencode-go]', `command = ${JSON.stringify(process.execPath)}`, `args = ${JSON.stringify(args)}`, `cwd = ${JSON.stringify(repo)}`, 'startup_timeout_sec = 30', 'tool_timeout_sec = 3700', 'enabled = true', '');
   } else if (allowWrite) throw Error('--allow-write requires --enable-dsh.');
   if (workbuddyBridge) {
@@ -116,6 +120,7 @@ export function main(args) {
     const config = read(path.join(codexHome, 'config.toml'));
     const checks = { effective_agents_has_rules: read(agents).includes('BEGIN isheach/ai_rule managed'), skill_installed: read(skill).includes('ai-rule-managed'),
       dsh_mcp_registered: /\[mcp_servers\.dsh-opencode-go\]/.test(config),
+      dsh_offpeak_schedule_registered: /--schedule-config/.test(config),
       workbuddy_hy4_registered: /\[mcp_servers\.hy4-workbuddy\]/.test(config),
       workbuddy_deepseek_registered: /\[mcp_servers\.deepseek-v4-flash-workbuddy\]/.test(config),
       live_model_call_performed: false };
@@ -123,7 +128,7 @@ export function main(args) {
     if (!checks.effective_agents_has_rules || !checks.skill_installed) process.exitCode = 1;
     return;
   }
-  const result = buildPlan({ home, codexHome, enableDsh: args.includes('--enable-dsh'), dshEntry: option(args, '--dsh-entry'), allowWrite: args.includes('--allow-write'), workbuddyBridge: option(args, '--workbuddy-bridge') });
+  const result = buildPlan({ home, codexHome, enableDsh: args.includes('--enable-dsh'), dshEntry: option(args, '--dsh-entry'), allowWrite: args.includes('--allow-write'), workbuddyBridge: option(args, '--workbuddy-bridge'), offpeakSchedule: args.includes('--offpeak-schedule'), disableOffpeakSchedule: args.includes('--disable-offpeak-schedule') });
   console.log(`ai_rule ${VERSION}: ${args.includes('--apply') ? 'APPLY' : 'PLAN ONLY'}`);
   for (const change of result.plan) console.log(`${read(change.file) === change.data ? 'UNCHANGED' : 'MERGE/INSTALL'} ${change.file}`);
   if (result.usesOverride) console.log('Existing nonempty AGENTS.override.md is the effective global file; it will receive the managed block.');
