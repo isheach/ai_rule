@@ -175,3 +175,14 @@ npm test
 备份保存在 Codex home 的 `ai-rule-backups`，可能包含已有配置中的秘密，仅保留本机，禁止上传。
 
 测试、权限边界和恢复说明见 [docs/implementation.md](docs/implementation.md)。其中 2026-11-09 的开发验收记录是当时状态，不应与后续用户反馈混为一谈。r3 仅核对接口/规则和文档差异，未运行新的付费模型测试；真实等待行为及 Token 节省仍须本机记录验证。
+
+## DSH 峰谷时段控制（可选，默认关闭）
+
+工作日中国/新加坡时间 **09:00–12:00、14:00–18:00** 为 Go DeepSeek 峰时，周末谷时。需在无 DSH 活动任务时显式启用：
+
+```powershell
+node .\scripts\manage.mjs --enable-dsh --offpeak-schedule
+node .\scripts\manage.mjs --apply --enable-dsh --offpeak-schedule
+```
+
+如果此前 DSH 已启用写入，须在安装命令中另外保留 `--allow-write`；**时段控制本身不授权写入**。重启 Codex 后用 `get_dsh_schedule_status` 检查 `enabled=true`。提前 10 分钟停派新任务；若遇峰时，当前桥接器拥有的 DSH 本地进程尽力停工；默认**不自动恢复**，强制停止存在未保存进度风险。参见 [详细说明](docs/offpeak-schedule.md)。
