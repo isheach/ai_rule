@@ -1,0 +1,13 @@
+{
+  "enabled": true,
+  "timezone": "Asia/Shanghai",
+  "weekdayPeakWindows": [
+    "09:00-12:00",
+    "14:00-18:00"
+  ],
+  "stopNewTasksBeforePeakMinutes": 10,
+  "checkpointNoticeMinutes": 5,
+  "rejectTaskIfBudgetExceedsWindow": true,
+  "hardStopAtPeak": true,
+  "resumeAutomatically": false
+}
