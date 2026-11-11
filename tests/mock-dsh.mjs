@@ -8,7 +8,7 @@ if (args.includes('--dump-config')) {
 const prompt = fs.readFileSync(0, 'utf8');
 const emit = value => console.log(JSON.stringify(value));
 emit({ type: 'session', sessionId: 'session-mock', cwd: process.cwd() });
-if (prompt === 'hang') { setInterval(() => {}, 1000); }
+if (prompt === 'hang' || prompt.endsWith('\n\nhang')) { setInterval(() => {}, 1000); }
 else if (prompt === 'nofinal') { process.exit(0); }
 else {
   emit({ type: 'thinking', text: 'MOCK-REASONING-MUST-NOT-BE-LOGGED' });
