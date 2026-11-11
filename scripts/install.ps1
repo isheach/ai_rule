@@ -2,6 +2,8 @@
 param(
     [switch]$Apply,
     [switch]$EnableDsh,
+    [switch]$OffpeakSchedule,
+    [switch]$DisableOffpeakSchedule,
     [switch]$AllowWrite,
     [switch]$Verify,
     [string]$DshEntry,
@@ -14,6 +16,8 @@ $node = (Get-Command node -ErrorAction Stop).Source
 $nodeArgs = @((Join-Path $PSScriptRoot 'manage.mjs'))
 if ($Apply) { $nodeArgs += '--apply' }
 if ($EnableDsh) { $nodeArgs += '--enable-dsh' }
+if ($OffpeakSchedule) { $nodeArgs += '--offpeak-schedule' }
+if ($DisableOffpeakSchedule) { $nodeArgs += '--disable-offpeak-schedule' }
 if ($AllowWrite) { $nodeArgs += '--allow-write' }
 if ($Verify) { $nodeArgs += '--verify' }
 if ($DshEntry) { $nodeArgs += @('--dsh-entry', $DshEntry) }
