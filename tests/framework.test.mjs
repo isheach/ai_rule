@@ -109,7 +109,7 @@ test('stdio MCP initialize, list, call and asynchronous wait', async () => {
   try {
     const init = await rpc('initialize', { protocolVersion: '2025-06-18', capabilities: {}, clientInfo: { name: 'test', version: '1' } });
     assert.equal(init.result.serverInfo.name, 'dsh-opencode-go');
-    const list = await rpc('tools/list'); assert.equal(list.result.tools.length, 6);
+    const list = await rpc('tools/list'); assert.equal(list.result.tools.length, 7);
     const start = await rpc('tools/call', { name: 'start_dsh_task', arguments: task(cwd) });
     const id = JSON.parse(start.result.content[0].text).task_id;
     const wait = await rpc('tools/call', { name: 'wait_dsh_task', arguments: { taskId: id, waitMs: 5000 } });
