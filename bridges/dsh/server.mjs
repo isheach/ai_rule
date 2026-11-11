@@ -1,10 +1,11 @@
 #!/usr/bin/env node
 // Minimal, dependency-free stdio MCP server. No HTTP listener and no shell command strings.
 import { TaskManager, discoverDsh, redact, VERSION } from './core.mjs';
+import { loadSchedule } from './schedule.mjs';
 
 const argv = process.argv.slice(2);
 function option(name) { const i = argv.indexOf(name); if (i < 0) return undefined; if (!argv[i + 1] || argv[i + 1].startsWith('--')) throw Error(`Missing value for ${name}`); return argv[i + 1]; }
-const manager = new TaskManager({ cli: discoverDsh(option('--dsh-entry')), runtime: option('--runtime'), allowWrite: argv.includes('--allow-write') });
+const manager = new TaskManager({ cli: discoverDsh(option('--dsh-entry')), runtime: option('--runtime'), allowWrite: argv.includes('--allow-write'), schedule: loadSchedule(option('--schedule-config')) });
 const taskSchema = {
   type: 'object', additionalProperties: false, required: ['prompt', 'cwd', 'idempotencyKey'], properties: {
     prompt: { type: 'string', minLength: 1, maxLength: 60000 }, cwd: { type: 'string' },
@@ -17,9 +18,10 @@ const taskSchema = {
 };
 const idSchema = { type: 'object', additionalProperties: false, required: ['taskId'], properties: { taskId: { type: 'string' } } };
 const tools = [
+  { name: 'get_dsh_schedule_status', description: 'Local schedule phase, admission gate, next hard stop and offpeak time. No model call.', inputSchema: { type: 'object', additionalProperties: false, properties: {} }, annotations: { readOnlyHint: true } },
   { name: 'get_dsh_bridge_status', description: 'Local bridge readiness and active task. Does not call a model or reveal credentials.', inputSchema: { type: 'object', additionalProperties: false, properties: {} }, annotations: { readOnlyHint: true } },
   { name: 'start_dsh_task', description: 'Start the native DSH headless agent through the configured OpenCode Go route. Returns task ID. Sol Max delegates execution; DSH owns tool work and self-monitoring. Does not start OpenCode CLI.', inputSchema: taskSchema, annotations: { readOnlyHint: false, openWorldHint: true } },
-  { name: 'run_dsh_task', description: 'Run DSH and wait for its final receipt. For long work prefer start_dsh_task plus wait_dsh_task. No fallback to other providers.', inputSchema: taskSchema, annotations: { readOnlyHint: false, openWorldHint: true } },
+  { name: 'run_dsh_task', description: 'Run one bounded DSH task and wait internally until its final receipt. Prefer for no-intervention tasks when host MCP timeout safely covers the budget; otherwise use start+wait. Peak schedule may block or stop work. No model fallback.', inputSchema: taskSchema, annotations: { readOnlyHint: false, openWorldHint: true } },
   { name: 'get_dsh_task', description: 'Read a task receipt. completed means agent-loop completion, NOT independent acceptance of the project result.', inputSchema: idSchema, annotations: { readOnlyHint: true } },
   { name: 'wait_dsh_task', description: 'Event-driven wait, up to 60 seconds, without model polling or duplicate execution. Repeat only after timeout, or use the host native wait when available.', inputSchema: { ...idSchema, properties: { ...idSchema.properties, waitMs: { type: 'integer', minimum: 0, maximum: 60000, default: 25000 } } }, annotations: { readOnlyHint: true } },
   { name: 'cancel_dsh_task', description: 'Cancel only a task owned by this bridge process. Attempts to terminate its process tree; inspect the receipt afterwards.', inputSchema: idSchema, annotations: { readOnlyHint: false, destructiveHint: true } }
@@ -35,6 +37,7 @@ async function call(name, args, requestId) {
   for (const key of Object.keys(args)) if (!(key in schema.properties)) throw Error(`Unknown argument: ${key}`);
   for (const key of schema.required || []) if (!(key in args)) throw Error(`Missing argument: ${key}`);
   if (name === 'get_dsh_bridge_status') return manager.status();
+  if (name === 'get_dsh_schedule_status') return manager.scheduleStatus();
   if (name === 'get_dsh_task') return manager.get(args.taskId);
   if (name === 'wait_dsh_task') return manager.wait(args.taskId, args.waitMs ?? 25000);
   if (name === 'cancel_dsh_task') return manager.cancel(args.taskId);
@@ -67,7 +70,7 @@ async function dispatch(message) {
   if (method !== 'tools/call') return error(id, -32601, 'Method not supported.');
   try {
     const result = await call(params.name, params.arguments ?? {}, id);
-    send({ jsonrpc: '2.0', id, result: { content: [{ type: 'text', text: JSON.stringify(result) }], isError: ['failed', 'timed_out', 'cancelled'].includes(result.status) } });
+    send({ jsonrpc: '2.0', id, result: { content: [{ type: 'text', text: JSON.stringify(result) }], isError: ['failed', 'timed_out', 'cancelled', 'schedule_stopped'].includes(result.status) } });
   } catch (e) {
     send({ jsonrpc: '2.0', id, result: { isError: true, content: [{ type: 'text', text: redact(e.message) }] } });
   }
