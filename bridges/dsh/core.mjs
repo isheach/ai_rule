@@ -3,9 +3,10 @@ import path from 'node:path';
 import os from 'node:os';
 import crypto from 'node:crypto';
 import { spawn, spawnSync } from 'node:child_process';
+import { scheduleSnapshot, scheduleTaskPreamble } from './schedule.mjs';
 
 export const ROUTE = Object.freeze({ provider: 'opencode-go', model: 'deepseek-v4.1-flash', reasoningEffort: 'max' });
-export const VERSION = '0.1.0';
+export const VERSION = '0.2.0';
 const MAX_OUTPUT = 2 * 1024 * 1024;
 const now = () => new Date().toISOString();
 const digest = value => crypto.createHash('sha256').update(value).digest('hex');
@@ -112,18 +113,22 @@ function killTree(child) {
 }
 
 export class TaskManager {
-  constructor({ cli, runtime = runtimeDefault(), allowWrite = false, check = preflight } = {}) {
+  constructor({ cli, runtime = runtimeDefault(), allowWrite = false, check = preflight, schedule = null, clock = () => new Date(), scheduleTickMs = 15000 } = {}) {
     this.cli = cli;
     this.runtime = path.resolve(runtime);
     this.allowWrite = allowWrite;
     this.check = check;
+    this.schedule = schedule;
+    this.clock = clock;
+    this.scheduleTickMs = scheduleTickMs;
     this.active = null;
     this.pending = new Map();
     fs.mkdirSync(this.runtime, { recursive: true, mode: 0o700 });
     fs.mkdirSync(path.join(this.runtime, 'requests'), { recursive: true, mode: 0o700 });
   }
+  scheduleStatus() { return scheduleSnapshot(this.schedule, this.clock()); }
   status() {
-    return { bridge_version: VERSION, backend: 'dsh', profile: 'headless', expected_route: ROUTE, active_task_id: this.active?.record.task_id || null,
+    return { schedule: this.scheduleStatus(), bridge_version: VERSION, backend: 'dsh', profile: 'headless', expected_route: ROUTE, active_task_id: this.active?.record.task_id || null,
       allow_workspace_write: this.allowWrite, max_concurrency: 1, runtime: this.runtime,
       transport: 'stdio', starts_opencode_cli: false, os_sandbox_attested: false,
       lock_present: fs.existsSync(path.join(this.runtime, 'active.lock')), credential_contents_read_by_bridge: false };
@@ -150,6 +155,9 @@ export class TaskManager {
       return this.get(old.task_id);
     }
     if (this.active) throw Error(`DSH is busy with ${this.active.record.task_id}; wait rather than start a duplicate.`);
+    const window = this.scheduleStatus();
+    if (!window.accept_new_tasks) throw Error(`DSH offpeak schedule blocks new tasks (${window.phase}); next offpeak at ${window.next_offpeak_at || 'see schedule status'}.`);
+    if (window.enabled && window.reject_if_budget_exceeds_window && this.clock().getTime() + task.timeoutMs + 60000 >= Date.parse(window.hard_stop_at)) throw Error('Task timeout budget exceeds the remaining offpeak window (plus 60s margin). Shorten the budget or use the next offpeak window.');
     const lock = path.join(this.runtime, 'active.lock');
     let fd;
     try { fd = fs.openSync(lock, 'wx', 0o600); } catch { throw Error(`Exclusive lock exists: ${lock}. Do not delete it until the owner and child processes have been checked.`); }
@@ -162,6 +170,7 @@ export class TaskManager {
       const dir = path.join(this.runtime, id);
       fs.mkdirSync(dir, { mode: 0o700 });
       record = { task_id: id, backend: 'dsh', ...verified, requested_route: ROUTE, actual_route: null,
+        schedule_at_start: window.enabled ? { hard_stop_at: window.hard_stop_at, stop_new_at: window.stop_new_at, timezone: window.timezone, resume_automatically: false } : null,
         session_id: task.sessionId || null, cwd: task.cwd, permission_mode: task.permissionMode, approval_policy: 'never',
         user_authorization_note: redact(task.authorizationNote || ''), prompt_sha256: digest(task.prompt), status: 'starting', started_at: now(),
         finished_at: null, pid: null, exit_code: null, timed_out: false, native_tool_calls: 0, final_reason: null,
@@ -170,7 +179,7 @@ export class TaskManager {
       fs.writeFileSync(requestFile, JSON.stringify({ task_id: id, fingerprint }), { flag: 'wx', mode: 0o600 });
       let finishPromise;
       const finished = new Promise(resolve => { finishPromise = resolve; });
-      const active = { record, child: null, stopReason: null, finished, finishPromise };
+      const active = { record, child: null, stopReason: null, finished, finishPromise, scheduleTimer: null };
       this.active = active;
       this.pending.set(id, finished);
       const child = spawn(this.cli.command, [...this.cli.prefix, ...dshArgs(task)], {
@@ -180,6 +189,14 @@ export class TaskManager {
       record.pid = child.pid || null;
       record.status = 'running';
       writeJSON(record.receipt_path, record);
+      const scheduleTick = () => {
+        if (this.active?.record.task_id !== id) return;
+        const current = this.scheduleStatus();
+        if (current.phase === 'peak') { this.cancel(id, 'scheduled_peak'); return; }
+        const until = Date.parse(current.hard_stop_at) - this.clock().getTime();
+        active.scheduleTimer = setTimeout(scheduleTick, Math.max(5, Math.min(this.scheduleTickMs, until)));
+      };
+      if (this.schedule) scheduleTick();
       let stdout = '', stderr = '', total = 0, sawFinal = false;
       const persist = () => writeJSON(record.receipt_path, record);
       const diagnostic = line => { record.diagnostics.push(redact(line).slice(0, 1000)); record.diagnostics = record.diagnostics.slice(-12); };
@@ -187,6 +204,7 @@ export class TaskManager {
         if (!line.trim()) return;
         let event;
         try { event = JSON.parse(line); } catch { diagnostic('Non-JSON stdout from DSH; content not retained.'); return; }
+        if (!event || typeof event !== 'object' || Array.isArray(event)) { diagnostic('Invalid DSH JSON event; cancelling.'); this.cancel(id, 'invalid_dsh_event'); return; }
         if (event.type === 'thinking') return;
         if (event.type === 'session' && typeof event.sessionId === 'string') record.session_id = event.sessionId.slice(0, 160);
         if (event.type === 'tool_call') record.native_tool_calls++;
@@ -218,13 +236,15 @@ export class TaskManager {
       const timer = setTimeout(() => this.cancel(id, 'timeout'), task.timeoutMs);
       child.on('close', (code, signal) => {
         clearTimeout(timer);
+        if (active.scheduleTimer) clearTimeout(active.scheduleTimer);
         if (stdout.trim() && total <= MAX_OUTPUT) onLine(stdout);
         for (const line of stderr.split(/\r?\n/).filter(x => /^dsh:|error|failed|missing/i.test(x))) diagnostic(line);
         record.exit_code = code;
         record.signal = signal;
         record.finished_at = now();
         record.timed_out = active.stopReason === 'timeout';
-        record.status = active.stopReason ? (active.stopReason === 'timeout' ? 'timed_out' : 'cancelled')
+        record.stop_reason = active.stopReason || null;
+        record.status = active.stopReason ? (active.stopReason === 'timeout' ? 'timed_out' : active.stopReason === 'scheduled_peak' ? 'schedule_stopped' : active.stopReason === 'invalid_dsh_event' ? 'failed' : 'cancelled')
           : code === 0 && sawFinal && record.final_reason === 'completed' ? 'completed' : 'failed';
         if (!sawFinal) diagnostic('No terminal JSON final event; success is not asserted.');
         persist();
@@ -233,7 +253,7 @@ export class TaskManager {
         active.finishPromise(record);
         this.pending.delete(id);
       });
-      child.stdin.end(task.prompt);
+      child.stdin.end(scheduleTaskPreamble(window) + task.prompt);
       return { ...record };
     } catch (error) {
       if (fd !== undefined) fs.closeSync(fd);
