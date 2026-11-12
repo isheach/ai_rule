@@ -35,6 +35,8 @@ node .\scripts\manage.mjs --apply --enable-dsh --disable-offpeak-schedule
 
 如果此前启用了写入，同样需要附加 `--allow-write` 以保留此权限。
 
+多实例安装（`--dsh-instance`）时，每个命名实例都继承本次的 `--schedule-config`；安装器不提供“只给新实例关闭日程”的选项，不能用新实例绕过峰谷门禁。若原默认实例已启用日程而本次没显式关闭，新增实例会继续带日程。实例各自的硬停工只终止该实例拥有的子进程，不跨实例杀进程。完整多实例流程见 [multisession.md](multisession.md)。
+
 注册完成后，**在没有正在运行的任务时**重新启动 Codex，让新的 MCP 进程加载设置。
 在 Codex 里由真实 Sol Max 子代理调用 `get_dsh_schedule_status` 验证 `enabled=true`，
 并查看 `phase`、`accept_new_tasks` 和 `hard_stop_at`。不要通过重复轮询消耗模型额度。

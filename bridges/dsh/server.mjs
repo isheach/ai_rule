@@ -1,30 +1,41 @@
 #!/usr/bin/env node
 // Minimal, dependency-free stdio MCP server. No HTTP listener and no shell command strings.
-import { TaskManager, discoverDsh, redact, VERSION } from './core.mjs';
+import { TaskManager, discoverDsh, redact, VERSION, normalizeInstanceName, serverNameForInstance } from './core.mjs';
 import { loadSchedule } from './schedule.mjs';
 
 const argv = process.argv.slice(2);
 function option(name) { const i = argv.indexOf(name); if (i < 0) return undefined; if (!argv[i + 1] || argv[i + 1].startsWith('--')) throw Error(`Missing value for ${name}`); return argv[i + 1]; }
-const manager = new TaskManager({ cli: discoverDsh(option('--dsh-entry')), runtime: option('--runtime'), allowWrite: argv.includes('--allow-write'), schedule: loadSchedule(option('--schedule-config')) });
+let instance;
+let manager;
+try {
+  instance = normalizeInstanceName(option('--instance'));
+  manager = new TaskManager({ cli: discoverDsh(option('--dsh-entry')), runtime: option('--runtime'), instance,
+    allowWrite: argv.includes('--allow-write'), schedule: loadSchedule(option('--schedule-config')) });
+} catch (error) {
+  console.error(`DSH bridge startup failed: ${redact(error.message)}`);
+  process.exit(1);
+}
+const serverName = serverNameForInstance(instance);
+const scoped = `Bridge instance "${instance}" (${serverName}).`;
 const taskSchema = {
   type: 'object', additionalProperties: false, required: ['prompt', 'cwd', 'idempotencyKey'], properties: {
     prompt: { type: 'string', minLength: 1, maxLength: 60000 }, cwd: { type: 'string' },
-    idempotencyKey: { type: 'string', description: 'Stable unique key for this task revision. Reuse only for retrying the SAME submission.' },
+    idempotencyKey: { type: 'string', description: `Stable unique key for this task revision in ${scoped} Reuse only for retrying the SAME submission.` },
     timeoutMs: { type: 'integer', minimum: 1000, maximum: 3600000, default: 900000 },
     permissionMode: { type: 'string', enum: ['read-only', 'workspace-write'], default: 'read-only' },
     authorizationNote: { type: 'string', description: 'Reference to the user approval; cannot substitute for actual approval.' },
-    sessionId: { type: 'string', description: 'Resume an existing DSH session from the SAME cwd; never use an invented ID.' }
+    sessionId: { type: 'string', description: `Resume a DSH session recorded by ${scoped} from the SAME cwd; never use an invented or foreign ID.` }
   }
 };
-const idSchema = { type: 'object', additionalProperties: false, required: ['taskId'], properties: { taskId: { type: 'string' } } };
+const idSchema = { type: 'object', additionalProperties: false, required: ['taskId'], properties: { taskId: { type: 'string', description: `Task ID scoped to ${scoped}` } } };
 const tools = [
-  { name: 'get_dsh_schedule_status', description: 'Local schedule phase, admission gate, next hard stop and offpeak time. No model call.', inputSchema: { type: 'object', additionalProperties: false, properties: {} }, annotations: { readOnlyHint: true } },
-  { name: 'get_dsh_bridge_status', description: 'Local bridge readiness and active task. Does not call a model or reveal credentials.', inputSchema: { type: 'object', additionalProperties: false, properties: {} }, annotations: { readOnlyHint: true } },
-  { name: 'start_dsh_task', description: 'Start the native DSH headless agent through the configured OpenCode Go route. Returns task ID. Sol Max delegates execution; DSH owns tool work and self-monitoring. Does not start OpenCode CLI.', inputSchema: taskSchema, annotations: { readOnlyHint: false, openWorldHint: true } },
-  { name: 'run_dsh_task', description: 'Run one bounded DSH task and wait internally until its final receipt. Prefer for no-intervention tasks when host MCP timeout safely covers the budget; otherwise use start+wait. Peak schedule may block or stop work. No model fallback.', inputSchema: taskSchema, annotations: { readOnlyHint: false, openWorldHint: true } },
-  { name: 'get_dsh_task', description: 'Read a task receipt. completed means agent-loop completion, NOT independent acceptance of the project result.', inputSchema: idSchema, annotations: { readOnlyHint: true } },
-  { name: 'wait_dsh_task', description: 'Event-driven wait, up to 60 seconds, without model polling or duplicate execution. Repeat only after timeout, or use the host native wait when available.', inputSchema: { ...idSchema, properties: { ...idSchema.properties, waitMs: { type: 'integer', minimum: 0, maximum: 60000, default: 25000 } } }, annotations: { readOnlyHint: true } },
-  { name: 'cancel_dsh_task', description: 'Cancel only a task owned by this bridge process. Attempts to terminate its process tree; inspect the receipt afterwards.', inputSchema: idSchema, annotations: { readOnlyHint: false, destructiveHint: true } }
+  { name: 'get_dsh_schedule_status', description: `Local schedule phase, admission gate, next hard stop and offpeak time for ${scoped} No model call.`, inputSchema: { type: 'object', additionalProperties: false, properties: {} }, annotations: { readOnlyHint: true } },
+  { name: 'get_dsh_bridge_status', description: `Local readiness, instance identity and active task for ${scoped} Does not call a model or reveal credentials.`, inputSchema: { type: 'object', additionalProperties: false, properties: {} }, annotations: { readOnlyHint: true } },
+  { name: 'start_dsh_task', description: `Start the native DSH headless agent through the configured OpenCode Go route in ${scoped} Returns task ID. Sol Max delegates execution; DSH owns tool work and self-monitoring. Does not start OpenCode CLI.`, inputSchema: taskSchema, annotations: { readOnlyHint: false, openWorldHint: true } },
+  { name: 'run_dsh_task', description: `Run one bounded DSH task in ${scoped} and wait internally until its final receipt. Prefer for no-intervention tasks when host MCP timeout safely covers the budget; otherwise use start+wait. Peak schedule may block or stop work. No model fallback.`, inputSchema: taskSchema, annotations: { readOnlyHint: false, openWorldHint: true } },
+  { name: 'get_dsh_task', description: `Read a task receipt from ${scoped} completed means agent-loop completion, NOT independent acceptance of the project result.`, inputSchema: idSchema, annotations: { readOnlyHint: true } },
+  { name: 'wait_dsh_task', description: `Event-driven wait for ${scoped} up to 60 seconds, without model polling or duplicate execution. Repeat only after timeout, or use the host native wait when available.`, inputSchema: { ...idSchema, properties: { ...idSchema.properties, waitMs: { type: 'integer', minimum: 0, maximum: 60000, default: 25000 } } }, annotations: { readOnlyHint: true } },
+  { name: 'cancel_dsh_task', description: `Cancel only a task owned by this ${scoped} process. Attempts to terminate its process tree; inspect the receipt afterwards.`, inputSchema: idSchema, annotations: { readOnlyHint: false, destructiveHint: true } }
 ];
 let initialized = false, input = '', shuttingDown = false;
 const inFlight = new Map();
@@ -62,7 +73,7 @@ async function dispatch(message) {
   if (method === 'initialize') {
     const supported = ['2024-11-05', '2025-03-26', '2025-06-18'];
     initialized = true;
-    return send({ jsonrpc: '2.0', id, result: { protocolVersion: supported.includes(params.protocolVersion) ? params.protocolVersion : '2025-06-18', capabilities: { tools: {} }, serverInfo: { name: 'dsh-opencode-go', version: VERSION } } });
+    return send({ jsonrpc: '2.0', id, result: { protocolVersion: supported.includes(params.protocolVersion) ? params.protocolVersion : '2025-06-18', capabilities: { tools: {} }, serverInfo: { name: serverName, version: VERSION, instance } } });
   }
   if (method === 'ping') return send({ jsonrpc: '2.0', id, result: {} });
   if (!initialized) return error(id, -32002, 'Initialize the MCP connection first.');

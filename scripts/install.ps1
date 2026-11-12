@@ -7,6 +7,8 @@ param(
     [switch]$AllowWrite,
     [switch]$Verify,
     [string]$DshEntry,
+    [string[]]$DshInstance,
+    [string[]]$RemoveDshInstance,
     [string]$WorkBuddyBridge,
     [string]$CodexHome,
     [string]$RollbackManifest
@@ -21,6 +23,8 @@ if ($DisableOffpeakSchedule) { $nodeArgs += '--disable-offpeak-schedule' }
 if ($AllowWrite) { $nodeArgs += '--allow-write' }
 if ($Verify) { $nodeArgs += '--verify' }
 if ($DshEntry) { $nodeArgs += @('--dsh-entry', $DshEntry) }
+if ($DshInstance) { foreach ($name in $DshInstance) { $nodeArgs += @('--dsh-instance', $name) } }
+if ($RemoveDshInstance) { foreach ($name in $RemoveDshInstance) { $nodeArgs += @('--remove-dsh-instance', $name) } }
 if ($WorkBuddyBridge) { $nodeArgs += @('--workbuddy-bridge', $WorkBuddyBridge) }
 if ($CodexHome) { $nodeArgs += @('--codex-home', $CodexHome) }
 if ($RollbackManifest) { $nodeArgs += @('--rollback', $RollbackManifest) }

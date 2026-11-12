@@ -1,6 +1,6 @@
 # isheach/ai_rule — 多代理长期规则
 
-规则修订：2026-11-10.low-overhead-wait-r3。桥接器/安装器版本仍为 v0.1.0。
+规则修订：2026-11-12.dsh-multisession-r1。桥接器/安装器版本 v0.3.0。
 本文件是用户确认的长期偏好，不是绕过宿主安全策略的授权。遵守当前会话明确要求及更高优先级指令。
 安装后在新会话加载；GitHub 上的文件本身不会远程注入其他电脑。
 
@@ -64,7 +64,7 @@ Astra 用宿主真实提供的内置 wait 等待 Sol 的原生 agent ID；Sol �
 
 - DSH 新任务有明确时间上限、不需中途介入，且实际宿主单次 MCP 超时足以覆盖任务预算与启动/收尾余量时，Sol **优先 `run_dsh_task`**，桥接器内部等待终态后返回。不能仅因任务预计持续数分钟就一律改为 start + 周期 wait。
 - 需要提前取得 task_id、途中观察/取消，或宿主阻塞超时不足/尚不明确时，才使用 `start_dsh_task` + `wait_dsh_task`。在宿主允许的前提下，显式使用 `waitMs=60000`；若宿主超时更短，按已核实限制留余量并报告一次，不能盲目传更大值。
-- v0.1.0 的 wait 默认仍为 25000 ms、上限仍为 60000 ms；本次只改规则，不扩大工具参数范围。收到正常 running 且没有需决策的变化时，直接续等：不反复重述计划、解释“仍在运行”、分析未完成结果，也不额外 get/status 或发送催问。
+- v0.3.0 的 wait 默认仍为 25000 ms、上限仍为 60000 ms；多实例不扩大工具参数范围。收到正常 running 且没有需决策的变化时，直接续等：不反复重述计划、解释“仍在运行”、分析未完成结果，也不额外 get/status 或发送催问。
 - 除宿主更高优先级的更新要求外，只在完成、失败、超时、明确阻塞、审批请求、实质里程碑或用户询问时汇报。工具调用次数增加、经过一个等待窗口本身不算里程碑。减少重复汇报不等于隐藏错误或忽略用户中断。
 - Astra 保持原生 wait，不同时查询同一 DSH 任务；不新建模型监守者来做状态计时。WorkBuddy 沿用其真实支持的阻塞/等待接口，不套用 DSH 参数。
 - 已启动的任务不为更换等待策略而取消、重启或改用 run 重新提交；保持原 task_id、session、权限和协调者，正常 wait 使用上述策略。调用失败/断连时先核实原任务，不自动重跑。
@@ -77,6 +77,19 @@ Astra 用宿主真实提供的内置 wait 等待 Sol 的原生 agent ID；Sol �
 - DSH：真实 Sol 协调子代理 → MCP `dsh-opencode-go` → DSH headless → `opencode-go / deepseek-v4.1-flash`，配置推理档位 `max`。
 - OpenCode Go 只是模型服务和额度来源，不启动 OpenCode CLI，不叠加 OpenCode Harness。
 - 没有真实工具调用、退出码及结果证据，不得宣称执行成功。配置值、模型自我介绍都不等于服务端型号或账单证明。
+
+## DSH 多实例：同机多聊天各用一个命名实例
+
+同一台电脑可注册多个命名 DSH MCP 服务：默认 `dsh-opencode-go`（实例 `default`，沿用旧 runtime/回执），命名实例 `dsh-opencode-go-<name>`（独立 runtime）。每个聊天在会话中固定选择一个服务，并让真实 Sol 实际调用该服务的工具；选择是宿主可见的 MCP 服务选择，不是提示词自称。
+- 不假定 `CODEX_THREAD_ID` 或其他未验证线程变量会传给 stdio MCP；提示词、配置和手填 caller 字段都不是身份认证。宿主不能区分多个同名工具时，使用其支持的服务器作用域/独立 profile，或报告限制，不能假装已自动逐聊天隔离。
+- 实例名只允许小写 ASCII 与内部连字符，`default` 保留；每个实例必须有自己的 runtime、`instance.json`、锁、回执、幂等域和 `sessions.json`。共享物理路径（含大小写、别名、junction）拒绝启动。
+- 不同实例可并行；同一实例仍单任务互斥。task_id、idempotencyKey 和 session_id 都只在所属实例有效；禁止跨实例 get/wait/cancel，错误域查询必须安全失败。
+- 断连后先只读核实原任务、锁 owner 与进程，不删锁、不重复提交。非所有者只得到 `unknown_after_disconnect`，不能取消别人的子进程。
+- 继续会话必须同实例、同 cwd，并使用该实例回执/索引中的 session_id；新任务由 DSH 生成新 UUID。不得伪造、复制或把旧 runtime 数据搬进命名实例。
+- 每个实例都必须保留有效的 `--schedule-config` 传递（若本机启用）、峰谷准入、预算+安全余量、硬停工和 `resume_automatically=false`。任何新实例都不能用来绕过已启用日程；硬停工只终止该实例自己的子进程。
+- 默认只读；workspace-write 仍需本机显式启用和本次任务授权。实例隔离不等于 DSH 凭据/账户/额度/会话存储/OS 权限隔离，也不实现额外 OS 沙箱。
+- 新增/修改 MCP 注册需受支持的加载/重启流程；有活动任务时保留原进程，不承诺热加载无中断。
+- 实际链路仍为 Astra → 真实 Sol Max → 所选 DSH MCP 实例 → DSH。实例只是 MCP 端点，不是额外代理层。交接保留 `session_mode=DSH`、实例名、服务名、协调者 ID、活动 task_id 和授权范围。详见 `docs/multisession.md`。
 
 ## 授权、凭据和跨电脑
 

@@ -1,6 +1,6 @@
 {
   "name": "isheach-ai-rule",
-  "version": "0.2.0",
+  "version": "0.3.0",
   "private": true,
   "type": "module",
   "description": "Portable Codex dispatch rules and a local DSH stdio MCP bridge",

@@ -2,7 +2,7 @@
 name: multi-agent-dispatch
 description: Maintain a conversation-scoped execution mode and require a real Sol coordinator between Astra and HY4, WorkBuddy DeepSeek, or DSH. Use for delegation, caller verification, safe handoff, low-overhead waiting, monitoring, acceptance, and native Sol tasks.
 ---
-<!-- ai-rule-managed: v0.1.0; rules: 2026-11-10.low-overhead-wait-r3 -->
+<!-- ai-rule-managed: v0.3.0; rules: 2026-11-12.dsh-multisession-r1 -->
 
 # 多代理调度
 
@@ -78,7 +78,7 @@ HY4 预期 `hy4-preview`，WorkBuddy DeepSeek 预期 `deepseek-v4-flash`，以�
 **默认优先 `run_dsh_task`，不再按“短任务同步、长任务一律异步”机械分类。** 仅在以下条件都成立时采用同步等待：任务有明确的 timeoutMs 预算，不需要途中观察/干预或提前获取 task_id，并且已确认实际宿主、MCP 客户端和服务端单次工具调用限制足以覆盖任务预算加启动/收尾余量。
 `run_dsh_task` 内部等待终态再返回；其内部 60 秒循环不返回给 Sol，不需要 Sol 每轮重新调用。提交后不要另开模型代理查询同一任务，也不要声称同步阻塞中的 Sol 还能独立并发监守。
 
-`timeoutMs` 是任务截止预算，不是汇报频率。v0.1.0 默认 900000 ms、上限 3600000 ms。不得为等待而无限延长任务预算或跳过超时保护。
+`timeoutMs` 是任务截止预算，不是汇报频率。v0.3.0 默认 900000 ms、上限 3600000 ms。多实例不扩大这个范围，也不得为等待而无限延长任务预算或跳过超时保护。
 安装器生成的 tool_timeout_sec 为 3700 秒，但必须以当次宿主实际生效的限制为准；不能仅凭模板保证任意客户端均支持一小时阻塞。不输出含密钥的完整配置来核对超时，也不每轮重复核查。
 
 以下情况使用 `start_dsh_task` + `wait_dsh_task`：需要提前取得 task_id、用户要求中途观察/取消、宿主工具超时不足或尚不明确，或任务已经通过 start 启动。对超出当前最长任务预算的工作先规划有检查点的阶段，不通过密集轮询解决。
@@ -99,10 +99,21 @@ HY4 预期 `hy4-preview`，WorkBuddy DeepSeek 预期 `deepseek-v4-flash`，以�
 桥接器默认 read-only。workspace-write 需要本机安装时显式启用 AND 本轮用户授权记录；authorizationNote 只是审计引用，不能由代理虚构批准。
 不得要求 auto、danger-full-access、切换 provider 或自动模型 fallback。
 DSH 自己用其原生工具执行、测试、观察程序与纠错；桥接器只监控 DSH 子进程，不是额外的 AI 层。
-继续会话仅使用回执实际返回的 session_id 与相同 cwd，原进程已退出后再开始。没有 session_id 就不要伪造。
+继续会话仅使用**同一实例**回执实际返回的 session_id 与相同 cwd，原进程已退出后再开始。新任务由 DSH 生成新 UUID；没有 session_id 就不要伪造，也不要把其他实例或复制来的 runtime 数据当成本实例会话。
 
 已通过 start 启动的任务保持原 task_id、session、协调者、权限和截止预算。**不要为优化等待而取消、重启，或再调用 run_dsh_task 提交相同任务。** run 不是按 taskId 附着的等待接口，也不应利用幂等重提把在运行的任务强行转换为同步调用。
 同步工具调用断连/超时时，不能认定任务必定停止或仍在运行；按已有状态和生命周期规则核实，不盲目换键重跑。
+
+### 5.4 同机多实例：一次会话固定一个 MCP 服务
+
+同一台电脑可以注册默认 `dsh-opencode-go` 和命名 `dsh-opencode-go-<name>`（实例名如 `alpha`、`bravo`）。每个聊天在会话中固定选择一个服务，由真实 Sol 实际调用该服务的工具；实例名、服务名、协调者 ID、活动 task_id 和授权范围写入交接。
+选择依据是宿主可见的 MCP 服务，不是提示词自称。不要假定 `CODEX_THREAD_ID` 等变量会注入 stdio MCP，也不要新增 caller 字段充当认证。宿主无法区分多个实例工具时，使用其支持的服务器作用域/独立 profile，或报告限制；不能声称已经自动逐聊天隔离。
+- 不同命名实例有独立 runtime、锁、回执、幂等域和 session 索引，可以并行；同一实例仍单任务互斥，第二个提交应等待而不是换键重跑。
+- task_id、幂等键和 session_id 只在所属实例有效。禁止跨实例 get/wait/cancel；用错实例应得到 not found 或 `unknown_after_disconnect`，不能借只读回执取消别人的子进程。
+- 断连后先检查原锁 owner、任务和进程；不删锁、不重启原任务、不因切换聊天而迁移已启动任务。
+- 每个实例都必须保留已启用的 `--schedule-config`、峰谷门禁、预算+60 秒余量、硬停工和 `resume_automatically=false`；硬停工只由拥有该子进程的桥接器执行。不能为某个新实例关闭日程来绕过规则。
+- 实例隔离不是 DSH 凭据/账户/额度/会话存储/OS 权限隔离。workspace-write 仍需本机安装层启用与本任务真实授权；authorizationNote 不是令牌。
+- 新注册/修改 MCP 后按宿主支持方式重启或新开会话加载；有活动任务时保留原进程，不保证热加载无中断。跨电脑只同步代码/规则，不同步 runtime、锁、会话或凭据。
 
 ## 6. 等待、异常和验收
 
@@ -118,10 +129,10 @@ completed 要求 DSH 进程退出 0 且 final.reason.kind 为 completed；它只
 
 ## 7. 新会话和跨电脑
 
-部署成功后不用粘贴长提示词。新会话说“本会话使用 DSH，由真实 Sol 子代理调度，先只读分析当前项目”即可建立模式，后续省略模式也继续使用 DSH。
+部署成功后不用粘贴长提示词。新会话说“本会话使用 DSH，固定使用 MCP 服务 dsh-opencode-go-<name>，由真实 Sol 子代理调度，先只读分析当前项目”即可建立模式和实例选择，后续省略模式也继续使用同一实例；明确要求切换后才换实例。
 独立新会话不从另一会话或电脑继承模式；没有选择时为 A。明确恢复旧会话则沿用已恢复的选择。
 读取适用 AGENTS 及本 Skill，但不要假定旧对话、运行进程或任务回执已同步。
-本次是指令层修正，没有修改 MCP 桥接器、工具权限、认证或安装器，没有新增程序级调用者强制认证或主动完成通知。实际链路和等待效果需要宿主记录验证；无法取得证据就保留未核实状态。
+本次 0.3.0 增加了 DSH 命名实例的调度域、安装和验证；没有新增程序级调用者认证、聊天身份自动注入或主动完成通知。实例名和状态不是密码学认证，实际链路和等待效果仍需宿主记录验证；无法取得证据就保留未核实状态。
 有活动任务时只同步规则并显式读取，不为加载规则强行重启宿主。任务安全结束后再重启或新建会话作完整验收。
 请求继续旧工作时，读取已有交接文件。对文件变更、安装与推送继续遵守用户授权。
 

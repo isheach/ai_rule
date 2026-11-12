@@ -1,6 +1,6 @@
 # ai_rule
 
-两台 Windows 电脑共用的 Codex 调度规则、Skill 和 DSH MCP 桥接器。桥接器/安装器版本 **v0.1.0**；规则修订 **2026-11-10.low-overhead-wait-r3**。
+两台 Windows 电脑共用的 Codex 调度规则、Skill 和 DSH MCP 桥接器。桥接器/安装器版本 **v0.3.0**；规则修订 **2026-11-12.dsh-multisession-r1**。
 
 ## 已落地与尚未验收
 
@@ -12,6 +12,7 @@
 | 低开销等待 | r3 规则优先有界同步 run，必要异步使用最长有效 wait 并减少无变化汇报；代码未改，实际节省未量化 |
 | 安装预览、合并、备份、冲突检测、回滚 | 已实现；不覆盖原有全局配置 |
 | DSH 原生 headless stdio MCP | 已实现；同步/异步提交、等待、取消、回执、幂等、独占锁 |
+| 同机 DSH 多实例 | 已实现；默认服务加命名服务，各自独立 runtime、锁、回执、幂等域和会话所有权；不自动按聊天身份注入路由 |
 | WorkBuddy 两个入口 | 原样保留；可注册用户已准备好的完整桥接器；电脑 B 暂不部署 |
 | 现有 WorkBuddy 自定义源码迁移 | **未做**：当前不能读取用户本机完整源码，不能重建授权模块 |
 | 原生 Sol/Luna 的模型 ID 和子代理配置 | 复用本机已有配置，不按角色名猜造 ID |
@@ -77,13 +78,39 @@ node .\scripts\manage.mjs --verify
 首次安装且没有活动任务时，完全重启 Codex 并新开会话，再运行 `codex mcp list`。已有 HY4/WorkBuddy DeepSeek 配置不动。
 已有任务仍在运行时，不为更新规则关闭宿主或原 MCP；采用下文的规则同步和显式重读流程。
 
+### 同机多聊天：添加独立命名 DSH 实例
+
+默认服务 `dsh-opencode-go` 保留旧 runtime 和旧回执。需要第二个、第三个独立任务域时，用受支持的安装器添加命名服务；不要手工复制 runtime，也不要只在本机加一个 Godot 别名冒充交付：
+
+```powershell
+# 预览：默认 + alpha + bravo；不写文件、不调用付费模型
+.\scripts\install.ps1 -EnableDsh -DshInstance alpha,bravo
+
+# 确认没有活动任务后安装；默认仍是只读
+.\scripts\install.ps1 -Apply -EnableDsh -DshInstance alpha,bravo
+.\scripts\install.ps1 -Verify
+```
+
+Node 等价写法可重复传 `--dsh-instance`：
+
+```powershell
+node .\scripts\manage.mjs --enable-dsh --dsh-instance alpha --dsh-instance bravo
+node .\scripts\manage.mjs --apply --enable-dsh --dsh-instance alpha --dsh-instance bravo
+node .\scripts\manage.mjs --verify
+```
+
+每个命名实例有自己的 runtime、`active.lock`、任务回执、幂等域、会话所有权和状态身份；不同实例可并行，同一实例仍单任务互斥。安装器保留默认、WorkBuddy/HY4 和无关服务；在已有默认服务上新增命名服务不会重写默认服务，默认的 `--runtime`、`--allow-write` 和自定义 `--schedule-config` 原样保留，新命名实例默认只读并继承默认的日程配置。要显式改默认服务（含改回只读、换 runtime 或改日程）时，使用不带 `--dsh-instance` 的 `--enable-dsh` 命令；在已有默认服务上新增实例时夹带日程变更会被拒绝。`--verify` 只验证 ai_rule managed 块，未管理的同名/手工服务会显示在 `unmanaged_dsh_services` 中但不被改写。
+每个聊天在会话中固定一个 MCP 服务（如 `dsh-opencode-go-alpha`），由真实 Sol 调用该服务的工具，并先核对 `get_dsh_bridge_status` 的 `instance`/`runtime`。stdio MCP 没有可靠的自动聊天身份，本仓库不假定 `CODEX_THREAD_ID` 等变量，也不把提示词或 caller 字段当认证；若宿主无法区分多个实例工具，需使用其支持的服务器作用域/独立 profile，或报告限制。
+跨实例 `get`/`wait`/`cancel` 会安全失败；断连后非所有者只能得到 `unknown_after_disconnect`，不能删锁或重跑。继续会话必须同实例、同 cwd 并使用该实例回执的 session_id。实例隔离不等于 DSH 凭据、账户、额度、会话存储或 OS 权限隔离。
+完整规则、逐聊天工作流、跨电脑同步和排障见 [docs/multisession.md](docs/multisession.md)。
+
 ### 第一次端到端验收
 
 在 Codex 新会话输入：
 
-> 本会话使用 DSH。Astra 先创建或恢复真实 Sol Max（max）子代理，由该子代理调用 get_dsh_bridge_status，再在已存在的空测试目录中用 run_dsh_task 做只读文本测试。提供协调者 ID、实际 MCP 发起方依据、任务 ID、退出码、final_reason 和回执。Astra 不转发，Sol 不代执行，不用模型自我介绍证明身份。
+> 本会话使用 DSH，固定使用 MCP 服务 dsh-opencode-go-alpha。Astra 先创建或恢复真实 Sol Max（max）子代理，由该子代理先调用该服务的 get_dsh_bridge_status，确认 instance=alpha，再在已存在的空测试目录中用 run_dsh_task 做只读文本测试。提供协调者 ID、实际 MCP 发起方依据、任务 ID、退出码、final_reason 和回执。Astra 不转发，Sol 不代执行，不用模型自我介绍证明身份。
 
-目录必须是真实绝对路径。完成后再批准一个读取测试文件的任务，核实回执中的 native_tool_calls，而不是立刻开始真实项目写入。
+目录必须是真实绝对路径。只有一个默认实例时，去掉“固定使用 MCP 服务 …”；多实例聊天各自把示例服务名换成实际注册名。完成后再批准一个读取测试文件的任务，核实回执中的 native_tool_calls，而不是立刻开始真实项目写入。
 DSH 回执证明任务执行，不独立证明上游调用者；实际调用归属还须宿主记录。首次或换协调者时核实，日常保留最小证据，不反复扫描完整日志。
 
 ### 开放经批准的工作区写入
@@ -135,7 +162,7 @@ DSH 负责实际执行、测试、修复及必要监守；Sol 不代执行，不
 克隆同一仓库即可复用代码和规则，不需要重新写长提示词。机器环境和认证不会被 Git 自动同步。
 
 先安装规则：`.\scripts\install.ps1 -Apply`。
-待电脑 B 自己的 DSH、Go 凭据、headless 路由和会话插件准备好并测试通过，再运行 `-Apply -EnableDsh`。参考 `config/headless.patch.example.yml`，不要覆盖现有 profile。
+待电脑 B 自己的 DSH、Go 凭据、headless 路由和会话插件准备好并测试通过，再运行 `-Apply -EnableDsh`；需要同一套命名实例时按 [docs/multisession.md](docs/multisession.md) 的同步命令执行。参考 `config/headless.patch.example.yml`，不要覆盖现有 profile。
 按用户当前选择，电脑 B **暂不部署 WorkBuddy**；两个 `workbuddy_*_registered: false` 不影响已注册的 DSH。不自动安装 WorkBuddy，也不因缺少它们改变默认 A 或 DSH 会话选择。
 今后用户明确需要时，才准备 WorkBuddy CLI 和完整定制桥接器；见 `bridges/workbuddy/README.md`。本仓库不会把 A 的私有凭据或绝对路径复制到 B。
 
@@ -157,7 +184,7 @@ if ($LASTEXITCODE -ne 0) { throw "规则安装失败。" }
 node .\scripts\manage.mjs --verify
 ```
 
-不带 `--enable-dsh` 或 `--workbuddy-bridge` 时，仅更新规则和 Skill；不删除已有 DSH MCP，不重写 config.toml，也不改变已有 AllowWrite 设置、凭据或 DSH Profile。安装器仍显示 v0.1.0 是正常的，本次只修订规则。同步前确认远端没有超出本次规则修订的额外代码变更；意外改动 bridges/scripts 时停止并评估活动任务。
+不带 `--enable-dsh` 或 `--workbuddy-bridge` 时，仅更新规则和 Skill；不删除已有 DSH MCP，不重写 config.toml，也不改变已有 AllowWrite 设置、凭据或 DSH Profile。安装器与桥接器版本现统一为 v0.3.0；仅更新规则时不会改动 MCP 注册。同步前确认远端没有超出预期范围的额外代码变更；意外改动 bridges/scripts 时停止并评估活动任务。
 
 **有活动任务时不要立即重启 Codex。** 在旧会话明确要求 Astra 与 Sol 分别读取更新后的有效 AGENTS 和 Skill；保留原 MCP 生命周期，按 Skill 交接现有任务，不重复提交。没有活动任务后，再重启或新建会话检查启动加载。远端提交和本地安装都不会自动重写已有会话上下文。
 
@@ -174,7 +201,7 @@ npm test
 安装会输出本机回滚 manifest 路径。用 `.\scripts\install.ps1 -RollbackManifest "该路径"` 回滚。文件在安装后又被修改时，回滚拒绝覆盖，需手工合并。
 备份保存在 Codex home 的 `ai-rule-backups`，可能包含已有配置中的秘密，仅保留本机，禁止上传。
 
-测试、权限边界和恢复说明见 [docs/implementation.md](docs/implementation.md)。其中 2026-11-09 的开发验收记录是当时状态，不应与后续用户反馈混为一谈。r3 仅核对接口/规则和文档差异，未运行新的付费模型测试；真实等待行为及 Token 节省仍须本机记录验证。
+测试、权限边界和恢复说明见 [docs/implementation.md](docs/implementation.md)。其中 2026-11-09 的开发验收记录是当时状态，不应与后续用户反馈混为一谈。0.3.0 新增多实例 mock 回归，但仍未在本次环境取得实际执行结果，也未运行真实模型双跑；真实逐聊天加载、并发与 Token 节省须由部署后的本机记录验收。
 
 ## DSH 峰谷时段控制（可选，默认关闭）
 
