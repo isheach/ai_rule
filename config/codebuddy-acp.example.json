@@ -1,0 +1,14 @@
+{
+  "schema": 1,
+  "node_path": "C:\\path\\to\\node.exe",
+  "cli_entry": "C:\\path\\to\\isolated\\node_modules\\@tencent-ai\\codebuddy-code\\cli.js",
+  "config_dir": "C:\\path\\to\\dedicated-signed-in-codebuddy-config",
+  "workspace_root": "D:\\path\\to\\approved\\workspace",
+  "expected_version": "2.184.0",
+  "expected_entry_sha256": "94e1ff12ec554aa1a739abd9a2c92f269ce2f61be5dc6cfad59999b7aa857853",
+  "expected_tarball_sha256": "882f681ad6327ebbb837b5a53f73bf4ea47eed42c598f536815fe71aa19dc9b7",
+  "internet_environment": "internal",
+  "allow_workspace_read": false,
+  "allow_workspace_write": false,
+  "allow_commands": false
+}

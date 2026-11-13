@@ -48,7 +48,8 @@ WorkBuddy 的既有任务管理原样保留，没有验证或更改其独立长�
 ## 真实结果与路由证据
 
 每次新提交先用 DSH --help 和 --dump-config 检查本机能力以及 agent-default-model 配置，不进行付费探测调用。配置必须为 opencode-go/deepseek-v4.1-flash/max，否则明确失败。
-没有编写自动 fallback。配置检查不是服务端模型证明，第三方插件/网关的路由并未被拦截审计；回执把 requested_route、configured_route 与 actual_route 分开，actual_route 未获得独立证据时保持 null，账单验证标记 unavailable。
+已增加**候选**预准入路由策略 `bridges/dsh/routing.mjs`，并新增可选、未注册的 `bridges/hy4/server.mjs`，把 `RoutingCoordinator` 接到 DSH `TaskManager` 和官方 CodeBuddy ACP `hy4free` 适配器；默认 DSH 主后端仍不变，endpoint 未部署。策略在调用任一后端前以 `wx` 独占 claim 做跨进程幂等排除，并先发布 `dispatching`；claim 不自动删除，崩溃/部分写入/回执缺失均 fail-closed。决策回执不持久化 prompt、适配器原始 error/status 文本或凭据，只保存闭集原因码与白名单状态。仅日程门禁或受支持且证明未受理的 auth/quota 探测可进入回退判断，且需显式本地授权并最多一次；带 `sessionId`/继续/修复请求永不切换。已受理、运行中、超时、断连、未知、权限/参数拒绝、busy/lock、停止/部分结果均不回退。详见 `docs/hy4-fallback.md` 与 `docs/codebuddy-acp.md`。
+配置检查不是服务端模型证明，第三方插件/网关的路由并未被拦截审计；回执把 requested_route、configured_route 与 actual_route 分开，actual_route 未获得独立证据时保持 null，账单验证标记 unavailable。路由决策回执同样不是模型/账单证明。
 只有退出码 0 且 final.reason.kind=completed 才标记 completed。final.text 是执行者报告，不是独立审计的业务测试结果。files_changed 未由桥接器审计时保持 null，而不是伪造空数组。
 
 ## 安全限制

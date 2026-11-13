@@ -1,0 +1,13 @@
+{
+  "pool_root": "D:\\ai_rule-state\\root-pool",
+  "context_dir": "D:\\ai_rule-state\\root-pool-contexts",
+  "dsh_entry": "C:\\Users\\YOUR_USER\\AppData\\Roaming\\npm\\node_modules\\@deepseek-ai\\dsh\\lib\\bin.js",
+  "schedule_config": "D:\\ai_rule\\config\\offpeak.schedule.json",
+  "workspace_root": "D:\\approved\\workspace",
+  "allow_write": false,
+  "binding_cap": 8,
+  "running_cap": 3,
+  "ttl_hours": 24,
+  "hy4_manifest": "D:\\ai_rule-state\\codebuddy-acp.local.json",
+  "fallback_authorization_ref": "local-pre-admission-approval-2026-11"
+}

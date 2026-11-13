@@ -102,7 +102,8 @@ node .\scripts\manage.mjs --verify
 
 ## 5. 同一实例的续做、互斥和断连
 
-- 同一实例同一时间只允许一个 DSH 子进程；多个聊天共用该实例时，后来者会收到 `Exclusive lock exists`，应等待原任务，而不是重复启动或换键重跑。
+- 同一实例同一时间只允许一个 DSH 子进程；多个聊天共用该实例时，后来者会收到 `Exclusive lock exists` 或 `DSH_BUSY`，应等待原任务，而不是重复启动或换键重跑。
+- busy/lock 是**独立的预准入类别**。本阶段的 DSH→HY4 回退策略默认不因 busy/lock 转 HY4；除非有安全证据证明不是同一工作的重复提交。不得用回退绕过实例互斥、制造双跑或迁移已启动任务。
 - 不同实例各有自己的锁、任务回执、幂等键域和 `sessions.json`，可以并行运行。
 - `start_dsh_task`/`run_dsh_task` 的 `task_id` 只在所属实例有效。用另一个实例 `get`/`wait`/`cancel` 会得到“not found in DSH instance …”，不会读取或终止别的实例。
 - 同一个实例的第二个桥接进程若发现回执属于运行中任务但不拥有其子进程，会返回 `unknown_after_disconnect`。它只能只读查看，不能凭回执取消、杀进程或重新提交。先检查 `active.lock` 的 owner PID、任务回执和原宿主进程，再决定。

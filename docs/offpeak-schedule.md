@@ -57,5 +57,5 @@ node .\scripts\manage.mjs --apply --enable-dsh --disable-offpeak-schedule
 - Windows `taskkill /T` 只能尽力处理本机进程树，不能保证终止远端服务器/Slurm/GPU 后台作业。
 - 修改 `config/offpeak.schedule.json` 的时间窗口后，需在无任务运行时重启 Codex 才能生效。
 - 本版时区限定中国和新加坡（均 UTC+8，无夏令时）。`rejectTaskIfBudgetExceedsWindow` 可设置为 false，但增加峰时强制中断的风险。
-- 仍遵守原有 Astra → 真实 Sol → DSH 调度链、写入授权与不回退规则。本地定时器不是新的 AI 代理。
-- 遇到峰时门禁、任务硬停或时段冲突，不让 Sol 或 Astra 自己代替 DSH 执行。
+- 仍遵守原有 Astra → 真实 Sol → DSH 调度链、写入授权与不回退规则。唯一例外是 `docs/hy4-fallback.md` 的显式授权预准入 HY4 策略；本机未部署/未验证时不得使用。本地定时器不是新的 AI 代理。
+- 遇到峰时门禁、任务硬停或时段冲突，不让 Sol 或 Astra 自己代替 DSH 执行；也不通过新实例、改配置或通用日程绕过规避门禁。

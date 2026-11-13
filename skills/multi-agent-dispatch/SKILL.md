@@ -2,7 +2,7 @@
 name: multi-agent-dispatch
 description: Maintain a conversation-scoped execution mode and require a real Sol coordinator between Astra and HY4, WorkBuddy DeepSeek, or DSH. Use for delegation, caller verification, safe handoff, low-overhead waiting, monitoring, acceptance, and native Sol tasks.
 ---
-<!-- ai-rule-managed: v0.3.0; rules: 2026-11-12.dsh-multisession-r1 -->
+<!-- ai-rule-managed: v0.3.0; rules: 2026-11-12.dsh-multisession-r1; fallback: 2026-11-13.hy4-preadmission-r1 (candidate) -->
 
 # 多代理调度
 
@@ -27,7 +27,7 @@ A：Sol Max 规划并执行，只有确有需要的智能监守才由 Luna 承�
 HY4、WorkBuddy DeepSeek 或 DSH：Sol Max 只规划/调度/验收，具体执行、实验、测试、修复和必要监守全部交给选中后端，不得启用 Luna。
 Astra 负责总体方向；角色与实际模型映射以宿主真实能力为准，不凭角色名构造 API ID。
 每次派单记录 `task_backend`，同一任务的修订和监守保持不变。用户切换会话模式不自动迁移已运行任务；先报告原任务状态，按用户授权等待、停止或交接，避免双重执行。
-所选后端不可用时保留会话选择、报告阻塞，不自动换后端、不由 Sol Max 接管、不擅自安装缺失服务。
+所选后端不可用时保留会话选择、报告阻塞，不自动换后端、不由 Sol Max 接管、不擅自安装缺失服务。唯一例外：本机显式启用、用户明确授权的 DSH→HY4 **预准入**回退，且满足 §5.5 的全部条件；未启用、证据不足或 HY4 未验证时仍按阻塞处理。
 第二台电脑只部署 DSH 是合法状态，不要求补装 WorkBuddy。
 
 ### 2.1 外部模式的调用者门槛
@@ -64,7 +64,7 @@ Astra 负责总体方向；角色与实际模型映射以宿主真实能力为�
 
 由 Sol 调用所选 MCP 的 `get_task_bridge_status`，按实际 schema 使用 `run_workbuddy_task`。
 不要假定 WorkBuddy 支持本仓库 DSH 的异步工具。不要猜测它的 profile 名称，也不能去掉既有授权 profile 规避拒绝。
-HY4 预期 `hy4-preview`，WorkBuddy DeepSeek 预期 `deepseek-v4-flash`，以用户本机验证结果为准。
+HY4 预期官方 ACP 模型 `hy4free`（名称 Hy4）；能力必须显式选择 `text-only` / `workspace-read` / `workspace-write`，不能把普通 read-only/file 任务静默视为兼容。workspace 能力需本地 manifest 开关、canonical cwd、`writeScopes`（现有目录 + `create`/`replace`/`edit` 子集）或精确 `writes`、每任务 `authorizationNote` 和 `allow_once` 回调；写入不要求预计算内容，`content_sha256` 仅可选用于 full-content create/write。每次 prompt 前当前 catalog 必须对 hy4free 明示 `x0.00 credits`，缺失/非零 fail closed，绝不换 `hy4std`/auto/其他模型；目录价不是账单 attestation。原生 Edit/Write 的 `rawInput`、先前 `tool_call` 的 kind/locations 和实际完成状态都会被核对；拒绝/混合终态不算成功。命令仅在本机 manifest 显式开启且任务逐条授权时可选；vendor 可能 auto-allow 安全命令，不能声称全部经 ACP callback。历史 `hy4-preview` 不是本机 ACP 值。适配器在 `bridges/hy4/`；Windows 临时标准 stdio 已实际验证读、create/Edit 和一次授权命令，但未声明每台机器已注册/宿主已加载；未启用的电脑继续 DSH。不得用 `hy4std`、auto、default、其他账号或 GUI token 回退。CodeBuddy/WorkBuddy 共享中国账号 credits，不把目录价当账单证明。
 它们应自己执行并在可用机制内监守。若桥接器 busy，等待原任务，不能改用另一个执行者或重复启动。
 同样避免重复状态询问和无变化汇报，但仅使用实际存在的 WorkBuddy 接口，不套用 DSH 的 waitMs 参数或推定其异步能力。
 既有桥接器的长期独立监守能力未由本仓库改造/验证，不得宣称已经实现。
@@ -97,7 +97,7 @@ HY4 预期 `hy4-preview`，WorkBuddy DeepSeek 预期 `deepseek-v4-flash`，以�
 
 第一次提交生成稳定 idempotencyKey，例如 task-20261110-001-r1；同一提交的网络重试沿用键，实质修订使用新键。
 桥接器默认 read-only。workspace-write 需要本机安装时显式启用 AND 本轮用户授权记录；authorizationNote 只是审计引用，不能由代理虚构批准。
-不得要求 auto、danger-full-access、切换 provider 或自动模型 fallback。
+不得要求 auto、danger-full-access、切换 provider 或自动模型 fallback；唯一例外是 §5.5 的显式授权预准入 HY4 策略。策略未在本机验证或未接入时，行为仍是 DSH 主后端 + 报告阻塞。
 DSH 自己用其原生工具执行、测试、观察程序与纠错；桥接器只监控 DSH 子进程，不是额外的 AI 层。
 继续会话仅使用**同一实例**回执实际返回的 session_id 与相同 cwd，原进程已退出后再开始。新任务由 DSH 生成新 UUID；没有 session_id 就不要伪造，也不要把其他实例或复制来的 runtime 数据当成本实例会话。
 
@@ -115,13 +115,43 @@ DSH 自己用其原生工具执行、测试、观察程序与纠错；桥接器�
 - 实例隔离不是 DSH 凭据/账户/额度/会话存储/OS 权限隔离。workspace-write 仍需本机安装层启用与本任务真实授权；authorizationNote 不是令牌。
 - 新注册/修改 MCP 后按宿主支持方式重启或新开会话加载；有活动任务时保留原进程，不保证热加载无中断。跨电脑只同步代码/规则，不同步 runtime、锁、会话或凭据。
 
+### 5.5 DSH→HY4 预准入回退（仅显式授权，默认关闭）
+
+本策略实现于 `bridges/dsh/routing.mjs`，并已接到 opt-in `bridges/hy4/server.mjs`。Windows 临时标准 stdio 中已由 Sol 用隔离 DSH 预准入拒绝和真实 HY4 native 文件任务验证；这不等于每台机器已注册/宿主已加载，也不得把临时 endpoint 当全局已部署。真实回退必须同时满足：
+
+1. 当前 `session_mode=DSH`，用户没有显式选择 HY4；显式 HY4 只走 HY4，不回退 DSH。
+2. DSH 返回结构化 `PreAdmissionRejection`，代码仅为 `DSH_SCHEDULE_GATE`，或带 `provider_check=supported`、`task_accepted=false` 的 `DSH_PRE_ACCEPTANCE_UNAVAILABLE`。不得按普通错误文本判断。
+3. 可证明尚未受理、未启动、无副作用：没有 task_id、没有 child/锁归属、没有幂等回执、不是超时/断连/unknown；**任何带 `sessionId` 或继续/修复既有 DSH 任务的请求始终锁定 DSH**。
+4. 本机存在显式 `pre_admission_only`、单次尝试、带非秘密批准引用的授权；模型不得自造授权。
+5. HY4 适配器 `status().ready=true`，manifest/版本/hash 校验通过，ACP 当前目录对 `hy4free` 明示 `x0.00 credits`，且确认 pin；没有 `hy4-preview`、`hy4std` 或 auto 回退。目录价只是准入证据，不是 provider/账单证明。
+6. 最多尝试一次；记录 `request_id`、幂等键哈希、原因码、后端、admission 状态和 fallback 结果。不得保存 prompt/凭据。
+
+以下永不回退：已受理、运行中、取消中、`unknown_after_disconnect`、超时、断连、回执未知、权限/参数/审批拒绝、`DSH_BUSY`/`DSH_LOCKED`、停止/部分结果、`schedule_stopped`。busy 是独立类别，没有“不是重复工作”的安全证据就不回退。HY4 接收后不回 DSH；不自动恢复、不迁移、不并发双跑。
+
+若上述任一项不满足，报告阻塞并保留 DSH 选择。不要用通用 CodeBuddy 模型、auto/always-allow、permission bypass、GUI token、公开 Open API 猜测或自建 bridge 伪造 HY4。详见 `docs/hy4-fallback.md`。
+
+### 5.6 可选根池 MCP：用户一句选择，Sol 先取本地 context
+
+只有本机已按 `docs/root-pool.md` 手动注册 `dsh-root-pool`、受支持 reload 且工具可见后才可用。Windows 临时标准 stdio 已由 Sol 用真实单根/两个批准 cwd 及两个真实命名实例验证；每台机器的安装/宿主加载仍须各自验收，不能因为临时验证就声称全局可用。**工具可见后用户说“使用 DSH”或同义选择即选择它，不需要“根池”/root/instance 名**；显式指定命名旧服务（如 `dsh-opencode-go-alpha`）仍走旧服务，未安装根池的电脑继续旧 DSH，已启动任务保持原后端。实际链路仍是 Astra → 真实 Sol Max → `dsh-root-pool` stdio MCP → pooled DSH。
+
+1. Sol 在自己的宿主 shell 先只取注册的 command/args，不打印完整 config/env：
+   `$entry = codex mcp get dsh-root-pool --json | ConvertFrom-Json`
+   `$cfg = $entry.transport.args[[Array]::IndexOf($entry.transport.args, '--config') + 1]`
+   `& $entry.transport.command (Join-Path (Split-Path -Parent $entry.transport.args[0]) 'cli.mjs') context --config $cfg`
+   `CODEX_THREAD_ID` 不假定在 stdio 内可用；不得手填 `--root`/`--child`，不得把 opaque ref 当认证。
+2. 将返回的 opaque `context_ref` 传给 `start_pool_task` / `run_pool_task`；后续 `get/wait/cancel_pool_task` 也用同一 context，过期后重新运行 helper。优先 `run`；需要 task_id 或中途取消时才 `start` + `wait`（最长 60000 ms）。
+3. 不传 rootId、lease、generation、backend 覆盖。按幂等键恢复；同根新会话用新键 + 回执的 session_id；Root2 不能 get/cancel Root1。非所有者 cancel 只得到只读快照，不杀子进程。
+4. 默认只读。workspace-write 同时需要本机 config `allow_write:true`、server `--allow-write`、每任务 `permissionMode/capability=workspace-write` 和真实 `authorizationNote`；文件操作还要 `writeScopes` 或精确 `writes`，缺一即拒绝。HY4 回退的同一 normalized scope 会写入请求 fingerprint，改 scope/command 不能复用旧 key。
+5. 必须保留显式 `schedule_config`（启用、硬停工、预算、不自动恢复）。DSH 先试；仅结构化预准入拒绝且本机授权/ready 时按 §5.5 最多一次 HY4；已受理/unknown/断连/权限/参数/busy/lock/继续/修复都不回退。
+6. 标准 `tool_timeout_sec=3700` 只是示例，必须以当次宿主实际生效值为准。任何“lease 未打印、结果没有 prompt/路径”都不是身份认证或 OS 隔离；临时标准 stdio 已验证真实单根 DSH 与 HY4 文件任务，但不等于每机全局注册、桌面 app、多聊天、认证或 provider 计费验证。
+
 ## 6. 等待、异常和验收
 
 Astra 的宿主原生 wait 只用于真实 Sol agent ID；Sol 的 MCP wait 只用于 MCP task_id。不要互传 ID，也不要声称睡眠脚本等同于宿主 wait。
 Astra 使用宿主支持范围内合理的长等待，不向 Sol 发送重复催问、不同时查询 DSH；Sol 获得终态后统一验收，Astra 仅处理战略问题和验收摘要。
 completed 要求 DSH 进程退出 0 且 final.reason.kind 为 completed；它只证明 Agent 运行完成，仍需 Sol 审查任务报告，不代表业务测试全通过。
 若验证证据不足，由 Sol 将补充验证任务交回原后端。不要让 Sol 自己补跑，也不要让 Astra 代为提交修订。
-失败时先读取脱敏回执，调整计划再委派；不自动重试可能有副作用的工作，不回退到 Sol/Luna/其他 API。
+失败时先读取脱敏回执，调整计划再委派；不自动重试可能有副作用的工作，不回退到 Sol/Luna/其他 API。已受理的 DSH 任务即使随后遇到配额/认证/超时/断连，也留在原 DSH 后端；预准入 HY4 例外仅按 §5.5 判断。
 超时或取消后检查终态；unknown_after_disconnect 或 active.lock 未清理时先核实进程，不能删除锁后直接重跑。
 不声称配置路由证明服务端真实型号/计费；本桥接器未提供这种证明。
 区分任务结果通过与调度链合规：结果成功但 Astra 直接派单时，记录调度违规，不丢弃有效结果；纠正下一轮调用者。
@@ -138,4 +168,4 @@ completed 要求 DSH 进程退出 0 且 final.reason.kind 为 completed；它只
 
 ## 可选谷时规则（需本机明确启用）
 
-由真实 Sol 协调 DSH 时，沿用桥接器 `get_dsh_bridge_status` 返回的 schedule 状态；需要精确边界时用 `get_dsh_schedule_status`，不要把它变成高频轮询。如果 `accept_new_tasks=false`、预算越过峰时或返回 `schedule_stopped`，不要重复派发、不要自动改用 Sol/WorkBuddy/Luna。保留执行回执和 Session ID，先核验项目的部分变更与数据一致性；用户批准后在谷时继续。截止前的 checkpoint 是提前写入任务提示的建议，并不代表进程被强制结束时保证安全保存。详见 `docs/offpeak-schedule.md`。
+由真实 Sol 协调 DSH 时，沿用桥接器 `get_dsh_bridge_status` 返回的 schedule 状态；需要精确边界时用 `get_dsh_schedule_status`，不要把它变成高频轮询。如果 `accept_new_tasks=false`、预算越过峰时或返回 `schedule_stopped`，不要重复派发、不要自动改用 Sol/WorkBuddy/Luna；只有 §5.5 全部条件满足时才可按授权尝试一次 HY4，否则保留执行回执和 Session ID，先核验项目的部分变更与数据一致性；用户批准后在谷时继续。截止前的 checkpoint 是提前写入任务提示的建议，并不代表进程被强制结束时保证安全保存。详见 `docs/offpeak-schedule.md` 与 `docs/hy4-fallback.md`。

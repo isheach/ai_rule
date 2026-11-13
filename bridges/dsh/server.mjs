@@ -1,6 +1,7 @@
 #!/usr/bin/env node
 // Minimal, dependency-free stdio MCP server. No HTTP listener and no shell command strings.
 import { TaskManager, discoverDsh, redact, VERSION, normalizeInstanceName, serverNameForInstance } from './core.mjs';
+import { PreAdmissionRejection } from './routing.mjs';
 import { loadSchedule } from './schedule.mjs';
 
 const argv = process.argv.slice(2);
@@ -83,7 +84,18 @@ async function dispatch(message) {
     const result = await call(params.name, params.arguments ?? {}, id);
     send({ jsonrpc: '2.0', id, result: { content: [{ type: 'text', text: JSON.stringify(result) }], isError: ['failed', 'timed_out', 'cancelled', 'schedule_stopped'].includes(result.status) } });
   } catch (e) {
-    send({ jsonrpc: '2.0', id, result: { isError: true, content: [{ type: 'text', text: redact(e.message) }] } });
+    const result = { isError: true, content: [{ type: 'text', text: redact(e.message) }] };
+    // Additive structured contract for new clients. The text item remains the
+    // v0.3.0-compatible error channel and is never converted into success.
+    if (e instanceof PreAdmissionRejection) {
+      result.structuredContent = { error: {
+        code: e.code,
+        admission_state: e.admission_state,
+        fallback_eligible: e.fallback_eligible,
+        details: e.details
+      } };
+    }
+    send({ jsonrpc: '2.0', id, result });
   }
 }
 async function shutdown() {

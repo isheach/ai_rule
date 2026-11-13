@@ -14,17 +14,21 @@
 | DSH 原生 headless stdio MCP | 已实现；同步/异步提交、等待、取消、回执、幂等、独占锁 |
 | 同机 DSH 多实例 | 已实现；默认服务加命名服务，各自独立 runtime、锁、回执、幂等域和会话所有权；不自动按聊天身份注入路由 |
 | WorkBuddy 两个入口 | 原样保留；可注册用户已准备好的完整桥接器；电脑 B 暂不部署 |
+| DSH→HY4 预准入回退 | **已接入临时验证**：`bridges/dsh/routing.mjs` + opt-in endpoint；Windows 临时标准 stdio 中隔离 DSH 预准入拒绝后真实 HY4 native 文件任务已完成；每机注册/宿主加载仍需各自验收 |
+| CodeBuddy ACP Hy4 适配器 | **可选实现并已临时验证**：`bridges/hy4/`，固定 `hy4free`；显式 `text-only`/`workspace-read`/`workspace-write`；写任务支持 canonical cwd、`writeScopes` 和可选精确 `writes`；每次 handshake/prompt 前要求 catalog 明示 `x0.00 credits`，缺失/非零 fail closed；目录价不是账单证明；未声明每机已注册 |
+| Root chat DSH pool | **已实现并临时验证**：`bridges/pool/server.mjs` opt-in stdio MCP + 严格 handle/operation、按根 TaskManager/Hy4/Routing、host 父链与短期 context、running cap 3；Windows 临时标准 stdio 验证真实单根两任务和两个命名实例；未声明每机已注册/宿主已加载 |
 | 现有 WorkBuddy 自定义源码迁移 | **未做**：当前不能读取用户本机完整源码，不能重建授权模块 |
 | 原生 Sol/Luna 的模型 ID 和子代理配置 | 复用本机已有配置，不按角色名猜造 ID |
 | 本机 DSH + Go 与 Codex 端到端验收 | 用户反馈两台电脑均通过文本/原生只读工具调用；未独立读取本机回执，不代表写入、长期监守或实际服务端型号已验收 |
 
 默认 A：仅在全新会话尚未选择模式时启用，由 Sol Max 规划并执行，必要时 Luna 监守。
 指定 HY4 / WorkBuddy DeepSeek / DSH：设为当前会话模式，Sol Max **只规划、调度、验收**；指定代理负责实际执行和自身监守，**不使用 Luna**。
-后续消息不写模式时仍沿用当前选择，不会每轮恢复 A。Astra 负责总体方向。外部后端失败不得自动切回 Sol 或其他模型。
+后续消息不写模式时仍沿用当前选择，不会每轮恢复 A。Astra 负责总体方向。外部后端失败不得自动切回 Sol 或其他模型。唯一例外是本机显式启用、用户授权、结构化证明“未受理”的 DSH→HY4 预准入回退，最多一次；已受理/运行中/超时/断连/未知/权限/参数/busy/lock/停止均不回退。DSH 仍是默认；Windows 临时标准 stdio 已实际验证隔离 DSH 拒绝后的真实 HY4 native 文件任务，但每台机器的 MCP 注册/宿主加载仍需各自验收。详见 [docs/hy4-fallback.md](docs/hy4-fallback.md) 与 [docs/codebuddy-acp.md](docs/codebuddy-acp.md)。
 
 DSH 路径：**Astra 主代理 → 真实 Sol Max（max）子代理 → dsh-opencode-go MCP → DSH 原生 Harness → OpenCode Go 模型 API**。
 HY4 与 WorkBuddy DeepSeek 同样必须由真实 Sol 协调子代理调用；创建 Sol 却由 Astra 转发 MCP 不合格。
 **没有 OpenCode CLI / OpenCode Harness 这一层。** 主会话已经由宿主证实为 Sol 时不需要再套一个 Sol；Astra 不能模拟 Sol。
+当前 HY4 文件工作契约：默认只读；`workspace-write` 必须本机显式启用、任务 `cwd`/`authorizationNote` 和 `writeScopes`/`writes` 授权；目录 scope 支持 `create`/`replace`/`edit`，精确文件支持 `create`/`edit`/`write`；不要求预计算内容，可选 hash 只用于 full-content write。命令源码保留但默认关闭。详见 [docs/codebuddy-acp.md](docs/codebuddy-acp.md)。
 
 用户在 2026-11-10 提供的审计显示：真实 Sol 子代理已创建且能看到工具，但 Astra 直接提交了 DSH 任务。r2 针对这一调度缺口修正规则，不重新开发桥接器、不改变模型或权限，也不宣称仅改规则就保证调用链合规。详见 [docs/session-modes.md](docs/session-modes.md)。
 
@@ -104,6 +108,10 @@ node .\scripts\manage.mjs --verify
 跨实例 `get`/`wait`/`cancel` 会安全失败；断连后非所有者只能得到 `unknown_after_disconnect`，不能删锁或重跑。继续会话必须同实例、同 cwd 并使用该实例回执的 session_id。实例隔离不等于 DSH 凭据、账户、额度、会话存储或 OS 权限隔离。
 完整规则、逐聊天工作流、跨电脑同步和排障见 [docs/multisession.md](docs/multisession.md)。
 
+### 可选根池 MCP：同一根聊天复用 pooled runtime
+
+`bridges/pool/server.mjs` 是额外、opt-in stdio MCP，保留现有注册/日程/数据和 v0.3 入口。Windows 临时标准 stdio 已用一个真实根、两个批准 cwd 的 DSH 任务和两个真实命名实例验证；独立合成根仅用 mock stdio。**本机注册 `dsh-root-pool`、受支持 reload 且工具可见后，用户说“使用 DSH”或同义选择即选择根池，不需要 root/instance 名**；显式指定命名旧服务仍走旧服务，未安装根池的电脑继续原 DSH，已启动任务保持原后端。Sol 在自己的宿主 shell 先运行 `codex mcp get dsh-root-pool --json`，只取 `transport.command/args`，用已注册 server 旁的 `cli.mjs` 和同一 `--config` 运行 `context`，把 opaque context 交给 `start/run/get/wait/cancel_pool_task`；不要打印完整 config/env，不要手写 rootId/实例名/lease，stdio 参数不是身份认证。默认只读，running cap 3，schedule 必须显式启用且不自动恢复；HY4 仅在结构化预准入拒绝且本机显式授权/ready 时最多一次。注册示例、`tool_timeout_sec=3700`（实际宿主可不同）与限制见 [docs/root-pool.md](docs/root-pool.md)。未声明每台机器已注册/宿主已加载，也不宣称 OS 隔离或 provider 计费。
+
 ### 第一次端到端验收
 
 在 Codex 新会话输入：
@@ -149,10 +157,10 @@ DSH 负责实际执行、测试、修复及必要监守；Sol 不代执行，不
 | “切换为原生方案 A” | 后续使用 A |
 | “仅本次用 HY4” | 仅该任务例外，结束后回到原模式；后端须已部署且可用 |
 | “HY4 比 DSH 好吗？” | 只是讨论，不切换 |
-| 已选 DSH，但 DSH 报错或不可用 | 报告阻塞，保留选择，不自动回退 A |
+| 已选 DSH，但 DSH 报错或不可用 | 默认报告阻塞、保留选择；仅“未受理”的日程/受支持预准入探测且本机显式授权、HY4 已验证时，可按策略转一次 |
 
 全新会话未指定时仍为 A，不自动继承另一会话或另一台电脑的模式。恢复原会话时保留有证据的原选择。
-详细规则、旧任务交接与手工验收场景见 [docs/session-modes.md](docs/session-modes.md)；r3 等待补充见 [docs/waiting-policy.md](docs/waiting-policy.md)。
+详细规则、旧任务交接与手工验收场景见 [docs/session-modes.md](docs/session-modes.md)；r3 等待补充见 [docs/waiting-policy.md](docs/waiting-policy.md)。CodeBuddy ACP 适配器见 [docs/codebuddy-acp.md](docs/codebuddy-acp.md)；可选的根池 MCP 见 [docs/root-pool.md](docs/root-pool.md)。
 
 规则安装到有效的全局 AGENTS 文件，Skill 安装到 `~/.agents/skills/multi-agent-dispatch`。若存在非空 `AGENTS.override.md`，合并到这个实际生效的文件，不另写一份被忽略的 AGENTS。
 文件只是持久行为规则，不会凭空增加模型权限或强制宿主实现不存在的子代理能力；项目级规则和当前指令仍可能影响行为，需实际调用验收。
@@ -201,7 +209,7 @@ npm test
 安装会输出本机回滚 manifest 路径。用 `.\scripts\install.ps1 -RollbackManifest "该路径"` 回滚。文件在安装后又被修改时，回滚拒绝覆盖，需手工合并。
 备份保存在 Codex home 的 `ai-rule-backups`，可能包含已有配置中的秘密，仅保留本机，禁止上传。
 
-测试、权限边界和恢复说明见 [docs/implementation.md](docs/implementation.md)。其中 2026-11-09 的开发验收记录是当时状态，不应与后续用户反馈混为一谈。0.3.0 新增多实例 mock 回归，但仍未在本次环境取得实际执行结果，也未运行真实模型双跑；真实逐聊天加载、并发与 Token 节省须由部署后的本机记录验收。
+测试、权限边界和恢复说明见 [docs/implementation.md](docs/implementation.md)。其中 2026-11-09 的开发验收记录是当时状态，不应与后续用户反馈混为一谈。隔离 mock 全通过；Windows 临时标准 stdio 另由 Sol 验证同一真实根两任务、alpha/bravo 真实实例重叠、真实 HY4 文件任务和一次授权命令。每台机器的注册/宿主加载、真实多聊天 identity、OS 隔离与 Token 节省仍须各自验收。
 
 ## DSH 峰谷时段控制（可选，默认关闭）
 

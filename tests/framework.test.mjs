@@ -7,6 +7,8 @@ import { fileURLToPath } from 'node:url';
 import { spawn, spawnSync } from 'node:child_process';
 import { configuredRoute, ROUTE, validateTask, redact, dshArgs, TaskManager, preflight } from '../bridges/dsh/core.mjs';
 import { mergeBlock, buildPlan } from '../scripts/manage.mjs';
+import { AdmissionCode, PreAdmissionRejection } from '../bridges/dsh/routing.mjs';
+import { validateSchedule } from '../bridges/dsh/schedule.mjs';
 const root = path.resolve(path.dirname(fileURLToPath(import.meta.url)), '..');
 const mock = path.join(root, 'tests', 'mock-dsh.mjs');
 const cli = { command: process.execPath, prefix: [mock] };
@@ -110,9 +112,88 @@ test('stdio MCP initialize, list, call and asynchronous wait', async () => {
     const init = await rpc('initialize', { protocolVersion: '2025-06-18', capabilities: {}, clientInfo: { name: 'test', version: '1' } });
     assert.equal(init.result.serverInfo.name, 'dsh-opencode-go');
     const list = await rpc('tools/list'); assert.equal(list.result.tools.length, 7);
+    const denied = await rpc('tools/call', { name: 'start_dsh_task', arguments: { ...task(cwd), permissionMode: 'workspace-write' } });
+    assert.equal(denied.result.isError, true);
+    assert.match(denied.result.content[0].text, /Workspace writes require/);
+    assert.equal(denied.result.structuredContent.error.code, AdmissionCode.PERMISSION_REFUSED);
+    assert.equal(denied.result.structuredContent.error.admission_state, 'not_accepted');
+    assert.equal(denied.result.structuredContent.error.fallback_eligible, false);
     const start = await rpc('tools/call', { name: 'start_dsh_task', arguments: task(cwd) });
     const id = JSON.parse(start.result.content[0].text).task_id;
     const wait = await rpc('tools/call', { name: 'wait_dsh_task', arguments: { taskId: id, waitMs: 5000 } });
     assert.equal(JSON.parse(wait.result.content[0].text).status, 'completed');
   } finally { p.stdin.end(); await new Promise(resolve => p.on('close', resolve)); }
 });
+test('pre-admission failures carry structured codes and admit no task', async () => {
+  const cwd = temp();
+  const m = new TaskManager({ cli, runtime: temp() });
+  await assert.rejects(m.start({ ...task(cwd), permissionMode: 'workspace-write', authorizationNote: 'ref' }), e =>
+    e instanceof PreAdmissionRejection && e.code === AdmissionCode.PERMISSION_REFUSED && e.admission_state === 'not_accepted' && e.fallback_eligible === false);
+
+  const peak = new TaskManager({
+    cli, runtime: temp(),
+    schedule: validateSchedule({ enabled: true, weekdayPeakWindows: ['09:00-12:00', '14:00-18:00'] }),
+    clock: () => new Date('2026-11-13T02:00:00.000Z')
+  });
+  await assert.rejects(peak.start(task(cwd, 'ok', 'peak-1')), e =>
+    e.code === AdmissionCode.SCHEDULE_GATE && e.details.phase === 'peak' && e.fallback_eligible === true);
+  assert.ok(!fs.existsSync(path.join(peak.runtime, 'active.lock')));
+
+  const masked = new TaskManager({
+    cli, runtime: temp(),
+    schedule: validateSchedule({ enabled: true, weekdayPeakWindows: ['09:00-12:00', '14:00-18:00'] }),
+    clock: () => new Date('2026-11-13T02:00:00.000Z')
+  });
+  const foreignLock = path.join(masked.runtime, 'active.lock');
+  fs.writeFileSync(foreignLock, JSON.stringify({ schema: 1, owner_pid: 999999, task_id: 'foreign-live', started_at: new Date().toISOString() }));
+  await assert.rejects(masked.start(task(cwd, 'ok', 'lock-mask')), e =>
+    e.code === AdmissionCode.LOCKED && e.fallback_eligible === false && e.details.owner_task_id === 'foreign-live');
+  assert.ok(fs.existsSync(foreignLock));
+  assert.equal(fs.readFileSync(foreignLock, 'utf8').includes('foreign-live'), true);
+
+  const busy = new TaskManager({ cli, runtime: temp() });
+  const active = await busy.start({ ...task(cwd, 'hang', 'busy-1'), timeoutMs: 10000 });
+  await assert.rejects(busy.start(task(cwd, 'ok', 'busy-2')), e =>
+    e.code === AdmissionCode.BUSY && e.details.active_task_id === active.task_id && e.fallback_eligible === false);
+  busy.cancel(active.task_id);
+  assert.equal((await busy.wait(active.task_id, 5000)).status, 'cancelled');
+});
+test('live mock MCP schedule rejection carries safe structured metadata', {
+  skip: (() => {
+    const local = new Date(Date.now() + 8 * 3600e3);
+    const day = local.getUTCDay(), minutes = local.getUTCHours() * 60 + local.getUTCMinutes();
+    return day === 0 || day === 6 || minutes >= 23 * 60 + 58;
+  })()
+}, async () => {
+  const runtime = temp(), cwd = temp();
+  const scheduleFile = path.join(temp(), 'schedule.json');
+  fs.writeFileSync(scheduleFile, JSON.stringify({
+    enabled: true, stopNewTasksBeforePeakMinutes: 0, weekdayPeakWindows: ['00:00-23:59']
+  }));
+  const p = spawn(process.execPath, [path.join(root, 'bridges', 'dsh', 'server.mjs'), '--dsh-entry', mock,
+    '--runtime', runtime, '--schedule-config', scheduleFile], { stdio: ['pipe', 'pipe', 'pipe'] });
+  let seq = 0, buffer = ''; const pending = new Map();
+  p.stdout.setEncoding('utf8'); p.stdout.on('data', data => {
+    buffer += data; let pos;
+    while ((pos = buffer.indexOf('\n')) >= 0) {
+      const v = JSON.parse(buffer.slice(0, pos)); buffer = buffer.slice(pos + 1);
+      pending.get(v.id)?.(v); pending.delete(v.id);
+    }
+  });
+  const rpc = (method, params = {}) => new Promise((resolve, reject) => {
+    const id = ++seq, timer = setTimeout(() => reject(Error('MCP test timeout')), 10000);
+    pending.set(id, value => { clearTimeout(timer); resolve(value); });
+    p.stdin.write(JSON.stringify({ jsonrpc: '2.0', id, method, params }) + '\n');
+  });
+  try {
+    await rpc('initialize', { protocolVersion: '2025-06-18', capabilities: {}, clientInfo: { name: 'test', version: '1' } });
+    const result = await rpc('tools/call', { name: 'start_dsh_task', arguments: task(cwd) });
+    assert.equal(result.result.isError, true);
+    assert.equal(result.result.structuredContent.error.code, AdmissionCode.SCHEDULE_GATE);
+    assert.equal(result.result.structuredContent.error.admission_state, 'not_accepted');
+    assert.equal(result.result.structuredContent.error.fallback_eligible, true);
+    assert.equal(result.result.structuredContent.error.details.phase, 'peak');
+    assert.equal(typeof result.result.structuredContent.error.details.hard_stop_at, 'string');
+  } finally { p.stdin.end(); await new Promise(resolve => p.on('close', resolve)); }
+});
+

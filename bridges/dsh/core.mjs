@@ -4,6 +4,7 @@ import os from 'node:os';
 import crypto from 'node:crypto';
 import { spawn, spawnSync } from 'node:child_process';
 import { scheduleSnapshot, scheduleTaskPreamble } from './schedule.mjs';
+import { AdmissionCode, PreAdmissionRejection } from './routing.mjs';
 
 export const ROUTE = Object.freeze({ provider: 'opencode-go', model: 'deepseek-v4.1-flash', reasoningEffort: 'max' });
 export const VERSION = '0.3.0';
@@ -137,9 +138,12 @@ export function validateTask(input, allowWrite = false) {
   if (!fs.statSync(cwd).isDirectory()) throw Error('cwd is not a directory.');
   if (typeof input.idempotencyKey !== 'string' || !/^[A-Za-z0-9_.:-]{1,100}$/.test(input.idempotencyKey)) throw Error('idempotencyKey must contain 1..100 safe ASCII characters.');
   const permissionMode = input.permissionMode ?? 'read-only';
-  if (!['read-only', 'workspace-write'].includes(permissionMode)) throw Error('Only read-only and workspace-write are supported.');
+  if (!['read-only', 'workspace-write'].includes(permissionMode)) {
+    throw new PreAdmissionRejection(AdmissionCode.INVALID_PARAMS, 'Only read-only and workspace-write are supported.');
+  }
   if (permissionMode === 'workspace-write' && (!allowWrite || typeof input.authorizationNote !== 'string' || !input.authorizationNote.trim())) {
-    throw Error('Workspace writes require local --allow-write enablement AND an explicit user-approval reference in authorizationNote.');
+    throw new PreAdmissionRejection(AdmissionCode.PERMISSION_REFUSED,
+      'Workspace writes require local --allow-write enablement AND an explicit user-approval reference in authorizationNote.');
   }
   const timeoutMs = input.timeoutMs ?? 900000;
   if (!Number.isInteger(timeoutMs) || timeoutMs < 1000 || timeoutMs > 3600000) throw Error('timeoutMs must be an integer between 1000 and 3600000.');
@@ -340,7 +344,12 @@ export class TaskManager {
     }
   }
   async start(input) {
-    const task = validateTask(input, this.allowWrite);
+    let task;
+    try { task = validateTask(input, this.allowWrite); }
+    catch (error) {
+      if (error instanceof PreAdmissionRejection) throw error;
+      throw new PreAdmissionRejection(AdmissionCode.INVALID_PARAMS, error.message, { details: { stage: 'validate' } });
+    }
     const fingerprint = digest(JSON.stringify(task));
     const requestFile = path.join(this.runtime, 'requests', `${digest(task.idempotencyKey)}.json`);
     if (fs.existsSync(requestFile)) {
@@ -348,24 +357,53 @@ export class TaskManager {
       if (old.fingerprint !== fingerprint) throw Error(`Idempotency key already used with different arguments in DSH instance "${this.instance}".`);
       return this.get(old.task_id);
     }
-    if (this.active) throw Error(`DSH instance "${this.instance}" is busy with ${this.active.record.task_id}; wait rather than start a duplicate.`);
-    const window = this.scheduleStatus();
-    if (!window.accept_new_tasks) throw Error(`DSH instance "${this.instance}" is blocked by the offpeak schedule (${window.phase}); next offpeak at ${window.next_offpeak_at || 'see schedule status'}.`);
-    if (window.enabled && window.reject_if_budget_exceeds_window && this.clock().getTime() + task.timeoutMs + 60000 >= Date.parse(window.hard_stop_at)) throw Error('Task timeout budget exceeds the remaining offpeak window (plus 60s margin). Shorten the budget or use the next offpeak window.');
+    if (this.active) {
+      throw new PreAdmissionRejection(AdmissionCode.BUSY,
+        `DSH instance "${this.instance}" is busy with ${this.active.record.task_id}; wait rather than start a duplicate.`,
+        { details: { active_task_id: this.active.record.task_id } });
+    }
+    // Acquire the exclusive lock BEFORE the schedule gate. A live/unknown lock
+    // must never be masked by an eligible schedule rejection.
     const lock = path.join(this.runtime, 'active.lock');
     let fd;
     try { fd = fs.openSync(lock, 'wx', 0o600); }
     catch {
       const owner = this.lockInfo();
       const detail = owner?.unreadable ? 'lock content is unreadable' : `owner_pid=${owner?.owner_pid ?? 'unknown'} task_id=${owner?.task_id ?? 'unknown'}`;
-      throw Error(`Exclusive lock exists for DSH instance "${this.instance}": ${lock} (${detail}). Do not delete it until the owner and child processes have been checked.`);
+      throw new PreAdmissionRejection(AdmissionCode.LOCKED,
+        `Exclusive lock exists for DSH instance "${this.instance}": ${lock} (${detail}). Do not delete it until the owner and child processes have been checked.`,
+        { details: { owner_pid: owner?.owner_pid ?? null, owner_task_id: owner?.task_id ?? null } });
     }
+    let window;
     let record;
     try {
       fs.writeFileSync(fd, JSON.stringify({ schema: 1, instance: this.instance, runtime: this.runtime, owner_pid: process.pid, task_id: null, started_at: now() }));
       fs.closeSync(fd); fd = undefined;
-      const sessionOwner = this.assertSessionOwnership(task);
-      const verified = this.check(this.cli);
+      let sessionOwner;
+      try { sessionOwner = this.assertSessionOwnership(task); }
+      catch (error) {
+        if (error instanceof PreAdmissionRejection) throw error;
+        throw new PreAdmissionRejection(AdmissionCode.SESSION_CONFLICT, error.message, { details: { stage: 'session' } });
+      }
+      // Session ownership is proven before the schedule can produce an
+      // apparently eligible rejection. Idempotent reads still happen above.
+      window = this.scheduleStatus();
+      if (!window.accept_new_tasks) {
+        throw new PreAdmissionRejection(AdmissionCode.SCHEDULE_GATE,
+          `DSH instance "${this.instance}" is blocked by the offpeak schedule (${window.phase}); next offpeak at ${window.next_offpeak_at || 'see schedule status'}.`,
+          { details: { phase: window.phase, next_offpeak_at: window.next_offpeak_at, hard_stop_at: window.hard_stop_at } });
+      }
+      if (window.enabled && window.reject_if_budget_exceeds_window && this.clock().getTime() + task.timeoutMs + 60000 >= Date.parse(window.hard_stop_at)) {
+        throw new PreAdmissionRejection(AdmissionCode.SCHEDULE_GATE,
+          'Task timeout budget exceeds the remaining offpeak window (plus 60s margin). Shorten the budget or use the next offpeak window.',
+          { details: { phase: window.phase, gate: 'budget_exceeds_window', next_offpeak_at: window.next_offpeak_at, hard_stop_at: window.hard_stop_at } });
+      }
+      let verified;
+      try { verified = this.check(this.cli); }
+      catch (error) {
+        if (error instanceof PreAdmissionRejection) throw error;
+        throw new PreAdmissionRejection(AdmissionCode.PREFLIGHT_FAILED, error.message, { details: { stage: 'preflight' } });
+      }
       const id = crypto.randomUUID();
       const dir = path.join(this.runtime, id);
       fs.mkdirSync(dir, { mode: 0o700 });
