@@ -10,7 +10,7 @@ import { sha256File } from '../bridges/hy4/manifest.mjs';
 const root = path.resolve(path.dirname(fileURLToPath(import.meta.url)), '..');
 const fakeAcp = path.join(root, 'tests', 'fake-codebuddy-acp.mjs');
 const mockDsh = path.join(root, 'tests', 'mock-dsh.mjs');
-const temp = () => fs.mkdtempSync(path.join(os.tmpdir(), 'ai-rule-pool-mcp-'));
+const temp = () => fs.mkdtempSync(path.join(fs.realpathSync.native(os.tmpdir()), 'ai-rule-pool-mcp-'));
 const id = n => `00000000-0000-4000-8000-${String(n).padStart(12, '0')}`;
 const OFFPEAK = '2026-11-16T00:30:00.000Z';
 const PEAK = '2026-11-16T02:00:00.000Z';
@@ -202,12 +202,12 @@ test('actual stdio MCP: initialize/list/status/run, replay does not start a seco
   try {
     const listed = await server.client.rpc('tools/list', {});
     const names = listed.result.tools.map(tool => tool.name);
-    for (const name of ['get_pool_status', 'start_pool_task', 'run_pool_task', 'get_pool_task', 'wait_pool_task', 'cancel_pool_task']) {
+    for (const name of ['get_pool_status', 'set_pool_schedule', 'start_pool_task', 'run_pool_task', 'get_pool_task', 'wait_pool_task', 'cancel_pool_task']) {
       assert.ok(names.includes(name), name);
     }
     const status = await server.client.call('get_pool_status', { context });
-    assert.equal(status.parsed.schedule.enabled, true);
-    assert.equal(status.parsed.schedule.phase, 'offpeak');
+    assert.equal(status.parsed.schedule.configured, true);
+    assert.equal(status.parsed.schedule.enabled, false);
     assert.equal(status.parsed.write_enabled, false);
     assert.ok(!JSON.stringify(status.parsed).includes('lease'));
 
@@ -269,6 +269,7 @@ test('actual stdio MCP: peak schedule rejects before admission with no Hy4 fallb
   const server = await startServer(f, PEAK);
   try {
     const args = { context, prompt: 'blocked', cwd: f.workspace, idempotencyKey: 'peak-key', timeoutMs: 5000 };
+    await server.client.call('set_pool_schedule', { context, enabled: true });
     await assert.rejects(() => server.client.call('run_pool_task', args), error => {
       assert.equal(error.admission_state, 'not_accepted');
       assert.ok(['DSH_SCHEDULE_GATE', 'DSH_PERMISSION_REFUSED'].includes(error.code));
@@ -287,6 +288,7 @@ test('actual stdio MCP: proven pre-admission schedule gate uses the HY4 fixture 
   const context = await issueContext(f);
   const server = await startServer(f, PEAK);
   try {
+    await server.client.call('set_pool_schedule', { context, enabled: true });
     const result = await server.client.call('run_pool_task', {
       context, prompt: 'fallback task', cwd: f.workspace, idempotencyKey: 'hy4-key',
       capability: 'text-only', timeoutMs: 5000
@@ -304,11 +306,112 @@ test('actual stdio MCP: proven pre-admission schedule gate uses the HY4 fixture 
   } finally { await stop(server); }
 });
 
+test('actual stdio MCP: one root runs separate workers, preserves session ownership and shares the machine cap', async () => {
+  const f = fixture({ runningCap: 2 });
+  const child2 = id(61), root2 = id(62);
+  writeRollout(f.base, child2, root2);
+  const [context, otherContext] = await Promise.all([issueContext(f), issueContext(f, child2)]);
+  const server = await startServer(f);
+  try {
+    const first = { context, cwd: f.workspace, prompt: 'hang', idempotencyKey: 'parallel-primary', timeoutMs: 15000 };
+    const second = { ...first, prompt: 'independent\n\nsleep:2500', idempotencyKey: 'parallel-secondary' };
+    const [a, b] = await Promise.all([
+      server.client.call('start_pool_task', first), server.client.call('start_pool_task', second)
+    ]);
+    assert.notEqual(a.parsed.task_id, b.parsed.task_id);
+    const status = (await server.client.call('get_pool_status', { context })).parsed;
+    assert.equal(status.running, 2);
+    assert.equal(status.bindings, 1);
+    assert.deepEqual(status.root.workers.map(worker => worker.state), ['active', 'active']);
+    assert.notEqual(status.root.workers[0].dsh_instance, status.root.workers[1].dsh_instance);
+    await assert.rejects(server.client.call('start_pool_task', { ...first, context: otherContext }), /global running capacity/);
+    for (const name of ['get_pool_task', 'wait_pool_task', 'cancel_pool_task']) {
+      await assert.rejects(server.client.call(name, { context: otherContext, taskId: b.parsed.task_id }), /not mapped to this root/);
+    }
+    const replay = (await server.client.call('start_pool_task', second)).parsed;
+    assert.equal(replay.task_id, b.parsed.task_id);
+    assert.equal(replay.replayed, true);
+    const completed = (await server.client.call('wait_pool_task', { context, taskId: b.parsed.task_id, waitMs: 8000 })).parsed;
+    assert.equal(completed.status, 'completed');
+    assert.ok(completed.receipt.session_id);
+    await assert.rejects(server.client.call('run_pool_task', {
+      ...second, context: otherContext, idempotencyKey: 'foreign-session', sessionId: completed.receipt.session_id
+    }), error => error.code === 'DSH_SESSION_CONFLICT' && error.admission_state === 'not_accepted');
+    const resumed = (await server.client.call('start_pool_task', {
+      ...first, idempotencyKey: 'resume-secondary', sessionId: completed.receipt.session_id
+    })).parsed;
+    const forResume = (await server.client.call('get_pool_status', { context })).parsed.root.workers;
+    assert.equal(forResume.find(worker => worker.active_task_id === resumed.task_id)?.worker,
+      status.root.workers.find(worker => worker.active_task_id === b.parsed.task_id)?.worker);
+    const cancelled = (await server.client.call('cancel_pool_task', { context, idempotencyKey: 'resume-secondary' })).parsed;
+    assert.equal(cancelled.task_id, resumed.task_id);
+    assert.equal(cancelled.status, 'cancelled');
+    const unaffected = (await server.client.call('get_pool_task', { context, taskId: a.parsed.task_id })).parsed;
+    assert.equal(unaffected.status, 'running');
+    await server.client.call('cancel_pool_task', { context, taskId: a.parsed.task_id });
+  } finally { await stop(server); }
+});
+
+test('ordinary DSH defaults to workspace-write while explicit read-only and old pooled replays remain valid', async () => {
+  const f = fixture();
+  delete f.config.allow_write;
+  fs.writeFileSync(f.configPath, JSON.stringify(f.config));
+  const context = await issueContext(f);
+  const server = await startServer(f);
+  try {
+    const args = { context, cwd: f.workspace, prompt: 'DSH permission check', idempotencyKey: 'write-default', timeoutMs: 5000 };
+    const writable = (await server.client.call('run_pool_task', args)).parsed;
+    assert.equal(writable.receipt.permission_mode, 'workspace-write');
+    const oldArgs = { ...args, idempotencyKey: 'previous-read-only-default' };
+    const restricted = (await server.client.call('run_pool_task', { ...oldArgs, permissionMode: 'read-only' })).parsed;
+    assert.equal(restricted.receipt.permission_mode, 'read-only');
+    const stateFile = path.join(f.config.pool_root, 'bindings.json');
+    const state = JSON.parse(fs.readFileSync(stateFile, 'utf8'));
+    state.schema = 2;
+    delete state.schedule_choices;
+    fs.writeFileSync(stateFile, JSON.stringify(state));
+    const decisions = path.join(state.roots[f.parent].runtime_path, 'routing');
+    for (const name of fs.readdirSync(decisions).filter(name => name.endsWith('.pool.json'))) {
+      const file = path.join(decisions, name);
+      const proof = JSON.parse(fs.readFileSync(file, 'utf8'));
+      if (proof.task_id !== restricted.task_id) continue;
+      proof.schema = 1;
+      delete proof.worker;
+      fs.writeFileSync(file, JSON.stringify(proof));
+    }
+    const replay = (await server.client.call('run_pool_task', oldArgs)).parsed;
+    assert.equal(replay.replayed, true);
+    assert.equal(replay.task_id, restricted.task_id);
+    assert.equal(replay.receipt.permission_mode, 'read-only');
+  } finally { await stop(server); }
+});
+
+test('two live MCP connections cannot claim the same root request twice', async () => {
+  const f = fixture();
+  const context = await issueContext(f);
+  const a = await startServer(f);
+  const b = await startServer(f);
+  try {
+    const request = { context, cwd: f.workspace, prompt: 'hang', idempotencyKey: 'one-cross-connection-key', timeoutMs: 10000 };
+    const attempts = await Promise.allSettled([
+      a.client.call('start_pool_task', request), b.client.call('start_pool_task', request)
+    ]);
+    const accepted = attempts.filter(attempt => attempt.status === 'fulfilled').map(attempt => attempt.value.parsed);
+    assert.ok(accepted.length > 0);
+    assert.equal(new Set(accepted.map(result => result.task_id)).size, 1);
+    assert.equal(taskDirs(f).length, 1);
+    const status = (await a.client.call('get_pool_status', { context })).parsed;
+    assert.equal(status.running, 1);
+    assert.equal(status.root.workers.length, 1);
+  } finally { await Promise.all([stop(a), stop(b)]); }
+});
+
 test('actual stdio MCP: normalized writeScopes reach the pooled HY4 fallback and create a file', async () => {
   const f = fixture({ clock: PEAK, hy4: true, allowWrite: true, acpMode: 'write-create' });
   const context = await issueContext(f);
   const server = await startServer(f, PEAK, ['--allow-write']);
   try {
+    await server.client.call('set_pool_schedule', { context, enabled: true });
     const result = await server.client.call('run_pool_task', {
       context, prompt: 'pooled native write', cwd: f.workspace, idempotencyKey: 'pool-write-scope',
       timeoutMs: 6000, capability: 'workspace-write', permissionMode: 'workspace-write',
@@ -328,6 +431,7 @@ test('actual stdio MCP: exact command rules reach the pooled HY4 fallback only w
   const context = await issueContext(f);
   const server = await startServer(f, PEAK, ['--allow-write']);
   try {
+    await server.client.call('set_pool_schedule', { context, enabled: true });
     const result = await server.client.call('run_pool_task', {
       context, prompt: 'pooled native command', cwd: f.workspace, idempotencyKey: 'pool-command',
       timeoutMs: 6000, capability: 'workspace-write', permissionMode: 'workspace-write',

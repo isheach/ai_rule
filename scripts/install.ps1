@@ -5,6 +5,7 @@ param(
     [switch]$OffpeakSchedule,
     [switch]$DisableOffpeakSchedule,
     [switch]$AllowWrite,
+    [switch]$ReadOnly,
     [switch]$Verify,
     [string]$DshEntry,
     [string[]]$DshInstance,
@@ -21,6 +22,7 @@ if ($EnableDsh) { $nodeArgs += '--enable-dsh' }
 if ($OffpeakSchedule) { $nodeArgs += '--offpeak-schedule' }
 if ($DisableOffpeakSchedule) { $nodeArgs += '--disable-offpeak-schedule' }
 if ($AllowWrite) { $nodeArgs += '--allow-write' }
+if ($ReadOnly) { $nodeArgs += '--read-only' }
 if ($Verify) { $nodeArgs += '--verify' }
 if ($DshEntry) { $nodeArgs += @('--dsh-entry', $DshEntry) }
 if ($DshInstance) { foreach ($name in $DshInstance) { $nodeArgs += @('--dsh-instance', $name) } }

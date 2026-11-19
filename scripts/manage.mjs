@@ -63,8 +63,15 @@ function argValue(args, name) {
 }
 
 
-export function buildPlan({ home = os.homedir(), codexHome = process.env.CODEX_HOME || path.join(home, '.codex'), enableDsh = false, dshEntry, allowWrite = false, workbuddyBridge, offpeakSchedule = false, disableOffpeakSchedule = false, dshInstances = [], removeDshInstances = [] } = {}) {
+export function buildPlan({ home = os.homedir(), codexHome = process.env.CODEX_HOME || path.join(home, '.codex'), enableDsh = false, dshEntry, allowWrite = false, readOnly = false, workbuddyBridge, offpeakSchedule = false, disableOffpeakSchedule = false, dshInstances = [], removeDshInstances = [] } = {}) {
   codexHome = path.resolve(codexHome);
+  if (allowWrite && readOnly) throw Error('Cannot combine --allow-write and --read-only.');
+  if ((allowWrite || readOnly) && !enableDsh) throw Error('DSH permission options require --enable-dsh.');
+  const permissionArgs = previous => {
+    if (readOnly || (!allowWrite && previous?.includes('--read-only'))) return ['--read-only'];
+    if (allowWrite || previous?.includes('--allow-write')) return ['--allow-write'];
+    return [];
+  };
   if (!Array.isArray(dshInstances) || !Array.isArray(removeDshInstances)) throw Error('DSH instance options must be lists.');
   const addNames = dshInstances.map(validateInstanceName);
   const removeNames = removeDshInstances.map(validateInstanceName);
@@ -91,9 +98,9 @@ export function buildPlan({ home = os.homedir(), codexHome = process.env.CODEX_H
   const parts = [];
   const dshPlan = [];
   const preservedServices = [];
-  if (offpeakSchedule && disableOffpeakSchedule) throw Error('Cannot enable and disable offpeak simultaneously.');
+  if (offpeakSchedule && disableOffpeakSchedule) throw Error('Cannot set and clear the schedule calendar simultaneously.');
   if ((offpeakSchedule || disableOffpeakSchedule) && !enableDsh) throw Error('Schedule options require --enable-dsh.');
-  if (preserveDefault && (offpeakSchedule || disableOffpeakSchedule)) throw Error('Adding named instances must not silently rewrite the existing default service schedule. Change the global schedule with a separate --enable-dsh command (without --dsh-instance) first, then add instances; named instances inherit the resulting policy.');
+  if (preserveDefault && (offpeakSchedule || disableOffpeakSchedule)) throw Error('Adding named instances preserves the existing default calendar. Change its registration with a separate --enable-dsh command without --dsh-instance.');
   const previousManaged = original.match(/# BEGIN isheach\/ai_rule managed[\s\S]*?# END isheach\/ai_rule managed/)?.[0] || '';
   const useSchedule = !disableOffpeakSchedule && (offpeakSchedule || previousManaged.includes('--schedule-config'));
   if (enableDsh) {
@@ -103,11 +110,15 @@ export function buildPlan({ home = os.homedir(), codexHome = process.env.CODEX_H
     const inheritedEntry = oldDefaultArgs ? argValue(oldDefaultArgs, '--dsh-entry') : undefined;
     const cliEntry = dshEntry ? cli.prefix[0] : (inheritedEntry || cli.prefix[0]);
     const inheritedSchedule = oldDefaultArgs ? argValue(oldDefaultArgs, '--schedule-config') : undefined;
-    const schedulePath = useSchedule ? (preserveDefault && inheritedSchedule ? inheritedSchedule : path.join(repo, 'config', 'offpeak.schedule.json')) : null;
+    const schedulePath = useSchedule ? ((!offpeakSchedule && inheritedSchedule) || path.join(repo, 'config', 'offpeak.schedule.json')) : null;
     if (!preserveDefault) {
-      const common = [...(cli.prefix.length ? ['--dsh-entry', cli.prefix[0]] : []), ...(allowWrite ? ['--allow-write'] : []), ...(schedulePath ? ['--schedule-config', schedulePath] : [])];
+      const runtime = oldDefaultArgs ? argValue(oldDefaultArgs, '--runtime') : undefined;
+      const common = [
+        ...(cliEntry ? ['--dsh-entry', cliEntry] : []), ...(runtime ? ['--runtime', runtime] : []),
+        ...permissionArgs(oldDefaultArgs), ...(schedulePath ? ['--schedule-config', schedulePath] : [])
+      ];
       parts.push(mcpSection(DSH_SERVER, [bridge, ...common]));
-      dshPlan.push({ instance: INSTANCE_DEFAULT, server: DSH_SERVER, runtime: runtimeForInstance(INSTANCE_DEFAULT) });
+      dshPlan.push({ instance: INSTANCE_DEFAULT, server: DSH_SERVER, runtime: runtime || runtimeForInstance(INSTANCE_DEFAULT) });
     } else if (oldDefaultSection) {
       dshPlan.push({ instance: INSTANCE_DEFAULT, server: DSH_SERVER, preserved: true,
         runtime: (oldDefaultArgs && argValue(oldDefaultArgs, '--runtime')) || runtimeForInstance(INSTANCE_DEFAULT) });
@@ -116,11 +127,18 @@ export function buildPlan({ home = os.homedir(), codexHome = process.env.CODEX_H
     }
     for (const name of addNames) {
       const server = serverNameForInstance(name);
-      const args = [bridge, '--instance', name, ...(cliEntry ? ['--dsh-entry', cliEntry] : []), ...(allowWrite ? ['--allow-write'] : []), ...(schedulePath ? ['--schedule-config', schedulePath] : [])];
+      const previous = existing.sections.find(section => sectionName(section) === server);
+      const previousArgs = previous ? tomlArray(previous) : null;
+      const runtime = previousArgs ? argValue(previousArgs, '--runtime') : undefined;
+      const args = [
+        bridge, '--instance', name, ...(cliEntry ? ['--dsh-entry', cliEntry] : []),
+        ...(runtime ? ['--runtime', runtime] : []), ...permissionArgs(previousArgs),
+        ...(schedulePath ? ['--schedule-config', schedulePath] : [])
+      ];
       parts.push(mcpSection(server, args));
-      dshPlan.push({ instance: name, server, runtime: runtimeForInstance(name) });
+      dshPlan.push({ instance: name, server, runtime: runtime || runtimeForInstance(name) });
     }
-  } else if (allowWrite) throw Error('--allow-write requires --enable-dsh.');
+  }
   if (workbuddyBridge) {
     const entry = fs.realpathSync(workbuddyBridge);
     if (!fs.statSync(entry).isFile() || !/\.mjs$/i.test(entry)) throw Error('WorkBuddy bridge must be an existing server.mjs; this repository does not recreate unseen custom authorization code.');
@@ -234,7 +252,8 @@ export function verifyInstallation({ home = os.homedir(), codexHome = process.en
     const scheduleConfig = scheduleEnabled ? args[scheduleIndex + 1] : null;
     const scheduleConfigExists = scheduleEnabled && Boolean(scheduleConfig) && fs.existsSync(scheduleConfig);
     instances.push({ instance, server, identity_valid: identityValid, runtime, schedule_enabled: scheduleEnabled,
-      schedule_config: scheduleConfig, schedule_config_exists: scheduleConfigExists, allow_write: Boolean(args?.includes('--allow-write')),
+      schedule_default_enabled: false, schedule_config: scheduleConfig, schedule_config_exists: scheduleConfigExists,
+      allow_write: Boolean(args && !args.includes('--read-only')),
       ...(nameError ? { error: nameError } : {}) });
   }
   const instanceKeys = instances.map(x => x.instance).filter(Boolean);
@@ -276,7 +295,7 @@ export function main(args) {
     if (!checks.effective_agents_has_rules || !checks.skill_installed || !checks.dsh_structure_valid) process.exitCode = 1;
     return;
   }
-  const result = buildPlan({ home, codexHome, enableDsh: args.includes('--enable-dsh'), dshEntry: option(args, '--dsh-entry'), allowWrite: args.includes('--allow-write'),
+  const result = buildPlan({ home, codexHome, enableDsh: args.includes('--enable-dsh'), dshEntry: option(args, '--dsh-entry'), allowWrite: args.includes('--allow-write'), readOnly: args.includes('--read-only'),
     workbuddyBridge: option(args, '--workbuddy-bridge'), offpeakSchedule: args.includes('--offpeak-schedule'), disableOffpeakSchedule: args.includes('--disable-offpeak-schedule'),
     dshInstances: optionValues(args, '--dsh-instance'), removeDshInstances: optionValues(args, '--remove-dsh-instance') });
   console.log(`ai_rule ${VERSION}: ${args.includes('--apply') ? 'APPLY' : 'PLAN ONLY'}`);

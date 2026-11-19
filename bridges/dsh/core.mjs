@@ -128,23 +128,26 @@ export function preflight(cli) {
   for (const key of Object.keys(ROUTE)) if (route[key] !== ROUTE[key]) throw Error(`Headless ${key} mismatch: expected ${ROUTE[key]}, got ${route[key] || '(absent)'}.`);
   return { version, configured_route: route, actual_provider_attestation: 'not_available', billing_verification: 'not_available' };
 }
-export function validateTask(input, allowWrite = false) {
+export function validateTask(input, allowWrite = true) {
   if (!input || typeof input !== 'object' || Array.isArray(input)) throw Error('Task must be an object.');
-  const allowed = new Set(['prompt', 'cwd', 'idempotencyKey', 'timeoutMs', 'permissionMode', 'authorizationNote', 'sessionId']);
+  const allowed = new Set(['prompt', 'cwd', 'idempotencyKey', 'timeoutMs', 'permissionMode', 'authorizationNote', 'sessionId', 'scheduleEnabled']);
   for (const key of Object.keys(input)) if (!allowed.has(key)) throw Error(`Unknown task field: ${key}`);
   if (typeof input.prompt !== 'string' || !input.prompt.trim() || Buffer.byteLength(input.prompt) > 60000) throw Error('prompt must contain 1..60000 UTF-8 bytes.');
   if (typeof input.cwd !== 'string' || !path.isAbsolute(input.cwd)) throw Error('cwd must be an absolute existing directory.');
   const cwd = fs.realpathSync(input.cwd);
   if (!fs.statSync(cwd).isDirectory()) throw Error('cwd is not a directory.');
   if (typeof input.idempotencyKey !== 'string' || !/^[A-Za-z0-9_.:-]{1,100}$/.test(input.idempotencyKey)) throw Error('idempotencyKey must contain 1..100 safe ASCII characters.');
-  const permissionMode = input.permissionMode ?? 'read-only';
+  const permissionMode = input.permissionMode ?? (allowWrite ? 'workspace-write' : 'read-only');
   if (!['read-only', 'workspace-write'].includes(permissionMode)) {
     throw new PreAdmissionRejection(AdmissionCode.INVALID_PARAMS, 'Only read-only and workspace-write are supported.');
   }
-  if (permissionMode === 'workspace-write' && (!allowWrite || typeof input.authorizationNote !== 'string' || !input.authorizationNote.trim())) {
-    throw new PreAdmissionRejection(AdmissionCode.PERMISSION_REFUSED,
-      'Workspace writes require local --allow-write enablement AND an explicit user-approval reference in authorizationNote.');
+  if (permissionMode === 'workspace-write' && !allowWrite) {
+    throw new PreAdmissionRejection(AdmissionCode.PERMISSION_REFUSED, 'This DSH bridge is configured read-only.');
   }
+  if (input.authorizationNote !== undefined && (typeof input.authorizationNote !== 'string' || input.authorizationNote.length > 2000)) {
+    throw Error('authorizationNote must be a string of at most 2000 characters.');
+  }
+  if (input.scheduleEnabled !== undefined && typeof input.scheduleEnabled !== 'boolean') throw Error('scheduleEnabled must be a boolean.');
   const timeoutMs = input.timeoutMs ?? 900000;
   if (!Number.isInteger(timeoutMs) || timeoutMs < 1000 || timeoutMs > 3600000) throw Error('timeoutMs must be an integer between 1000 and 3600000.');
   if (input.sessionId !== undefined && (typeof input.sessionId !== 'string' || !/^[A-Za-z0-9_.:-]{1,160}$/.test(input.sessionId))) throw Error('Invalid sessionId.');
@@ -166,13 +169,19 @@ function killTree(child) {
 }
 
 export class TaskManager {
-  constructor({ cli, runtime, instance = INSTANCE_DEFAULT, allowWrite = false, check = preflight, schedule = null, clock = () => new Date(), scheduleTickMs = 15000 } = {}) {
+  constructor({
+    cli, runtime, instance = INSTANCE_DEFAULT, allowWrite = true, check = preflight,
+    schedule = null, scheduleDefaultEnabled = Boolean(schedule), scheduleEnabledForRoot,
+    clock = () => new Date(), scheduleTickMs = 15000
+  } = {}) {
     this.cli = cli;
     this.instance = normalizeInstanceName(instance);
     this.runtime = path.resolve(runtime ?? runtimeForInstance(this.instance));
     this.allowWrite = allowWrite;
     this.check = check;
     this.schedule = schedule;
+    this.scheduleDefaultEnabled = scheduleDefaultEnabled;
+    this.scheduleEnabledForRoot = scheduleEnabledForRoot;
     this.clock = clock;
     this.scheduleTickMs = scheduleTickMs;
     this.active = null;
@@ -201,7 +210,47 @@ export class TaskManager {
     if (!meta || meta.schema !== 1 || typeof meta.instance !== 'string') throw Error(`Invalid DSH instance metadata at ${this.instanceMetadataPath}; refusing to reuse a shared runtime.`);
     if (meta.instance !== this.instance) throw Error(`Runtime ${this.runtime} belongs to DSH instance "${meta.instance}", not "${this.instance}". Each named instance needs its own runtime; do not point two instances at one path.`);
   }
-  scheduleStatus() { return scheduleSnapshot(this.schedule, this.clock()); }
+  scheduleStatus(enabled = this.active?.scheduleEnabled) {
+    const effective = this.scheduleEnabledForRoot ? this.scheduleEnabledForRoot() : (enabled ?? this.scheduleDefaultEnabled);
+    return scheduleSnapshot(effective ? this.schedule : null, this.clock());
+  }
+  refreshSchedule() {
+    const active = this.active;
+    if (!active || active.stopReason || !this.schedule) return;
+    clearTimeout(active.scheduleTimer);
+    active.scheduleTimer = null;
+    const tick = delay => {
+      active.scheduleTimer = setTimeout(() => {
+        if (this.active === active) this.refreshSchedule();
+      }, delay);
+    };
+    let window;
+    try { window = this.scheduleStatus(); }
+    catch {
+      // The atomic root policy may be temporarily inaccessible. Check again
+      // before making a decision about the owner process.
+      tick(this.scheduleTickMs);
+      return;
+    }
+    if (window.phase === 'peak') {
+      this.cancel(active.record.task_id, 'scheduled_peak');
+      return;
+    }
+    if (!window.enabled && !this.scheduleEnabledForRoot) return;
+    const until = Date.parse(window.hard_stop_at) - this.clock().getTime();
+    tick(Number.isFinite(until) ? Math.max(5, Math.min(this.scheduleTickMs, until)) : this.scheduleTickMs);
+  }
+  setTaskSchedule(id, enabled) {
+    if (typeof enabled !== 'boolean') throw Error('enabled must be a boolean');
+    if (this.scheduleEnabledForRoot) throw Error('Use the root schedule control for a pooled task.');
+    if (enabled && !this.schedule) throw Error('This DSH bridge has no configured schedule calendar.');
+    if (this.active?.record.task_id !== id || this.active.stopReason) {
+      throw Error('Only an active task owned by this bridge can change its schedule.');
+    }
+    this.active.scheduleEnabled = enabled;
+    this.refreshSchedule();
+    return { task_id: id, schedule: this.scheduleStatus() };
+  }
   lockInfo() {
     const lock = path.join(this.runtime, 'active.lock');
     if (!fs.existsSync(lock)) return null;
@@ -350,12 +399,23 @@ export class TaskManager {
       if (error instanceof PreAdmissionRejection) throw error;
       throw new PreAdmissionRejection(AdmissionCode.INVALID_PARAMS, error.message, { details: { stage: 'validate' } });
     }
-    const fingerprint = digest(JSON.stringify(task));
     const requestFile = path.join(this.runtime, 'requests', `${digest(task.idempotencyKey)}.json`);
-    if (fs.existsSync(requestFile)) {
+    const fingerprint = digest(JSON.stringify(task, Object.keys(task).sort()));
+    const replay = () => {
+      if (!fs.existsSync(requestFile)) return null;
       const old = readJSON(requestFile);
-      if (old.fingerprint !== fingerprint) throw Error(`Idempotency key already used with different arguments in DSH instance "${this.instance}".`);
-      return this.get(old.task_id);
+      let matches = old.fingerprint === fingerprint;
+      if (old.schema === undefined && !matches) {
+        matches = old.fingerprint === digest(JSON.stringify(task))
+          || (input.permissionMode === undefined && old.fingerprint === digest(JSON.stringify({ ...task, permissionMode: 'read-only' })));
+      }
+      if (!matches) throw Error(`Idempotency key already used with different arguments in DSH instance "${this.instance}".`);
+      return { ...this.get(old.task_id), replayed: true };
+    };
+    const prior = replay();
+    if (prior) return prior;
+    if (task.scheduleEnabled && !this.schedule) {
+      throw new PreAdmissionRejection(AdmissionCode.INVALID_PARAMS, 'This DSH bridge has no configured schedule calendar.');
     }
     if (this.active) {
       throw new PreAdmissionRejection(AdmissionCode.BUSY,
@@ -379,6 +439,11 @@ export class TaskManager {
     try {
       fs.writeFileSync(fd, JSON.stringify({ schema: 1, instance: this.instance, runtime: this.runtime, owner_pid: process.pid, task_id: null, started_at: now() }));
       fs.closeSync(fd); fd = undefined;
+      const recorded = replay();
+      if (recorded) {
+        this.releaseLock();
+        return recorded;
+      }
       let sessionOwner;
       try { sessionOwner = this.assertSessionOwnership(task); }
       catch (error) {
@@ -387,7 +452,7 @@ export class TaskManager {
       }
       // Session ownership is proven before the schedule can produce an
       // apparently eligible rejection. Idempotent reads still happen above.
-      window = this.scheduleStatus();
+      window = this.scheduleStatus(task.scheduleEnabled);
       if (!window.accept_new_tasks) {
         throw new PreAdmissionRejection(AdmissionCode.SCHEDULE_GATE,
           `DSH instance "${this.instance}" is blocked by the offpeak schedule (${window.phase}); next offpeak at ${window.next_offpeak_at || 'see schedule status'}.`,
@@ -415,11 +480,11 @@ export class TaskManager {
         prompt_sha256: digest(task.prompt), status: 'starting', started_at: now(), finished_at: null, pid: null, exit_code: null, timed_out: false,
         native_tool_calls: 0, final_reason: null, answer: '', diagnostics: [], receipt_path: this.receiptPath(id), files_changed: null, verification: 'not_yet_reviewed' };
       writeJSON(record.receipt_path, record);
-      fs.writeFileSync(requestFile, JSON.stringify({ task_id: id, fingerprint }), { flag: 'wx', mode: 0o600 });
+      fs.writeFileSync(requestFile, JSON.stringify({ schema: 2, task_id: id, fingerprint }), { flag: 'wx', mode: 0o600 });
       fs.writeFileSync(lock, JSON.stringify({ schema: 1, instance: this.instance, runtime: this.runtime, owner_pid: process.pid, task_id: id, started_at: record.started_at }));
       let finishPromise;
       const finished = new Promise(resolve => { finishPromise = resolve; });
-      const active = { record, child: null, stopReason: null, finished, finishPromise, scheduleTimer: null };
+      const active = { record, child: null, stopReason: null, finished, finishPromise, scheduleTimer: null, scheduleEnabled: task.scheduleEnabled };
       this.active = active;
       this.pending.set(id, finished);
       const child = spawn(this.cli.command, [...this.cli.prefix, ...dshArgs(task)], {
@@ -429,14 +494,6 @@ export class TaskManager {
       record.pid = child.pid || null;
       record.status = 'running';
       writeJSON(record.receipt_path, record);
-      const scheduleTick = () => {
-        if (this.active?.record.task_id !== id) return;
-        const current = this.scheduleStatus();
-        if (current.phase === 'peak') { this.cancel(id, 'scheduled_peak'); return; }
-        const until = Date.parse(current.hard_stop_at) - this.clock().getTime();
-        active.scheduleTimer = setTimeout(scheduleTick, Math.max(5, Math.min(this.scheduleTickMs, until)));
-      };
-      if (this.schedule) scheduleTick();
       let stdout = '', stderr = '', total = 0, sawFinal = false;
       const persist = () => writeJSON(record.receipt_path, record);
       const diagnostic = line => { record.diagnostics.push(redact(line).slice(0, 1000)); record.diagnostics = record.diagnostics.slice(-12); };
@@ -510,6 +567,7 @@ export class TaskManager {
         }
       });
       child.stdin.end(scheduleTaskPreamble(window) + task.prompt);
+      this.refreshSchedule();
       return { ...record };
     } catch (error) {
       if (fd !== undefined) fs.closeSync(fd);

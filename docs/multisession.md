@@ -1,8 +1,8 @@
-# DSH 多实例：同机多个聊天各自使用独立调度域
+# DSH 同机多实例调度
 
-版本：0.3.0。规则修订：`2026-11-12.dsh-multisession-r1`。
+版本：0.3.0。规则修订：`2026-11-19.dsh-session-controls-r1`。
 本文描述的是**同一个 DSH headless/OpenCode Go DeepSeek 后端**的多个本机任务域，不是多套模型、多套凭据或多套操作系统沙箱。
-真实调用链仍然是：**Astra 主代理 → 真实 GPT-6.1 Sol Max（max）协调子代理 → 所选 DSH MCP 实例 → DSH headless → `opencode-go / deepseek-v4.1-flash`（推理档位 max）**。
+实际调用链由 Astra 和真实 Sol 协调者开始。协调者默认 `gpt-6.2-sol / max`，支持按调用选择。DSH 通过所选 MCP 使用 `opencode-go / deepseek-v4.1-flash`（推理档位 max）。同一 Sol 可在根池内并发多个独立 DSH 任务。
 桥接器只是 MCP 进程、任务域和本地子进程的所有者，不替代 Sol，也不新增代理层。
 
 ## 1. 为什么按 MCP 服务器划分，而不是按聊天身份自动分流
@@ -11,7 +11,7 @@ stdio MCP 进程没有可靠的“聊天 ID”参数。宿主是否向 MCP 注�
 因此本功能**不实现**根据聊天自动切换实例，也不读取未经验证的线程变量。可靠的做法是：
 
 - 在 Codex 配置中注册多个**命名 MCP 服务**；每个服务是独立桥接进程、独立 runtime、独立锁和任务域。
-- 每个聊天在会话内明确选定一个服务，并只调用该服务的工具。
+- 一个 Sol 可按用户要求把不同独立任务分配给不同已注册实例。每个任务固定其服务，原实例负责重试、续跑、查询、等待和取消。
 - 聊天选择是宿主可见的 MCP 服务选择；实例身份由桥接器在 `get_dsh_bridge_status` 中返回，不能由调用参数伪造。
 
 Codex 如何展示多个同名工具由宿主决定。若宿主能按服务器区分工具（通常会在工具列表/调用记录中显示服务器名），按上述方式即可；若宿主无法区分，则必须使用宿主支持的服务器作用域或独立 Codex profile，或者不要在同一个宿主上下文中同时启用无法区分的实例。本仓库不会用提示词或自造字段假装实现自动逐聊天隔离。
@@ -48,7 +48,7 @@ Set-Location "$env:USERPROFILE\ai_rule" -ErrorAction Stop
 # 预览：默认服务 + alpha + bravo；不写文件、不调用付费模型
 .\scripts\install.ps1 -EnableDsh -DshInstance alpha,bravo
 
-# 核对后安装；新命名实例默认只读，已有默认服务/设置原样保留
+# 核对后安装。新 DSH 实例默认工作区可写。
 .\scripts\install.ps1 -Apply -EnableDsh -DshInstance alpha,bravo
 
 # 检查注册与规则
@@ -65,9 +65,9 @@ node .\scripts\manage.mjs --verify
 
 说明：
 
-- 安装器始终保留默认 `dsh-opencode-go`，并保留已注册的 WorkBuddy、HY4 和无关的非 ai_rule 服务。已有默认服务在“只新增命名实例”时不会被重写：它的 `--runtime`、`--allow-write` 和 `--schedule-config`（含自定义路径）原样保留，因此旧回执、幂等数据和写入能力不会被静默迁移或降级。新命名实例默认只读，并继承默认服务的同一日程配置（含自定义路径）。
+- 安装器保留已有默认、WorkBuddy、HY4 和无关服务。只新增命名实例时保留默认服务的 runtime、显式权限和日历。新命名实例默认工作区可写，并继承相同的日历配置。
 - 若要改默认服务本身（例如切换 runtime、关闭写入或改峰谷策略），先在没有活动任务时运行不带 `--dsh-instance` 的 `--enable-dsh` 命令；在已有默认服务上新增实例时夹带 `--offpeak-schedule`/`--disable-offpeak-schedule` 会被拒绝，避免一次“只加实例”的操作静默替换旧策略。启用日程后再添加实例，会继承已启用的策略。
-- `--allow-write` 只对本次 `--dsh-instance` 列出的新/重建命名服务生效，不会改写保留下来的默认服务；未列出的已有命名服务也原样保留。添加实例时应查看 `--verify` 输出中的 `allow_write`，不要把“新增一个只读实例”误当成“自动改写了所有旧实例”。它是本机开关，不是实例隔离或永久授权。
+- 可通过 `--read-only` 将本次创建或重建的服务设为只读。已有的显式只读设置在重建该服务时保留，`--allow-write` 可恢复工作区可写预设。
 - `--verify` 只验证 ai_rule managed 块内的注册；未管理的同名/手工服务会列在 `unmanaged_dsh_services` 中，保留但不验证。若新命名服务与未管理服务同名，安装器给出 `Unmanaged MCP ... already exists` 并停止。
 - 删除一个命名实例的注册（不删除其 runtime 数据）：
 
@@ -81,29 +81,18 @@ node .\scripts\manage.mjs --verify
 
 新增/修复注册时如遇到 `Unmanaged MCP ... already exists`，说明同名服务不是 ai_rule 管理的，安装器拒绝覆盖。先人工合并配置，不要让两个服务争用同一个名称或 runtime。
 
-## 4. 每个聊天如何选定并验证一个实例
+## 4. 为独立任务选择实例
 
-1. 安装或更新注册后，先等当前活跃工作安全结束：保存结果，确认没有正在运行的 DSH 任务，不要在任务运行中重载或终止原 MCP 进程。然后使用宿主支持的 MCP 重载方式加载注册。仅新建聊天不证明注册已加载；本文不承诺当前 Codex 能在不中断的情况下热加载，也不认为必须重启整个 App，以宿主实际支持的方式为准。
-2. 在 Codex 中运行 `codex mcp list`（或宿主等价的 MCP 列表），确认能看到 `dsh-opencode-go`、`dsh-opencode-go-alpha`、`dsh-opencode-go-bravo`。列表可见只证明注册存在，不证明当前聊天已加载或实际调用了所选实例。
-3. 在聊天 A 输入类似：
+有可用的根池时，Sol 优先在同一已验证的根会话派发并发任务。使用传统入口时，Sol 根据用户的任务分配调用宿主可区分的服务。先用各服务的 `get_dsh_bridge_status` 核对名字、实例和 runtime。
 
-   ```text
-   本会话使用 DSH，固定使用 MCP 服务 dsh-opencode-go-alpha。
-   由真实 Sol Max（max）协调子代理实际调用该 MCP；Astra 不转发。
-   先调用 get_dsh_bridge_status，确认返回的 instance 是 alpha，再开始任务。
-   后续不切换实例，除非我明确要求。
-   ```
+例如，用户可以要求“本会话使用 DSH。让同一个 Sol 把项目 A 的只读分析派给 `dsh-opencode-go-alpha`，把项目 B 的只读分析派给 `dsh-opencode-go-bravo`，两项并行。”若只注册了一个传统实例，按顺序完成该实例上的任务。
 
-4. 在聊天 B 用另一段类似文字固定 `dsh-opencode-go-bravo`。两个聊天各自只调用自己的服务。
-5. 由真实 Sol 在实际执行上下文中调用 `get_dsh_bridge_status`（启用日程时同时读取 `get_dsh_schedule_status`），核对 `instance`、`runtime`（运行目录）和峰谷配置；这是对新工具状态的实际读取，不能只看聊天文字或 MCP 列表。若宿主 UI 的服务器归属与状态不一致，停止并报告，不要仅凭聊天文字认定已切换。
-6. 首次只做只读、小任务；确认 `task_id`、`session_id`、退出码和终态。不要把状态查询当成上游调用者的密码学证明；实际 MCP 发起方仍以宿主记录为准。
-
-建议在会话交接中保存：`session_mode=DSH`、`dsh_instance=<name>`、`mcp_server=<name>`、协调者真实 agent ID、活动 `task_id`、`task_backend` 和授权范围。实例选择是会话调度状态，不写入共享仓库或 config.toml 的“当前聊天”字段。
+派发时分别记下实例、任务 ID、幂等键、cwd 和原回执。重试复用原幂等键，续跑到原实例并使用同一个 cwd 和真实 session ID。查询、等待与取消回到记录的那个实例。任务一旦受理就保留原实例。
 
 ## 5. 同一实例的续做、互斥和断连
 
 - 同一实例同一时间只允许一个 DSH 子进程；多个聊天共用该实例时，后来者会收到 `Exclusive lock exists` 或 `DSH_BUSY`，应等待原任务，而不是重复启动或换键重跑。
-- busy/lock 是**独立的预准入类别**。本阶段的 DSH→HY4 回退策略默认不因 busy/lock 转 HY4；除非有安全证据证明不是同一工作的重复提交。不得用回退绕过实例互斥、制造双跑或迁移已启动任务。
+- 忙碌和锁冲突都不会触发 HY4 回退。已受理任务留在原实例，等待该任务并检查原锁和回执。
 - 不同实例各有自己的锁、任务回执、幂等键域和 `sessions.json`，可以并行运行。
 - `start_dsh_task`/`run_dsh_task` 的 `task_id` 只在所属实例有效。用另一个实例 `get`/`wait`/`cancel` 会得到“not found in DSH instance …”，不会读取或终止别的实例。
 - 同一个实例的第二个桥接进程若发现回执属于运行中任务但不拥有其子进程，会返回 `unknown_after_disconnect`。它只能只读查看，不能凭回执取消、杀进程或重新提交。先检查 `active.lock` 的 owner PID、任务回执和原宿主进程，再决定。
@@ -122,7 +111,7 @@ node .\scripts\manage.mjs --verify
 - 固定 `resume_automatically=false`，不自动恢复、不换模型、不把停止任务标成成功。
 
 新增实例会自动继承已启用的日程参数；安装器不提供“仅对新实例关闭日程”的选项。任何手工改配置以绕过峰谷门禁的行为都不在支持范围内。
-工作区写入仍需要本机安装层 `--allow-write` **且**当前任务有真实用户授权引用；`authorizationNote` 不是密码学令牌。实例划分不改变 DSH 的凭据、账户、配额、会话存储和操作系统文件权限：所有实例通常共享同一 Windows 用户、同一 DSH 凭据和同一底层模型额度。`read-only`/`workspace-write` 是传给 DSH 的权限预设，不是本桥接器实现的 OS 沙箱；工作目录不是文件访问隔离。
+正常 DSH 任务默认使用 `workspace-write`。显式 `permissionMode: "read-only"` 限制该任务，`--read-only` 限制该服务。实际写入受任务授权和宿主工作区边界约束。实例共用账户、配额和宿主权限。
 
 ## 7. 同步到另一台电脑
 
@@ -160,25 +149,7 @@ node .\scripts\manage.mjs --apply --enable-dsh --dsh-instance alpha --dsh-instan
 node .\scripts\manage.mjs --verify
 ```
 
-**首次启用默认服务**：可在首次添加命名实例时明确选择日程，默认只读：
-
-```powershell
-node .\scripts\manage.mjs --enable-dsh --dsh-instance alpha --dsh-instance bravo --offpeak-schedule
-node .\scripts\manage.mjs --apply --enable-dsh --dsh-instance alpha --dsh-instance bravo --offpeak-schedule
-node .\scripts\manage.mjs --verify
-```
-
-已有默认服务若明确要改日程，不要把它夹在添加实例的命令里。等当前活跃任务安全结束后，单独使用不带 `--dsh-instance` 的 `--enable-dsh` 管理操作；先预览，确认后再加 `--apply`：
-
-```powershell
-node .\scripts\manage.mjs --enable-dsh --offpeak-schedule
-node .\scripts\manage.mjs --enable-dsh --disable-offpeak-schedule
-```
-
-若默认服务原本已授权写入并需要保留，按安装器参数显式加 `--allow-write`；不要为改日程额外开放写入。改策略不是日常更新默认行为，只在明确需要时执行。
-
-电脑 B 的 runtime 会创建在自己的 `%LOCALAPPDATA%`，不会继承电脑 A 的锁、回执、会话或凭据。实例名相同不代表任务可迁移；跨电脑继续工作时，把目标、cwd、授权、必要输入和已有结果作为新任务交给电脑 B 的实例，不要复制 `RUN_RECEIPT.json`、`sessions.json` 或 `active.lock`。
-同步更新后，不要仅靠新开聊天判断注册已加载：先等活跃工作安全结束，再使用宿主支持的 MCP 重载方式；随后由真实 Sol 在实际聊天中调用 `get_dsh_bridge_status`（启用日程时加 `get_dsh_schedule_status`），核对实例名、`runtime`（运行目录）和峰谷配置。本文不承诺无中断热加载，也不认为必须重启整个 App。
+默认和命名服务使用注册的日历，省略 `--schedule-config` 时使用内置日历。新会话默认关闭日程。用户切换时，协调者记录当前会话选择，后续派单传 `scheduleEnabled`，并用 `set_dsh_task_schedule` 更新本会话仍在运行的任务。使用根池时由 `set_pool_schedule` 持久化根会话选择。详见 [峰谷调度](offpeak-schedule.md)。
 
 ## 8. 验证与排障
 
@@ -200,21 +171,21 @@ node .\scripts\manage.mjs --verify
 | `Session ... is bound to cwd ...` / `Unknown sessionId` | 会话只能在原实例、原 cwd 恢复；开新任务，不要伪造或复制会话。 |
 | `Unmanaged MCP ... already exists` | 同名服务不是 ai_rule 管理；人工合并，避免重复注册。 |
 | `dsh_runtimes_unique=false` | 配置里有共享 runtime 或路径别名；先修配置。 |
-| `dsh_schedule_consistent=false` | 有的实例带日程、有的不带；按已启用规则统一，防止绕过峰谷。 |
+| `dsh_schedule_consistent=false` | 实例的显式日历注册参数不同。核对安装器预览与配置。 |
 
 ## 9. 验收层级和明确限制
 
 - **静态**：源码/配置解析、实例命名与路径规则、安装预览和 `--verify`。不等于已加载。
 - **mock 回归**：`npm test` 使用 `tests/mock-dsh.mjs`，不访问付费 API；覆盖并行子进程、实例锁、幂等域、错误域、旧默认数据、日程/预算/硬停和安装器保留。测试运行环境与原安装隔离。它是独立层级，两次模拟任务也不能拼成“真实双跑”。
 - **本机部署**：只有用户在本机运行安装器、按宿主支持的方式加载注册，并由真实 Sol 实际读取新工具状态后才成立；`--verify` 和 MCP 列表本身不够。
-- **真实 DSH 并行**：两个聊天分别固定两个命名实例，各自完成真实 DSH 只读任务，且两个任务时间实际重叠。证据至少包括不同服务名与 runtime、实际 `task_id` 和 receipt 中的 `pid`、可核查的 `started_at`/`finished_at` 重叠、原生工具实际执行记录（至少 `native_tool_calls` 非零及结果）以及 `status`/`exit_code` 终态。仅聊天回复、mock 或模拟双跑不算。
+- **真实 DSH 并行**。同一 Sol 派发的两个独立任务可分别使用两个命名实例，并核对实际运行时间重叠。记录不同服务名、runtime、task_id、PID、起止时间、原生工具调用和终态。
 - 本文不证明服务端真实型号、账单归属、供应商额度或 DSH 凭据隔离；桥接器仍记录 `actual_route=null`，除非另有独立证据。提供商额度另受账户和套餐限制，实例隔离不等于额度隔离。
 
 建议的真实双跑验收（部署后执行，不是本次测试；本次交付不声称已完成）：
 
-1. 两个聊天分别固定 `dsh-opencode-go-alpha` 和 `dsh-opencode-go-bravo`；按宿主支持的方式加载注册后，由真实 Sol 各自实际调用 `get_dsh_bridge_status`（启用日程时加 `get_dsh_schedule_status`），确认服务名、`instance`、`runtime` 不同，且峰谷配置符合本机策略（同一日程策略通常应一致）。仅新建聊天不算。
-2. 在两个互不依赖的项目中各提交一个有用、只读、有界的代码勘察（例如项目 A 的入口与调用链、项目 B 的配置加载与错误路径），让两个真实 DSH 任务实际同时运行。记录双方实际 `task_id`、receipt 中的 `pid`、`started_at`/`finished_at`、`native_tool_calls` 和终态，确认时间区间重叠而非串行，并确认一个实例的 `get` 读不到另一个实例的 ID。不要用空目录、mock 任务或仅聊天问答代替。
-3. 同一实例互斥要单独验收，且不要在该实例已有无关任务时强行追加请求。先确认实例空闲，再在两个聊天同时提交；第二个应得到 `Exclusive lock exists` 且不重复启动。原任务结束前不改锁、不取消、不重启。
-4. 写入仍按本机安装开关和本次用户授权执行；先确认只读默认。不要为了验收扩权、复制凭据或跑无界双跑。
+1. 由同一真实 Sol 对两个独立任务分别选择 `dsh-opencode-go-alpha` 和 `dsh-opencode-go-bravo`。用各自的 `get_dsh_bridge_status` 核对服务名、实例和 runtime。
+2. 在两个互不依赖的项目中各提交一个有用、只读、有界的代码勘察（例如项目 A 的入口与调用链、项目 B 的配置加载与错误路径），让两个真实 DSH 任务实际同时运行。派单明确传入 `permissionMode: "read-only"`。记录双方实际 `task_id`、receipt 中的 `pid`、`started_at`/`finished_at`、`native_tool_calls` 和终态，确认时间区间重叠而非串行，并确认一个实例的 `get` 读不到另一个实例的 ID。不要用空目录、mock 任务或仅聊天问答代替。
+3. 用同一传统实例验证串行。先确认该实例空闲，再提交两个测试任务。第二个请求应收到忙碌或锁冲突，等待原任务。
+4. 真实并行验收的只读任务显式传 permissionMode 为 read-only，使用获准的项目目录和预算。
 
 这两个真实任务已覆盖连通性，不需要再额外增加无用的付费连通测试；其额度消耗和可用性另受提供商账户/套餐限制。

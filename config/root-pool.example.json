@@ -4,7 +4,7 @@
   "dsh_entry": "C:\\Users\\YOUR_USER\\AppData\\Roaming\\npm\\node_modules\\@deepseek-ai\\dsh\\lib\\bin.js",
   "schedule_config": "D:\\ai_rule\\config\\offpeak.schedule.json",
   "workspace_root": "D:\\approved\\workspace",
-  "allow_write": false,
+  "allow_write": true,
   "binding_cap": 8,
   "running_cap": 3,
   "ttl_hours": 24,

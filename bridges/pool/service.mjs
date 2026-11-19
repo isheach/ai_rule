@@ -59,13 +59,13 @@ export function validatePoolConfig(value) {
     }
     if (!value.hy4_manifest) throw Error('fallback_authorization_ref requires hy4_manifest; no implicit fallback route');
   }
-  return { ...value, allow_write: value.allow_write === true };
+  return { ...value, allow_write: value.allow_write !== false };
 }
 
 function safeBinding(binding) {
   if (!binding) return null;
   return {
-    root_chat_id: binding.root_id, ordinal: binding.ordinal, generation: binding.generation, state: binding.state,
+    root_chat_id: binding.root_id, worker: binding.worker ?? 1, ordinal: binding.ordinal, generation: binding.generation, state: binding.state,
     dsh_instance: binding.dsh_instance, active_task_id: binding.active_task_id, active_backend: binding.active_backend,
     task_revision: binding.task_revision, created_at: binding.created_at, last_used_at: binding.last_used_at,
     uncertain_since: binding.uncertain_since ?? null
@@ -85,11 +85,11 @@ function routingView(decision) {
 }
 
 export class PoolService {
-  constructor({ config, schedule, allowWriteCli = false, clock = () => new Date(), sessionsRoot } = {}) {
+  constructor({ config, schedule, allowWriteCli = true, clock = () => new Date(), sessionsRoot } = {}) {
     this.config = config;
     this.clock = clock;
     this.sessionsRoot = sessionsRoot;
-    this.allowWrite = config.allow_write === true && allowWriteCli === true;
+    this.allowWrite = config.allow_write !== false && allowWriteCli === true;
     this.schedule = schedule ?? loadSchedule(config.schedule_config);
     if (!this.schedule || this.schedule.enabled !== true || this.schedule.hardStopAtPeak !== true || this.schedule.resumeAutomatically !== false) {
       throw Error('an explicit enabled schedule with hard stop and no automatic resume is required');
@@ -123,34 +123,72 @@ export class PoolService {
   }
 
   runtimeFor(rootId) {
-    const binding = this.pool.lookup(rootId);
-    return binding?.runtime_path ?? this.pool.rootPath(rootId);
+    return this.pool.rootPath(rootId);
   }
-  managerFor(rootId) {
-    const existing = this.roots.get(rootId);
-    if (existing) return existing;
-    const binding = this.pool.lookup(rootId);
-    const expected = this.pool.rootPath(rootId);
-    if (binding) {
-      let actual;
-      try { actual = real(binding.runtime_path); } catch { throw Error('bound root runtime is missing or unreadable'); }
-      if (!samePath(actual, expected) || !isInside(real(this.pool.root), actual)) {
-        throw Error('bound root runtime does not match the canonical per-root path; refusing pooled task');
+  _workerRuntime(rootId, worker) {
+    const expected = path.join(this.pool.workerPath(rootId, worker), 'dsh');
+    const actual = real(expected);
+    if (!samePath(actual, expected) || !isInside(this.runtimeFor(rootId), actual)) {
+      throw Error('worker runtime does not match its canonical path');
+    }
+    return actual;
+  }
+  _workerNumbers(rootId) {
+    const dir = path.join(this.runtimeFor(rootId), 'workers');
+    let entries;
+    try {
+      if (!samePath(real(dir), dir)) throw Error('workers directory does not match its canonical path');
+      entries = fs.readdirSync(dir, { withFileTypes: true });
+    } catch (error) {
+      if (error.code === 'ENOENT') return [1];
+      throw error;
+    }
+    return [1, ...entries.filter(entry => entry.isDirectory() && /^[1-9]\d*$/.test(entry.name))
+      .map(entry => Number(entry.name)).filter(number => Number.isSafeInteger(number) && number > 1)];
+  }
+  _sessionWorker(rootId, sessionId) {
+    const owners = [];
+    for (const worker of this._workerNumbers(rootId)) {
+      let runtime;
+      try { runtime = this._workerRuntime(rootId, worker); }
+      catch (error) { if (error.code === 'ENOENT') continue; throw error; }
+      const index = this._readJson(path.join(runtime, 'sessions.json'));
+      if (!index) continue;
+      if (index.schema !== 1 || !index.sessions || typeof index.sessions !== 'object' || Array.isArray(index.sessions)) {
+        throw Error('worker session index is invalid; refusing to guess ownership');
+      }
+      if (Object.hasOwn(index.sessions, sessionId)) {
+        if (index.sessions[sessionId]?.instance !== poolInstanceName(rootId, worker)) {
+          throw Error('worker session index has conflicting ownership');
+        }
+        owners.push(worker);
       }
     }
-    const runtime = binding ? real(binding.runtime_path) : expected;
+    if (owners.length > 1) throw Error('session ownership is ambiguous across workers');
+    // The primary worker also knows how to check legacy, unindexed receipts.
+    return owners[0] ?? 1;
+  }
+  managerFor(rootId, worker) {
+    const runtime = this.runtimeFor(rootId);
+    let root = this.roots.get(rootId);
+    if (!root) {
+      const hy4 = this.manifest ? new Hy4AcpManager({ manifest: this.manifest, runtime: path.join(runtime, 'hy4'), clock: this.clock }) : null;
+      root = { hy4, workers: new Map() };
+      this.roots.set(rootId, root);
+    }
+    const existing = root.workers.get(worker);
+    if (existing) return existing;
     const manager = new TaskManager({
-      cli: this.cli, runtime: path.join(runtime, 'dsh'), instance: poolInstanceName(rootId),
-      allowWrite: this.allowWrite, schedule: this.schedule, clock: this.clock
+      cli: this.cli, runtime: this._workerRuntime(rootId, worker), instance: poolInstanceName(rootId, worker),
+      allowWrite: this.allowWrite, schedule: this.schedule, clock: this.clock,
+      scheduleEnabledForRoot: () => this.pool.scheduleEnabled(rootId)
     });
-    let hy4 = null;
-    if (this.manifest) hy4 = new Hy4AcpManager({ manifest: this.manifest, runtime: path.join(runtime, 'hy4'), clock: this.clock });
     const coordinator = new RoutingCoordinator({
-      runtime, dsh: { submit: task => manager.start(task) }, hy4: hy4 ?? new UnavailableWorkBuddyHy4(),
+      runtime, dsh: { submit: task => manager.start(task) }, hy4: root.hy4 ?? new UnavailableWorkBuddyHy4(),
       authorization: this.authorization, clock: this.clock, liveMcpDispatchWired: true
     });
-    const entry = { runtime, manager, hy4, coordinator };
-    this.roots.set(rootId, entry);
+    const entry = { manager, hy4: root.hy4, coordinator };
+    root.workers.set(worker, entry);
     return entry;
   }
 
@@ -170,22 +208,25 @@ export class PoolService {
     if (!fs.statSync(cwd).isDirectory() || !isInside(this.workspaceRoot, cwd)) {
       throw new PreAdmissionRejection(AdmissionCode.INVALID_PARAMS, 'cwd is outside the approved workspace root.');
     }
-    const permissionMode = args.permissionMode ?? 'read-only';
     const capability = args.capability ?? 'default';
+    const permissionMode = args.permissionMode ?? (capability === 'default' && this.allowWrite ? 'workspace-write' : 'read-only');
     if (!['read-only', 'workspace-write'].includes(permissionMode)) throw new PreAdmissionRejection(AdmissionCode.INVALID_PARAMS, 'permissionMode must be read-only or workspace-write.');
     if (!['default', 'text-only', 'workspace-read', 'workspace-write'].includes(capability)) throw new PreAdmissionRejection(AdmissionCode.INVALID_PARAMS, 'Invalid capability.');
     const wantsWrite = permissionMode === 'workspace-write' || capability === 'workspace-write';
     if (wantsWrite && !this.allowWrite) {
-      throw new PreAdmissionRejection(AdmissionCode.PERMISSION_REFUSED, 'Workspace writes require config allow_write and the server --allow-write flag, plus per-task authorization.');
+      throw new PreAdmissionRejection(AdmissionCode.PERMISSION_REFUSED, 'This DSH pool is configured read-only.');
     }
-    if (wantsWrite && (typeof args.authorizationNote !== 'string' || !args.authorizationNote.trim())) {
-      throw new PreAdmissionRejection(AdmissionCode.PERMISSION_REFUSED, 'Workspace writes require an explicit per-task authorizationNote.');
+    if (args.authorizationNote !== undefined && (typeof args.authorizationNote !== 'string' || args.authorizationNote.length > 2000)) {
+      throw new PreAdmissionRejection(AdmissionCode.INVALID_PARAMS, 'authorizationNote must be a string of at most 2000 characters.');
     }
     if (capability === 'workspace-write' && permissionMode !== 'workspace-write') {
       throw new PreAdmissionRejection(AdmissionCode.PERMISSION_REFUSED, 'workspace-write capability requires permissionMode workspace-write.');
     }
-    if (capability !== 'workspace-write' && permissionMode === 'workspace-write') {
-      throw new PreAdmissionRejection(AdmissionCode.INVALID_PARAMS, 'workspace-write permission requires the workspace-write capability.');
+    if (permissionMode === 'workspace-write' && !['default', 'workspace-write'].includes(capability)) {
+      throw new PreAdmissionRejection(AdmissionCode.INVALID_PARAMS, 'This capability requires read-only permission.');
+    }
+    if (capability === 'workspace-write' && !args.authorizationNote?.trim()) {
+      throw new PreAdmissionRejection(AdmissionCode.PERMISSION_REFUSED, 'Explicit workspace-write capability requires a per-task authorizationNote.');
     }
     let authorization;
     try {
@@ -218,15 +259,19 @@ export class PoolService {
       allowWorkspaceWrite: this.allowWrite && wantsWrite
     };
     const metadata = safeWriteMetadata(task);
-    const requestHash = sha256(JSON.stringify({
+    const requestIdentity = {
       schema: 2,
       prompt_sha256: sha256(String(task.prompt ?? '')), cwd, idempotencyKey: task.idempotencyKey,
       timeoutMs: task.timeoutMs, permissionMode, sessionId: task.sessionId ?? null,
       capability, task_capability: capability, authorization_note: task.authorizationNote ?? null,
       write_scopes: task.writeScopes, writes: task.writes, commands: task.commands,
       metadata, root: rootId, session_mode: 'DSH', requested_backend: 'dsh'
-    }));
-    return { task, options, requestHash, key: task.idempotencyKey };
+    };
+    const requestHash = sha256(JSON.stringify(requestIdentity));
+    const legacyHash = args.permissionMode === undefined && permissionMode === 'workspace-write'
+      ? sha256(JSON.stringify({ ...requestIdentity, permissionMode: 'read-only' }))
+      : null;
+    return { task, options, requestHash, legacyHash, key: task.idempotencyKey };
   }
 
   _decisionPath(rootId, key) {
@@ -277,13 +322,25 @@ export class PoolService {
       }
       if (!receipt) throw Error('HY4 task receipt is unavailable');
     } else {
-      receipt = this._readJson(path.join(runtime, 'dsh', taskId, 'RUN_RECEIPT.json'));
-      if (!receipt) throw Error('DSH task receipt is unavailable');
-      if (receipt.instance !== undefined && receipt.instance !== poolInstanceName(rootId)) {
-        throw Error('task receipt belongs to another DSH instance');
+      if (!/^[a-f0-9-]{36}$/.test(taskId)) throw Error('Invalid DSH task ID in routing decision.');
+      const proof = decision.idempotency_key ? this._readJson(this._proofPath(rootId, decision.idempotency_key)) : null;
+      const candidates = proof?.task_id === taskId ? [proof.worker ?? 1] : this._workerNumbers(rootId);
+      for (const worker of candidates) {
+        let dshRuntime;
+        try { dshRuntime = this._workerRuntime(rootId, worker); }
+        catch (error) { if (error.code === 'ENOENT') continue; throw error; }
+        const candidate = this._readJson(path.join(dshRuntime, taskId, 'RUN_RECEIPT.json'));
+        if (!candidate) continue;
+        if (candidate.task_id !== taskId || (candidate.instance !== poolInstanceName(rootId, worker)
+          && !(worker === 1 && candidate.instance === undefined))) {
+          throw Error('task receipt belongs to another DSH instance');
+        }
+        if (receipt) throw Error('ambiguous task receipt across workers');
+        receipt = candidate;
       }
+      if (!receipt) throw Error('DSH task receipt is unavailable');
     }
-    if (['starting', 'running', 'cancelling', 'accepted'].includes(receipt.status) && !this.owned.has(taskId)) {
+    if (['starting', 'running', 'cancelling', 'accepted'].includes(receipt.status) && this.owned.get(taskId)?.rootId !== rootId) {
       receipt = {
         ...receipt, status: 'unknown_after_disconnect',
         warning: 'This connection does not own the child process; snapshot only. No retry, kill or pool mutation.'
@@ -304,7 +361,8 @@ export class PoolService {
       if (!decision) throw Error('Task ID is not mapped to this root; refusing to guess a DSH instance.');
     }
     if (decision.selected_backend === 'hy4' && !this.manifest) throw Error('HY4 task exists but HY4 is not configured in this server.');
-    return { entry: this.roots.get(rootId) ?? null, decision };
+    const owner = this.owned.get(decision.task_id);
+    return { owner: owner?.rootId === rootId ? owner : null, decision };
   }
 
   _receipt(entry, decision, waitMs) {
@@ -340,37 +398,48 @@ export class PoolService {
     try { return await work; } finally { if (this.inflight.get(mapKey) === entry) this.inflight.delete(mapKey); }
   }
 
-  _writeProof(rootId, key, requestHash, taskId) {
+  _writeProof(rootId, key, requestHash, taskId, worker) {
     const file = this._proofPath(rootId, key);
     const temp = `${file}.${process.pid}.${crypto.randomUUID()}.tmp`;
-    fs.writeFileSync(temp, JSON.stringify({ schema: 1, request_hash: requestHash, task_id: taskId }) + '\n', { mode: 0o600 });
+    fs.writeFileSync(temp, JSON.stringify({ schema: 2, request_hash: requestHash, task_id: taskId, worker }) + '\n', { mode: 0o600 });
     fs.renameSync(temp, file);
   }
-  _replay(rootId, key, requestHash, prior) {
+  _replay(rootId, { key, requestHash, legacyHash }, prior) {
+    if (prior.admission_state !== 'accepted') {
+      throw Error(`Idempotency key is already ${prior.admission_state} (${prior.reason_code ?? 'no reason'}); no resubmission, fallback or capacity use is allowed.`);
+    }
     const proof = this._readJson(this._proofPath(rootId, key));
-    if (!proof || proof.schema !== 1 || proof.task_id !== prior.task_id || proof.request_hash !== requestHash) {
+    if (!proof || ![1, 2].includes(proof.schema) || proof.task_id !== prior.task_id
+      || (proof.request_hash !== requestHash && !(proof.schema === 1 && legacyHash && proof.request_hash === legacyHash))) {
       throw new RoutingConflictError('The idempotency key belongs to a different frozen task/scopes; no replay and no capacity use.');
     }
     const receipt = this._readReceipt(rootId, prior);
     return { ...this._pack(rootId, prior, receipt), replayed: true, observation_only: !TERMINAL.has(receipt.status) };
   }
 
-  async _submitPrepared(rootId, { task, options, requestHash, key }) {
+  async _submitPrepared(rootId, prepared) {
+    const { task, options, requestHash, key } = prepared;
     const prior = this._readDecision(rootId, key);
-    if (prior) {
-      if (prior.admission_state !== 'accepted') {
-        throw Error(`Idempotency key is already ${prior.admission_state} (${prior.reason_code ?? 'no reason'}); no resubmission, fallback or capacity use is allowed.`);
-      }
-      return this._replay(rootId, key, requestHash, prior);
-    }
+    if (prior) return this._replay(rootId, prepared, prior);
     if (this.closing) throw Error('pool server is shutting down; no new tasks are admitted');
-    const binding = this.pool.allocate(rootId);
-    const handle = Object.freeze({ ...binding.handle });
+    const requestedWorker = task.sessionId ? this._sessionWorker(rootId, task.sessionId) : undefined;
     const operationId = this.pool.newOperationId();
-    try { this.pool.reserve(handle, { operationId, idempotencyKey: key, requestHash }); }
+    let binding;
+    try { binding = this.pool.reserveTask(rootId, { operationId, idempotencyKey: key, requestHash }, requestedWorker); }
     catch (error) { throw new Error(`Pool reservation refused: ${error.message}`); }
-    if (this.closing) {
-      try { this.pool.reject(handle, { operationId, idempotencyKey: key }); } catch {}
+    const handle = Object.freeze({ ...binding.handle });
+    const worker = binding.worker ?? 1;
+    // A prior owner may have finished between the first read and reservation.
+    // The reserved worker has not dispatched anything, so release it on replay.
+    let recorded;
+    try { recorded = this._readDecision(rootId, key); }
+    catch (error) {
+      this.pool.reject(handle, { operationId, idempotencyKey: key });
+      throw error;
+    }
+    if (recorded || this.closing) {
+      this.pool.reject(handle, { operationId, idempotencyKey: key });
+      if (recorded) return this._replay(rootId, prepared, recorded);
       throw Error('pool server is shutting down; the reserved task was not submitted');
     }
     let resolveDone;
@@ -383,7 +452,7 @@ export class PoolService {
       this.starting.delete(operationId);
     };
     let entry;
-    try { entry = this.managerFor(rootId); }
+    try { entry = this.managerFor(rootId, worker); }
     catch (error) {
       try { this.pool.reject(handle, { operationId, idempotencyKey: key }); } catch {}
       settleStarting('released');
@@ -423,9 +492,9 @@ export class PoolService {
     }
     // Freeze the exact handle/operation/revision proved at admission. No later
     // lookup may replace it before finalization.
-    const record = { rootId, taskId, backend, operationId, revision: admitted.task_revision, handle };
+    const record = { rootId, taskId, backend, operationId, revision: admitted.task_revision, handle, entry, decision };
     this.owned.set(taskId, record);
-    try { this._writeProof(rootId, key, requestHash, taskId); } catch { /* replay stays conflict-closed */ }
+    try { this._writeProof(rootId, key, requestHash, taskId, worker); } catch { /* replay stays conflict-closed */ }
     settleStarting('admitted');
     void this._watchSettlement(record, entry, backend).catch(() => {});
     return this._pack(rootId, decision, null);
@@ -435,7 +504,7 @@ export class PoolService {
     let done = null;
     for (let attempt = 0; attempt < 25; attempt++) {
       let receipt = null;
-      try { receipt = this._readReceipt(record.rootId, { task_id: record.taskId, selected_backend: backend }); } catch {}
+      try { receipt = this._readReceipt(record.rootId, record.decision); } catch {}
       if (receipt && TERMINAL.has(receipt.status)) { await this._settleFrozen(record, receipt); return; }
       if (receipt && ['unknown', 'unknown_after_disconnect'].includes(receipt.status)) { await this._pinUnknownFrozen(record); return; }
       if (backend === 'hy4') done = entry.hy4?.active.get(record.taskId)?.finished ?? null;
@@ -462,7 +531,7 @@ export class PoolService {
         if (receipt && ['unknown', 'unknown_after_disconnect'].includes(receipt.status)) await this._pinUnknownFrozen(record);
         return;
       }
-      const entry = this.roots.get(record.rootId);
+      const entry = record.entry;
       if (record.backend === 'dsh' && entry?.manager.active?.record.task_id === record.taskId) {
         // Lock/child release happens before TaskManager's finished promise.
         for (let attempt = 0; attempt < 20 && entry.manager.active?.record.task_id === record.taskId; attempt++) await sleep(25);
@@ -476,7 +545,7 @@ export class PoolService {
         } catch (error) {
           if (/lock contention/i.test(error.message) && attempt < 2) { await sleep(30); continue; }
           try {
-            const binding = this.pool.lookup(record.rootId);
+            const binding = this.pool.snapshot(record.handle);
             if (binding && binding.state === 'idle' && !binding.active_task_id) { this.owned.delete(record.taskId); return; }
           } catch {}
           break;
@@ -495,7 +564,7 @@ export class PoolService {
       this.owned.delete(record.taskId);
     } catch {
       try {
-        const binding = this.pool.lookup(record.rootId);
+        const binding = this.pool.snapshot(record.handle);
         if (binding && (binding.state === 'unknown' || binding.state === 'idle')) this.owned.delete(record.taskId);
       } catch {}
     }
@@ -510,9 +579,9 @@ export class PoolService {
       if (owned) await this._settleFrozen(owned, started.receipt);
       return started;
     }
-    const entry = this.roots.get(rootId);
-    if (!entry) return started;
     const taskId = started.task_id;
+    const entry = this.owned.get(taskId)?.entry;
+    if (!entry) return this.get(rootId, { taskId });
     const deadline = Date.now() + (args.timeoutMs ?? 900000) + 5000;
     let receipt = started.receipt ?? this._receipt(entry, { selected_backend: started.backend, task_id: taskId });
     while (!TERMINAL.has(receipt.status) && !['unknown', 'unknown_after_disconnect'].includes(receipt.status) && Date.now() < deadline) {
@@ -534,11 +603,10 @@ export class PoolService {
 
   async wait(rootId, query, waitMs = 25000) {
     if (!Number.isInteger(waitMs) || waitMs < 0 || waitMs > 60000) throw Error('waitMs must be an integer 0..60000.');
-    const { entry, decision } = this._resolveDecision(rootId, query);
+    const { owner, decision } = this._resolveDecision(rootId, query);
     if (decision.admission_state !== 'accepted') return this._pack(rootId, decision, null);
-    const owned = this.owned.get(decision.task_id);
-    if (!owned || !entry) return this._pack(rootId, decision, this._readReceipt(rootId, decision));
-    const receipt = await this._receipt(entry, decision, waitMs);
+    if (!owner) return this._pack(rootId, decision, this._readReceipt(rootId, decision));
+    const receipt = await this._receipt(owner.entry, decision, waitMs);
     // Waiting is an observation. The independently attached terminal watcher
     // performs the only finalization; this call may await that existing work,
     // but never initiates a pool mutation.
@@ -549,14 +617,14 @@ export class PoolService {
   }
 
   async cancel(rootId, query) {
-    const { entry, decision } = this._resolveDecision(rootId, query);
+    const { owner: owned, decision } = this._resolveDecision(rootId, query);
     if (decision.admission_state !== 'accepted') throw Error('Routing decision has no accepted task to cancel.');
-    const owned = this.owned.get(decision.task_id);
     if (!owned) {
       let receipt;
       try { receipt = this._readReceipt(rootId, decision); } catch (error) { throw Error(`Task is not owned by this server and its receipt is unavailable: ${error.message}`); }
       return { ...this._pack(rootId, decision, receipt), cancelled: false, owner: false, warning: 'This connection does not own the child process; read-only snapshot only. No kill or pool mutation was performed.' };
     }
+    const entry = owned.entry;
     const active = decision.selected_backend === 'hy4'
       ? entry?.hy4?.active.has(decision.task_id)
       : entry?.manager.active?.record.task_id === decision.task_id;
@@ -578,19 +646,26 @@ export class PoolService {
     return { ...this._pack(rootId, decision, receipt), cancelled: true, owner: true };
   }
 
+  setSchedule(rootId, enabled) {
+    this.pool.setSchedule(rootId, enabled);
+    const root = this.roots.get(rootId);
+    if (root) for (const { manager } of root.workers.values()) manager.refreshSchedule();
+    return this.status(rootId);
+  }
+
   status(rootId) {
     const list = this.pool.list();
-    let binding = null;
-    if (rootId) {
-      try { binding = safeBinding(this.pool.lookup(rootId)); } catch { binding = null; }
-    }
-    const schedule = scheduleSnapshot(this.schedule, nowIso(this.clock));
+    const workers = rootId ? list.bindings.filter(binding => binding.root_id === rootId).map(safeBinding) : [];
+    workers.sort((a, b) => a.worker - b.worker);
+    const binding = workers.length ? { ...workers[0], workers } : null;
+    const enabled = Boolean(rootId && this.pool.scheduleEnabled(rootId));
+    const schedule = scheduleSnapshot(enabled ? this.schedule : null, nowIso(this.clock));
     return {
       server: 'pooled-dsh', transport: 'stdio', backend_default: 'dsh', pool_scope: 'root-chat',
       binding_cap: list.binding_cap, running_cap: list.concurrency, running: list.running,
-      bindings: list.bindings.length, root: binding,
+      bindings: new Set(list.bindings.map(item => item.root_id)).size, worker_bindings: list.bindings.length, root: binding,
       schedule: {
-        enabled: schedule.enabled, phase: schedule.phase, accept_new_tasks: schedule.accept_new_tasks,
+        configured: Boolean(this.schedule), enabled: schedule.enabled, phase: schedule.phase, accept_new_tasks: schedule.accept_new_tasks,
         next_offpeak_at: schedule.next_offpeak_at, hard_stop_at: schedule.hard_stop_at,
         reject_if_budget_exceeds_window: schedule.reject_if_budget_exceeds_window, resume_automatically: false
       },
@@ -601,9 +676,9 @@ export class PoolService {
   }
 
   hasLiveChildren() {
-    for (const entry of this.roots.values()) {
-      if (entry.manager.active) return true;
-      if (entry.hy4 && (entry.hy4.active.size > 0 || entry.hy4.opening.size > 0)) return true;
+    for (const root of this.roots.values()) {
+      if ([...root.workers.values()].some(entry => entry.manager.active)) return true;
+      if (root.hy4 && (root.hy4.active.size > 0 || root.hy4.opening.size > 0)) return true;
     }
     return false;
   }
@@ -626,8 +701,8 @@ export class PoolService {
     }
     // Cancel only children this live process owns, with a bounded wait for a
     // terminal proof. If proof cannot be obtained the binding stays pinned.
-    for (const record of [...this.owned.values()]) {
-      const entry = this.roots.get(record.rootId);
+    await Promise.allSettled([...this.owned.values()].map(async record => {
+      const entry = record.entry;
       let receipt = null;
       try {
         if (record.backend === 'hy4' && entry?.hy4?.active.has(record.taskId)) {
@@ -636,19 +711,19 @@ export class PoolService {
           entry.manager.cancel(record.taskId, 'bridge_shutdown');
           receipt = await entry.manager.wait(record.taskId, 8000);
         } else {
-          receipt = this._readReceipt(record.rootId, { task_id: record.taskId, selected_backend: record.backend });
+          receipt = this._readReceipt(record.rootId, record.decision);
         }
       } catch {}
       if (receipt && TERMINAL.has(receipt.status)) await this._settleFrozen(record, receipt);
       else await this._pinUnknownFrozen(record);
-    }
-    for (const entry of [...this.roots.values()]) {
-      try { await entry.manager.close(); } catch {}
-      try { if (entry.hy4) await entry.hy4.close(); } catch {}
+    }));
+    for (const root of this.roots.values()) {
+      await Promise.allSettled([...root.workers.values()].map(entry => entry.manager.close()));
+      try { if (root.hy4) await root.hy4.close(); } catch {}
     }
     for (const record of [...this.owned.values()]) {
       let receipt = null;
-      try { receipt = this._readReceipt(record.rootId, { task_id: record.taskId, selected_backend: record.backend }); } catch {}
+      try { receipt = this._readReceipt(record.rootId, record.decision); } catch {}
       if (receipt && TERMINAL.has(receipt.status)) await this._settleFrozen(record, receipt);
       else await this._pinUnknownFrozen(record);
     }

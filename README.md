@@ -1,6 +1,6 @@
 # ai_rule
 
-两台 Windows 电脑共用的 Codex 调度规则、Skill 和 DSH MCP 桥接器。桥接器/安装器版本 **v0.3.0**；规则修订 **2026-11-12.dsh-multisession-r1**。
+两台 Windows 电脑共用的 Codex 调度规则、Skill 和 DSH MCP 桥接器。桥接器/安装器版本 **v0.3.0**；规则修订 **2026-11-19.dsh-session-controls-r1**。
 
 ## 已落地与尚未验收
 
@@ -61,7 +61,7 @@ Set-Location "$env:USERPROFILE\ai_rule"
 # 预览：只探测 CLI/配置，不发起付费模型请求、不修改文件
 .\scripts\install.ps1 -EnableDsh
 
-# 查看预览无误后安装：默认只读 DSH 执行
+# 核对后安装，DSH 默认工作区可写
 .\scripts\install.ps1 -Apply -EnableDsh
 
 # 检查持久化文件/注册情况；此处仍不是真实模型验收
@@ -103,34 +103,33 @@ node .\scripts\manage.mjs --apply --enable-dsh --dsh-instance alpha --dsh-instan
 node .\scripts\manage.mjs --verify
 ```
 
-每个命名实例有自己的 runtime、`active.lock`、任务回执、幂等域、会话所有权和状态身份；不同实例可并行，同一实例仍单任务互斥。安装器保留默认、WorkBuddy/HY4 和无关服务；在已有默认服务上新增命名服务不会重写默认服务，默认的 `--runtime`、`--allow-write` 和自定义 `--schedule-config` 原样保留，新命名实例默认只读并继承默认的日程配置。要显式改默认服务（含改回只读、换 runtime 或改日程）时，使用不带 `--dsh-instance` 的 `--enable-dsh` 命令；在已有默认服务上新增实例时夹带日程变更会被拒绝。`--verify` 只验证 ai_rule managed 块，未管理的同名/手工服务会显示在 `unmanaged_dsh_services` 中但不被改写。
-每个聊天在会话中固定一个 MCP 服务（如 `dsh-opencode-go-alpha`），由真实 Sol 调用该服务的工具，并先核对 `get_dsh_bridge_status` 的 `instance`/`runtime`。stdio MCP 没有可靠的自动聊天身份，本仓库不假定 `CODEX_THREAD_ID` 等变量，也不把提示词或 caller 字段当认证；若宿主无法区分多个实例工具，需使用其支持的服务器作用域/独立 profile，或报告限制。
+每个命名实例分别管理 runtime、锁、回执和会话所有权。同一实例串行，不同实例可并发。新增命名服务保留已有默认、WorkBuddy、HY4 和其他注册项。新 DSH 实例默认工作区可写，可用 `--read-only` 限制该实例。默认与命名实例按会话选择逐任务应用日历。`--verify` 验证安装器管理的注册块，手工服务列在 `unmanaged_dsh_services`。
+并发优先使用根池。使用传统入口时，同一个 Sol 可以按用户要求把不同任务派给宿主可区分的已注册实例。派单前通过 `get_dsh_bridge_status` 核对 `instance` 和 `runtime`。同一任务的重试、续跑、查询、等待与取消都使用原实例。
 跨实例 `get`/`wait`/`cancel` 会安全失败；断连后非所有者只能得到 `unknown_after_disconnect`，不能删锁或重跑。继续会话必须同实例、同 cwd 并使用该实例回执的 session_id。实例隔离不等于 DSH 凭据、账户、额度、会话存储或 OS 权限隔离。
 完整规则、逐聊天工作流、跨电脑同步和排障见 [docs/multisession.md](docs/multisession.md)。
 
-### 可选根池 MCP：同一根聊天复用 pooled runtime
+### 可选根池 MCP
 
-`bridges/pool/server.mjs` 是额外、opt-in stdio MCP，保留现有注册/日程/数据和 v0.3 入口。Windows 临时标准 stdio 已用一个真实根、两个批准 cwd 的 DSH 任务和两个真实命名实例验证；独立合成根仅用 mock stdio。**本机注册 `dsh-root-pool`、受支持 reload 且工具可见后，用户说“使用 DSH”或同义选择即选择根池，不需要 root/instance 名**；显式指定命名旧服务仍走旧服务，未安装根池的电脑继续原 DSH，已启动任务保持原后端。Sol 在自己的宿主 shell 先运行 `codex mcp get dsh-root-pool --json`，只取 `transport.command/args`，用已注册 server 旁的 `cli.mjs` 和同一 `--config` 运行 `context`，把 opaque context 交给 `start/run/get/wait/cancel_pool_task`；不要打印完整 config/env，不要手写 rootId/实例名/lease，stdio 参数不是身份认证。默认只读，running cap 3，schedule 必须显式启用且不自动恢复；HY4 仅在结构化预准入拒绝且本机显式授权/ready 时最多一次。注册示例、`tool_timeout_sec=3700`（实际宿主可不同）与限制见 [docs/root-pool.md](docs/root-pool.md)。未声明每台机器已注册/宿主已加载，也不宣称 OS 隔离或 provider 计费。
+`dsh-root-pool` 注册并经宿主加载后，“使用 DSH”选择根池。显式指定的默认或命名服务仍按原入口使用。Sol 通过已注册服务旁的 `cli.mjs context` 取得当前根上下文，用它派单、查询、等待、取消和设置日程。同一 Sol 可在同一个根同时运行多个独立 DSH，机器级容量默认 3。普通任务默认工作区可写，新根默认关闭峰谷。已部署实例的 runtime、会话和旧回执保留。注册、权限和生命周期见 [docs/root-pool.md](docs/root-pool.md)。
 
 ### 第一次端到端验收
 
 在 Codex 新会话输入：
 
-> 本会话使用 DSH，固定使用 MCP 服务 dsh-opencode-go-alpha。Astra 先创建或恢复真实 Sol Max（max）子代理，由该子代理先调用该服务的 get_dsh_bridge_status，确认 instance=alpha，再在已存在的空测试目录中用 run_dsh_task 做只读文本测试。提供协调者 ID、实际 MCP 发起方依据、任务 ID、退出码、final_reason 和回执。Astra 不转发，Sol 不代执行，不用模型自我介绍证明身份。
+> 本会话使用 DSH。这次验收请选择 dsh-opencode-go-alpha。Astra 创建或恢复真实 Sol 协调者。由 Sol 调用 get_dsh_bridge_status 确认 instance=alpha，再在已存在的空测试目录用 run_dsh_task 派文本测试，传入 permissionMode=read-only。提供协调者 ID、实际 MCP 发起方、任务 ID、退出码、final_reason 和回执。
 
-目录必须是真实绝对路径。只有一个默认实例时，去掉“固定使用 MCP 服务 …”；多实例聊天各自把示例服务名换成实际注册名。完成后再批准一个读取测试文件的任务，核实回执中的 native_tool_calls，而不是立刻开始真实项目写入。
+使用已存在的绝对目录和本机实际注册的服务名。完成后可派一个只读文件任务，检查回执中的 native_tool_calls。
 DSH 回执证明任务执行，不独立证明上游调用者；实际调用归属还须宿主记录。首次或换协调者时核实，日常保留最小证据，不反复扫描完整日志。
 
-### 开放经批准的工作区写入
+### 工作区权限
 
-默认是只读。完成验收并决定让 DSH 做代码修改时，显式运行：
+正常 DSH 任务默认使用 `workspace-write`，实际写入受用户授权、工作区和宿主权限约束。单任务用 `permissionMode: "read-only"`，也可注册只读服务。
 
 ```powershell
-.\scripts\install.ps1 -Apply -EnableDsh -AllowWrite
+.\scripts\install.ps1 -Apply -EnableDsh -ReadOnly
 ```
 
-这只允许 MCP 接受 workspace-write 请求；每次任务仍需对应用户授权，传入 authorizationNote。它不是永久授权所有写入，更不授权安装、删除、提交或推送。宿主审批规则不修改。
-若要恢复只读，再执行不带 `-AllowWrite` 的安装命令；需要重启时先确认没有活动任务。
+根池可通过 `allow_write: false` 或注册 `--read-only` 设为只读。HY4 仍使用独立的任务能力和范围授权。
 
 ## 新会话怎么用：一次选择，持续沿用
 
@@ -138,7 +137,7 @@ DSH 回执证明任务执行，不独立证明上游调用者；实际调用归�
 
 ```text
 本会话使用 DSH 模式。读取当前生效的 AGENTS.md 和 multi-agent-dispatch Skill。
-Astra 负责总体方向，并创建或恢复真实 Sol Max（max）子代理；由 Sol 在自己的上下文实际调用 DSH MCP，负责规划、等待、验收和修订派单。Astra 不直接调用 DSH，也不把 Sol 只当顾问。
+Astra 负责总体方向，默认用 gpt-6.2-sol（max）担任真实 Sol 协调者。Sol 在自己的上下文调用 DSH MCP，负责规划、等待、验收和修订派单。
 DSH 负责实际执行、测试、修复及必要监守；Sol 不代执行，不使用 Luna，不经过 OpenCode CLI。
 除非我明确切换模式，否则本会话后续任务一直沿用 DSH，不因我省略模式而恢复默认。
 只有全新会话从未指定模式时才使用默认 A；指定模式不等于授权所有写入，继续遵守每个任务的授权范围。
@@ -205,19 +204,12 @@ git pull --ff-only
 npm test
 ```
 
-已经启用写入的电脑，在重写 MCP 配置时明确带上 `-AllowWrite`；省略则恢复只读。仅同步规则的上一组命令不改变这个设置。
+显式只读配置在重建同一个托管服务时保留，可使用 `-AllowWrite` 恢复该服务的工作区可写模式。仅同步规则无需更新 MCP 注册。
 安装会输出本机回滚 manifest 路径。用 `.\scripts\install.ps1 -RollbackManifest "该路径"` 回滚。文件在安装后又被修改时，回滚拒绝覆盖，需手工合并。
 备份保存在 Codex home 的 `ai-rule-backups`，可能包含已有配置中的秘密，仅保留本机，禁止上传。
 
 测试、权限边界和恢复说明见 [docs/implementation.md](docs/implementation.md)。其中 2026-11-09 的开发验收记录是当时状态，不应与后续用户反馈混为一谈。隔离 mock 全通过；Windows 临时标准 stdio 另由 Sol 验证同一真实根两任务、alpha/bravo 真实实例重叠、真实 HY4 文件任务和一次授权命令。每台机器的注册/宿主加载、真实多聊天 identity、OS 隔离与 Token 节省仍须各自验收。
 
-## DSH 峰谷时段控制（可选，默认关闭）
+## DSH 峰谷时段控制
 
-工作日中国/新加坡时间 **09:00–12:00、14:00–18:00** 为 Go DeepSeek 峰时，周末谷时。需在无 DSH 活动任务时显式启用：
-
-```powershell
-node .\scripts\manage.mjs --enable-dsh --offpeak-schedule
-node .\scripts\manage.mjs --apply --enable-dsh --offpeak-schedule
-```
-
-如果此前 DSH 已启用写入，须在安装命令中另外保留 `--allow-write`；**时段控制本身不授权写入**。重启 Codex 后用 `get_dsh_schedule_status` 检查 `enabled=true`。提前 10 分钟停派新任务；若遇峰时，当前桥接器拥有的 DSH 本地进程尽力停工；默认**不自动恢复**，强制停止存在未保存进度风险。参见 [详细说明](docs/offpeak-schedule.md)。
+用户可在 Codex 里说“本会话开启峰谷”或“本会话关闭峰谷”。根池通过 `set_pool_schedule` 修改当前已验证的根会话，包括本根正在运行的 DSH。使用默认或命名服务时，Sol 在本会话保存选择，每次通过 `scheduleEnabled` 传递，并用 `set_dsh_task_schedule` 更新本会话的在途任务。新会话默认关闭。默认日历为工作日中国/新加坡时间 **09:00–12:00、14:00–18:00**。已因峰时停止的任务不会自动恢复。详见 [峰谷调度](docs/offpeak-schedule.md)。

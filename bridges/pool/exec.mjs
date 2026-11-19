@@ -26,18 +26,19 @@ try {
   let input;
   try { input = JSON.parse(raw); } catch { fail('request JSON invalid'); }
   if (!input || typeof input !== 'object' || Array.isArray(input)) fail('request must be an object');
-  if (!['run', 'get', 'wait', 'cancel'].includes(input.action)) fail('action must be run/get/wait/cancel');
+  if (!['run', 'get', 'wait', 'cancel', 'set-schedule'].includes(input.action)) fail('action must be run/get/wait/cancel/set-schedule');
   service = new PoolService({
     config, schedule: loadSchedule(config.schedule_config),
-    allowWriteCli: argv.includes('--allow-write'), clock: () => new Date()
+    allowWriteCli: !argv.includes('--read-only'), clock: () => new Date()
   });
   const locator = input.idempotencyKey ? { idempotencyKey: input.idempotencyKey } : { taskId: input.taskId };
-  if (!locator.idempotencyKey && !locator.taskId) fail('idempotencyKey or taskId required');
+  if (input.action !== 'set-schedule' && !locator.idempotencyKey && !locator.taskId) fail('idempotencyKey or taskId required');
   let result;
   if (input.action === 'run') {
     const task = {
       prompt: input.prompt, cwd: input.cwd, idempotencyKey: input.idempotencyKey,
-      timeoutMs: input.timeoutMs ?? 900000, permissionMode: input.permissionMode ?? 'read-only',
+      timeoutMs: input.timeoutMs ?? 900000,
+      ...(input.permissionMode !== undefined ? { permissionMode: input.permissionMode } : {}),
       ...(input.capability ? { capability: input.capability } : {}),
       ...(input.authorizationNote ? { authorizationNote: input.authorizationNote } : {}),
       ...(input.writes ? { writes: input.writes } : {}),
@@ -46,6 +47,8 @@ try {
       ...(input.sessionId ? { sessionId: input.sessionId } : {})
     };
     result = await service.run(resolved.rootChatId, task);
+  } else if (input.action === 'set-schedule') {
+    result = service.setSchedule(resolved.rootChatId, input.enabled);
   } else if (input.action === 'get') {
     result = service.get(resolved.rootChatId, locator);
   } else if (input.action === 'wait') {

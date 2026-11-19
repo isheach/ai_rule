@@ -11,7 +11,7 @@ import { RoutingCoordinator, PreAdmissionRejection, AdmissionCode } from '../bri
 
 const root = path.resolve(path.dirname(fileURLToPath(import.meta.url)), '..');
 const fake = path.join(root, 'tests', 'fake-codebuddy-acp.mjs');
-const temp = () => fs.mkdtempSync(path.join(os.tmpdir(), 'ai-rule-hy4-'));
+const temp = () => fs.mkdtempSync(path.join(fs.realpathSync.native(os.tmpdir()), 'ai-rule-hy4-'));
 const task = (workspace, prompt = 'fixture prompt', key = 'hy4-1') => ({
   prompt, cwd: workspace, idempotencyKey: key, timeoutMs: 3000, permissionMode: 'read-only'
 });
@@ -38,7 +38,7 @@ const auth = Object.freeze({ schema: 1, enabled: true, authorization_ref: 'test-
 
 test('manifest is local and rejects env/credential-shaped overrides', () => {
   const f = fixture();
-  assert.equal(loadManifest(f.file).workspace_root, fs.realpathSync(f.workspace));
+  assert.equal(loadManifest(f.file).workspace_root, fs.realpathSync.native(f.workspace));
   const bad = temp(), file = path.join(bad, 'm.json');
   fs.writeFileSync(file, JSON.stringify({ ...f.value, env: { CODEBUDDY_AUTH_TOKEN: 'x' } }));
   assert.throws(() => loadManifest(file), /Unknown HY4 manifest field: env/);
@@ -215,16 +215,22 @@ test('explicit HY4 never calls DSH and receives only HY4', async () => {
 });
 
 test('opt-in server refuses a shared HY4/DSH runtime', async () => {
-  const f = fixture('normal'), shared = temp();
+  const f = fixture('normal');
+  // os.tmpdir() can have a different physical spelling on Windows runners.
+  const shared = fs.mkdtempSync(path.join(os.tmpdir(), 'ai-rule-hy4-shared-'));
   const p = spawn(process.execPath, [path.join(root, 'bridges', 'hy4', 'server.mjs'),
-    '--hy4-manifest', f.file, '--runtime', shared, '--dsh-runtime', shared,
+    '--hy4-manifest', f.file, '--runtime', shared, '--dsh-runtime', fs.realpathSync.native(shared),
     '--routing-runtime', temp(), '--dsh-entry', path.join(root, 'tests', 'mock-dsh.mjs')
   ], { stdio: ['pipe', 'pipe', 'pipe'] });
+  let stderr = '';
+  p.stderr.setEncoding('utf8');
+  p.stderr.on('data', chunk => { stderr += chunk; });
   const code = await Promise.race([
     new Promise(resolve => p.on('close', resolve)),
     new Promise(resolve => setTimeout(() => { p.kill(); resolve('timeout'); }, 5000))
   ]);
   assert.equal(code, 1);
+  assert.match(stderr, /HY4 and DSH runtimes must remain physically separate/);
 });
 
 test('opt-in MCP endpoint serves status and an explicit HY4 run with fixtures', async () => {

@@ -20,16 +20,19 @@ test('route parser ignores unrelated web search route', () => {
   assert.throws(() => configuredRoute('- id: something-else'), /Cannot locate/);
 });
 test('preflight checks mock CLI flags and route without paid call', () => { assert.equal(preflight(cli).configured_route.provider, 'opencode-go'); });
-test('read-only default and shell-free argument vector', () => {
+test('workspace-write default and shell-free argument vector', () => {
   const cwd = temp(), t = validateTask(task(cwd, '中文 " ; & $()'));
-  assert.equal(t.permissionMode, 'read-only'); assert.equal(dshArgs(t).at(-1), '-');
+  assert.equal(t.permissionMode, 'workspace-write');
+  assert.equal(dshArgs(t)[dshArgs(t).indexOf('--permission-mode') + 1], 'workspace-write');
+  assert.equal(dshArgs(t).at(-1), '-');
   assert.ok(!dshArgs(t).includes(t.prompt));
 });
-test('write permission has two gates and rejects unsupported modes', () => {
-  const t = { ...task(temp()), permissionMode: 'workspace-write', authorizationNote: 'user-approved-test' };
-  assert.throws(() => validateTask(t), /local --allow-write/);
-  assert.equal(validateTask(t, true).permissionMode, 'workspace-write');
-  assert.throws(() => validateTask({ ...t, authorizationNote: '' }, true));
+test('explicit read-only and the installation permission cap are respected', () => {
+  const t = task(temp());
+  assert.throws(() => validateTask({ ...t, permissionMode: 'workspace-write' }, false), /configured read-only/);
+  assert.equal(validateTask(t, false).permissionMode, 'read-only');
+  const readOnly = validateTask({ ...t, permissionMode: 'read-only' });
+  assert.equal(dshArgs(readOnly)[dshArgs(readOnly).indexOf('--permission-mode') + 1], 'read-only');
   assert.throws(() => validateTask({ ...t, permissionMode: 'auto' }, true));
 });
 test('task input rejects relative directories, unknown keys and invalid timeout', () => {
@@ -100,7 +103,7 @@ test('explicit cancel, busy protection and cross-process lock refusal', async ()
 });
 test('stdio MCP initialize, list, call and asynchronous wait', async () => {
   const runtime = temp(), cwd = temp();
-  const p = spawn(process.execPath, [path.join(root, 'bridges', 'dsh', 'server.mjs'), '--dsh-entry', mock, '--runtime', runtime], { stdio: ['pipe', 'pipe', 'pipe'] });
+  const p = spawn(process.execPath, [path.join(root, 'bridges', 'dsh', 'server.mjs'), '--dsh-entry', mock, '--runtime', runtime, '--read-only'], { stdio: ['pipe', 'pipe', 'pipe'] });
   let seq = 0, buffer = ''; const pending = new Map();
   p.stdout.setEncoding('utf8'); p.stdout.on('data', data => { buffer += data; let pos; while ((pos = buffer.indexOf('\n')) >= 0) { const v = JSON.parse(buffer.slice(0, pos)); buffer = buffer.slice(pos + 1); pending.get(v.id)?.(v); pending.delete(v.id); } });
   const rpc = (method, params = {}) => new Promise((resolve, reject) => {
@@ -111,22 +114,25 @@ test('stdio MCP initialize, list, call and asynchronous wait', async () => {
   try {
     const init = await rpc('initialize', { protocolVersion: '2025-06-18', capabilities: {}, clientInfo: { name: 'test', version: '1' } });
     assert.equal(init.result.serverInfo.name, 'dsh-opencode-go');
-    const list = await rpc('tools/list'); assert.equal(list.result.tools.length, 7);
+    const list = await rpc('tools/list');
+    assert.ok(list.result.tools.some(tool => tool.name === 'set_dsh_task_schedule'));
     const denied = await rpc('tools/call', { name: 'start_dsh_task', arguments: { ...task(cwd), permissionMode: 'workspace-write' } });
     assert.equal(denied.result.isError, true);
-    assert.match(denied.result.content[0].text, /Workspace writes require/);
+    assert.match(denied.result.content[0].text, /configured read-only/);
     assert.equal(denied.result.structuredContent.error.code, AdmissionCode.PERMISSION_REFUSED);
     assert.equal(denied.result.structuredContent.error.admission_state, 'not_accepted');
     assert.equal(denied.result.structuredContent.error.fallback_eligible, false);
     const start = await rpc('tools/call', { name: 'start_dsh_task', arguments: task(cwd) });
     const id = JSON.parse(start.result.content[0].text).task_id;
     const wait = await rpc('tools/call', { name: 'wait_dsh_task', arguments: { taskId: id, waitMs: 5000 } });
-    assert.equal(JSON.parse(wait.result.content[0].text).status, 'completed');
+    const receipt = JSON.parse(wait.result.content[0].text);
+    assert.equal(receipt.status, 'completed');
+    assert.equal(receipt.permission_mode, 'read-only');
   } finally { p.stdin.end(); await new Promise(resolve => p.on('close', resolve)); }
 });
 test('pre-admission failures carry structured codes and admit no task', async () => {
   const cwd = temp();
-  const m = new TaskManager({ cli, runtime: temp() });
+  const m = new TaskManager({ cli, runtime: temp(), allowWrite: false });
   await assert.rejects(m.start({ ...task(cwd), permissionMode: 'workspace-write', authorizationNote: 'ref' }), e =>
     e instanceof PreAdmissionRejection && e.code === AdmissionCode.PERMISSION_REFUSED && e.admission_state === 'not_accepted' && e.fallback_eligible === false);
 
@@ -187,13 +193,15 @@ test('live mock MCP schedule rejection carries safe structured metadata', {
   });
   try {
     await rpc('initialize', { protocolVersion: '2025-06-18', capabilities: {}, clientInfo: { name: 'test', version: '1' } });
-    const result = await rpc('tools/call', { name: 'start_dsh_task', arguments: task(cwd) });
+    const result = await rpc('tools/call', { name: 'start_dsh_task', arguments: { ...task(cwd), scheduleEnabled: true } });
     assert.equal(result.result.isError, true);
     assert.equal(result.result.structuredContent.error.code, AdmissionCode.SCHEDULE_GATE);
     assert.equal(result.result.structuredContent.error.admission_state, 'not_accepted');
     assert.equal(result.result.structuredContent.error.fallback_eligible, true);
     assert.equal(result.result.structuredContent.error.details.phase, 'peak');
     assert.equal(typeof result.result.structuredContent.error.details.hard_stop_at, 'string');
+    const unrestricted = await rpc('tools/call', { name: 'run_dsh_task', arguments: task(cwd, 'ok', 'other-conversation') });
+    assert.equal(JSON.parse(unrestricted.result.content[0].text).status, 'completed');
   } finally { p.stdin.end(); await new Promise(resolve => p.on('close', resolve)); }
 });
 

@@ -11,7 +11,7 @@ import { sha256 } from '../bridges/hy4/policy.mjs';
 
 const root = path.resolve(path.dirname(fileURLToPath(import.meta.url)), '..');
 const fake = path.join(root, 'tests', 'fake-codebuddy-acp.mjs');
-const temp = () => fs.mkdtempSync(path.join(os.tmpdir(), 'ai-rule-hy4-native-'));
+const temp = () => fs.mkdtempSync(path.join(fs.realpathSync.native(os.tmpdir()), 'ai-rule-hy4-native-'));
 const digest = value => crypto.createHash('sha256').update(value).digest('hex');
 const HOOK_SHELL = (() => {
   const candidates = process.platform === 'win32'
@@ -127,20 +127,25 @@ test('outside exact paths and sensitive lexical paths are rejected before spawn'
   const { manager, workspace } = writable('normal');
   try {
     const outside = path.join(path.dirname(workspace), 'outside.txt');
-    for (const [key, target, code] of [
+    const invalidWrites = [
       ['outside-exact', outside, 'HY4_INVALID_TASK'],
       ['sensitive-exact', path.join(workspace, '.env.fixture'), 'HY4_INVALID_TASK'],
-      ['ads-exact', path.join(workspace, 'safe.txt:stream'), 'HY4_INVALID_TASK'],
-      ['device-exact', path.join(workspace, 'CON'), 'HY4_INVALID_TASK'],
       ['edit-hash', path.join(workspace, 'edit.txt'), 'HY4_INVALID_TASK']
-    ]) {
+    ];
+    if (process.platform === 'win32') {
+      invalidWrites.push(
+        ['ads-exact', path.join(workspace, 'safe.txt:stream'), 'HY4_INVALID_TASK'],
+        ['device-exact', path.join(workspace, 'CON'), 'HY4_INVALID_TASK']
+      );
+    }
+    for (const [key, target, code] of invalidWrites) {
       const extra = key === 'edit-hash'
         ? { writes: [{ path: target, mode: 'edit', content_sha256: 'a'.repeat(64) }] }
         : { writes: [{ path: target, mode: 'write' }] };
       await assert.rejects(manager.start(writeTask(workspace, key, extra)), error => {
         assert.equal(error.details?.code, code, key);
         return true;
-      });
+      }, key);
     }
   } finally { await manager.close(); }
 });

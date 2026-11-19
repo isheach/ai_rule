@@ -422,10 +422,11 @@ export class RoutingCoordinator {
     if (!['default', 'text-only', 'workspace-read', 'workspace-write'].includes(taskCapability)) {
       throw new PreAdmissionRejection(AdmissionCode.INVALID_PARAMS, 'taskCapability must be default, text-only, workspace-read or workspace-write.');
     }
-    if (task.permissionMode === 'workspace-write' && taskCapability !== 'workspace-write') {
+    const ordinaryDsh = requestedBackend === 'dsh' && taskCapability === 'default';
+    if (task.permissionMode === 'workspace-write' && taskCapability !== 'workspace-write' && !ordinaryDsh) {
       throw new PreAdmissionRejection(AdmissionCode.PERMISSION_REFUSED, 'Workspace writes require the explicit workspace-write capability.');
     }
-    if (task.permissionMode === 'workspace-write' && (options.allowWorkspaceWrite !== true || !task.authorizationNote)) {
+    if (task.permissionMode === 'workspace-write' && (options.allowWorkspaceWrite !== true || (!ordinaryDsh && !task.authorizationNote))) {
       throw new PreAdmissionRejection(AdmissionCode.PERMISSION_REFUSED, 'Workspace writes require local routing allowWorkspaceWrite AND an explicit user-approval reference.');
     }
     if (taskCapability === 'workspace-write' && task.permissionMode !== 'workspace-write') {

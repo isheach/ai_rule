@@ -1,6 +1,6 @@
 # isheach/ai_rule — 多代理长期规则
 
-规则修订：2026-11-12.dsh-multisession-r1；HY4 预准入回退候选：2026-11-13.hy4-preadmission-r1。桥接器/安装器版本 v0.3.0。
+规则修订：2026-11-19.dsh-session-controls-r1；HY4 预准入回退候选：2026-11-13.hy4-preadmission-r1。桥接器/安装器版本 v0.3.0。
 本文件是用户确认的长期偏好，不是绕过宿主安全策略的授权。遵守当前会话明确要求及更高优先级指令。
 安装后在新会话加载；GitHub 上的文件本身不会远程注入其他电脑。
 
@@ -8,7 +8,7 @@
 
 | 选择 | Sol Max 职责 | 实际执行 | 智能监守 |
 |---|---|---|---|
-| A／原生（全新会话未选择时的默认值） | 规划、执行、实验分析、自审 | GPT-6.1 Sol Max | 仅有必要时 GPT-6 Luna Max |
+| A／原生（全新会话未选择时的默认值） | 规划、执行、实验分析、自审 | GPT-6.2 Sol Max（可按调用覆盖） | 仅有必要时 GPT-6 Luna Max |
 | HY4／WorkBuddy HY4 | 仅规划、调度、验收 | WorkBuddy HY4 | HY4 自行负责 |
 | WorkBuddy DeepSeek／WorkBuddy DSF | 仅规划、调度、验收 | WorkBuddy DeepSeek | 同一 DeepSeek 后端 |
 | DSH／DSH DeepSeek | 仅规划、调度、验收 | DSH 原生 Harness + DeepSeek | DSH 的同一后端 |
@@ -20,15 +20,15 @@ Luna **仅**用于 Sol Max 自己执行且确实需要持续监守的任务。�
 
 ## 实际调用链：不能用角色描述代替真实子代理
 
-在 Astra 主会话中，外部模式必须为：**Astra → 真实 GPT-6.1 Sol Max（max）子代理 → 所选外部 MCP → 执行 Harness**。
+在 Astra 主会话中，外部模式使用 **Astra → 真实 Sol 协调子代理（默认 GPT-6.2 Sol Max）→ 所选外部 MCP → 执行 Harness**。
 创建了 Sol 子代理、却由 Astra 自己调用外部 MCP，仍然不合格；Sol 不能只是建议顾问或提示词撰写者。
 
 - Astra 负责目标、授权边界、重大决策，创建或恢复真实 Sol 协调子代理，向其完整交接，然后用宿主原生 wait 等待该真实 agent ID。
 - Sol 必须在自己的执行上下文中实际提交外部任务，并负责状态查询、等待、结果验收、必要的修订派单。Astra 不得以“宿主转发”“避免重复”“工具在主会话更方便”为由代发。
 - Astra 不直接调用外部执行 MCP 的 run/start、修订派单、日常轮询/wait 或取消工具。常规状态探测也交给 Sol；用户明确要求的只读调度审计或紧急停止按授权执行，并记录为例外，不转化为后续派单权。
-- 首次建立或更换协调者时，核实真实 agent ID、宿主记录的模型及档位、对应 MCP 的可见性。用户已报告本机验证过的映射是 `gpt-6.1-sol / max`；仍以当次宿主真实记录为准，不用昵称或自我介绍证明身份。不得猜造创建参数。
+- 新建协调者默认在宿主原生派发调用中设置 `model=gpt-6.2-sol`、`reasoning_effort=max`。用户可声明“本次协调者用 <Sol 模型>，推理档位 <档位>”，按宿主支持的原生参数覆盖本次调用。协调者须匹配本次有效的模型和档位。一次性覆盖结束后恢复当前会话选择，只有明确要求后续沿用时才保存覆盖。核实真实 agent ID、宿主记录的模型和档位及 MCP 可见性。宿主不支持选定值时报告限制。
 - Sol 看不到工具或调用受拒时报告阻塞，不由 Astra 转发兜底，不绕过审批。主会话本身经宿主证实就是 Sol Max 时可直接协调，不为了形式重复嵌套一个 Sol；Astra 不可自称 Sol。
-- 同一活跃任务只允许一个协调者。优先复用可安全恢复的 Sol 子代理；无需每个小步骤新建代理。Astra 接收验收摘要和战略问题，不重复 Sol 的整套技术验收。
+- 同一活跃任务只允许一个协调者和固定后端。同一 Sol 可并发派发多个独立 DSH 任务。模型覆盖用于新派发，已经运行的任务继续由现有协调者负责。Astra 接收验收摘要和战略问题。
 - 每轮保留最小调用链证据：协调者真实 ID/模型依据、实际 MCP 发起方记录、task_id 和终态。这些放在报告或会话交接中，不擅自添加到不支持的 MCP 参数。配置、昵称、手填 caller 字段或 DSH 回执本身均不能独立证明 MCP 发起者。
 
 发现旧任务由 Astra 直接提交时：停止新的越级派单，保留已有结果和原 MCP 进程；先移交 task_id、cwd、回执位置、授权范围及已知状态。Sol 只在同一运行环境可安全访问时接续查询/验收。无法接管则报告限制、等待原任务自然结束，不因规则修正重启 Codex、关闭原 MCP、删锁、取消或重新提交任务。详细流程见 Skill。
@@ -79,32 +79,32 @@ Astra 用宿主真实提供的内置 wait 等待 Sol 的原生 agent ID；Sol �
 - OpenCode Go 只是模型服务和额度来源，不启动 OpenCode CLI，不叠加 OpenCode Harness。
 - 没有真实工具调用、退出码及结果证据，不得宣称执行成功。配置值、模型自我介绍都不等于服务端型号或账单证明。
 
-## DSH 多实例：同机多聊天各用一个命名实例
+## DSH 多实例调度
 
-同一台电脑可注册多个命名 DSH MCP 服务：默认 `dsh-opencode-go`（实例 `default`，沿用旧 runtime/回执），命名实例 `dsh-opencode-go-<name>`（独立 runtime）。每个聊天在会话中固定选择一个服务，并让真实 Sol 实际调用该服务的工具；选择是宿主可见的 MCP 服务选择，不是提示词自称。
+并发独立任务优先使用已配置且可验证当前根的 DSH 根池。使用传统入口时，真实 Sol 可按用户要求把不同任务派给宿主可区分的已注册实例，包括默认 `dsh-opencode-go` 和命名 `dsh-opencode-go-<name>`。每个任务固定使用实际派发的实例。
 - 不假定 `CODEX_THREAD_ID` 或其他未验证线程变量会传给 stdio MCP；提示词、配置和手填 caller 字段都不是身份认证。宿主不能区分多个同名工具时，使用其支持的服务器作用域/独立 profile，或报告限制，不能假装已自动逐聊天隔离。
 - 实例名只允许小写 ASCII 与内部连字符，`default` 保留；每个实例必须有自己的 runtime、`instance.json`、锁、回执、幂等域和 `sessions.json`。共享物理路径（含大小写、别名、junction）拒绝启动。
-- 不同实例可并行；同一实例仍单任务互斥。task_id、idempotencyKey 和 session_id 都只在所属实例有效；禁止跨实例 get/wait/cancel，错误域查询必须安全失败。busy/lock 是独立类别：本阶段不自动回退 HY4，除非有安全证据证明不是同一工作的重复提交；不得猜测或用回退绕过实例互斥。
+- 传统实例各自串行，不同实例可同时运行独立任务。按各任务记录的实例、task_id、idempotencyKey 和 session_id 查询、等待、取消或在原 cwd 续跑。已受理任务保持原实例，busy/lock 不回退 HY4。
 - 断连后先只读核实原任务、锁 owner 与进程，不删锁、不重复提交。非所有者只得到 `unknown_after_disconnect`，不能取消别人的子进程。
 - 继续会话必须同实例、同 cwd，并使用该实例回执/索引中的 session_id；新任务由 DSH 生成新 UUID。不得伪造、复制或把旧 runtime 数据搬进命名实例。
-- 每个实例都必须保留有效的 `--schedule-config` 传递（若本机启用）、峰谷准入、预算+安全余量、硬停工和 `resume_automatically=false`。任何新实例都不能用来绕过已启用日程；硬停工只终止该实例自己的子进程。
-- 默认只读；workspace-write 仍需本机显式启用和本次任务授权。实例隔离不等于 DSH 凭据/账户/额度/会话存储/OS 权限隔离，也不实现额外 OS 沙箱。
+- 默认和命名入口的日历由 `--schedule-config` 指定，省略时使用内置日历。协调者在本会话保存峰谷选择，新会话默认关闭，派单通过 `scheduleEnabled` 传递。用户切换时，协调者只用 `set_dsh_task_schedule` 更新本会话仍在运行的任务。启用时保留峰谷门禁、预算余量、硬停和不自动恢复。
+- DSH 正常任务默认使用 `workspace-write`，按用户的本次任务授权和宿主工作区边界执行。单任务可传 `permissionMode: "read-only"`，本机可注册 `--read-only`。各实例继续共享当前账户和宿主权限。
 - 新增/修改 MCP 注册需受支持的加载/重启流程；有活动任务时保留原进程，不承诺热加载无中断。
 - 实际链路仍为 Astra → 真实 Sol Max → 所选 DSH MCP 实例 → DSH。实例只是 MCP 端点，不是额外代理层。交接保留 `session_mode=DSH`、实例名、服务名、协调者 ID、活动 task_id 和授权范围。详见 `docs/multisession.md`。
 
 ## 可选根池 MCP（临时标准 stdio 已验证；非每机已注册）
 
 `bridges/pool/server.mjs` 是额外、opt-in stdio MCP；保留现有注册、命名 DSH、日程、runtime 和 v0.3 回执。Windows 临时标准 stdio 已由 Sol 用一个真实根、两个批准 cwd 的 DSH 任务和两个真实命名实例验证；独立合成根仍只用 mock stdio。**本机按 `docs/root-pool.md` 注册 `dsh-root-pool` 并受支持地 reload、工具可见后**，用户说“使用 DSH”或同义选择即选择根池，无需“根池”/root/instance 名；显式指定命名旧服务仍用旧服务，未安装根池的电脑继续原 DSH；已启动任务保持原后端。Sol 在自己的宿主 shell 先 `codex mcp get dsh-root-pool --json`，只取 `transport.command/args`，用已注册 server 旁的 `cli.mjs` 和同一 `--config` 运行 `context`，再把 opaque ref 交给该 MCP；不得手填 rootId/lease、不得假定 stdio 能读到 `CODEX_THREAD_ID`，也不得把 context 当身份认证。
-- 每个已验证根聊天拥有独立 `dsh/`、`hy4/`、`routing/` runtime 与稳定 `pool-<hash>` 实例；空闲 binding 不保留进程。
-- 机器级 running cap 默认 3；binding cap 可选。日程必须显式启用、硬停工、预算检查、`resumeAutomatically=false`；不自动恢复。
-- 默认只读；`workspace-write` 同时需要本机 `allow_write` + server `--allow-write` + 每任务显式授权。
+- 每个已验证根聊天保留原 `dsh/` 主实例、`hy4/` 与 `routing/` 数据，可以同时运行多个独立 DSH worker。每个 worker 独立且只运行一个子进程。全池运行上限默认 3，起动和未知状态计入上限。
+- `set_pool_schedule` 按本根聊天开关峰谷，并更新已有任务。新根默认关闭，选择持久化。开启后执行预算检查和硬停，已停止的任务保持原终态。
+- 普通 DSH 默认 `workspace-write`。显式单任务只读和池配置 `allow_write: false` 或 `--read-only` 仍然生效。HY4 的授权、能力和写入范围沿用独立规则。
 - DSH 先尝试；仅结构化 `not_accepted` 预准入拒绝、显式本机授权且 HY4 ready 时最多回退一次。已受理/unknown/超时/断连/权限/参数/busy/lock/停止/继续/修复均不回退。
 - 完整 handle 需要 rootId+ordinal+generation+lease，并加每次运行唯一 operation proof；不输出 lease。终止回放不重启模型；非所有者 get/wait/cancel 只读不 kill/finish。
 - 已验证：Windows 临时标准 stdio 中，同一真实根的两个批准 cwd DSH 任务 completed/exit0，共享 instance/runtime、fresh sessions，且幂等 lookup 正常；alpha/bravo 两个真实注册实例并行 22.388s、各有三项 native read。独立合成根仅以实际 mock stdio 测试。未验证：每台机器安装/宿主 reload、桌面 app、全局注册、认证、OS 隔离或 provider 计费。HY4 目录 scope/精确文件写已由真实 HY4 native task 验证 create/Edit；命令仅可选且需逐条授权，vendor 可能 auto-allow，不能声称所有命令都过 ACP callback 或 OS 隔离。不要为文件路径能力新增 pool 功能或绕过 owner/schedule/lease 合同。
 
 ## 授权、凭据和跨电脑
 
-执行前按用户授权范围操作。默认只读；用户明确批准写入范围后才允许相应写入。派单本身不授予删文件、安装包、提交/推送、扩大目录访问等权限。
+按用户的本次任务授权范围执行。正常 DSH 的工作区可写预设需配合宿主沙箱、获准目录和任务范围。删文件、安装包、提交或推送及扩大目录访问仍按各自授权处理。
 模式保持只决定由谁执行，不延长或扩大已有权限；不因为“本会话一直用 DSH”就认定所有后续写入已经获批。
 AGENTS/Skill 是行为规则，不是 OS 沙箱或程序强制的路由状态机；MCP 的权限参数也不能被描述成经过验证的操作系统隔离。
 禁止读取或上传 API Key、`.credentials.yaml`、`auth.json`、`.env`、令牌、完整私有日志。不得降低宿主审批设置。
@@ -114,4 +114,4 @@ AGENTS/Skill 是行为规则，不是 OS 沙箱或程序强制的路由状态机
 
 ## 可选 DSH 谷时执行和定时停工
 
-只有本机 MCP 显式配置 `--schedule-config` 后，才启用真正的峰时门禁和本地硬停工。工作日 UTC+8 09:00–12:00、14:00–18:00 为 OpenCode Go DeepSeek 的峰时；默认提前 10 分钟禁止新 DSH 任务，并拒绝完整预算可能跨越峰时的任务。已运行任务若到达峰时，会被桥接器尽力结束且标记 `schedule_stopped`，**不自动恢复，也不标记成功**。到点停止可能损失未保存结果；进度提示并不是 DSH 的可靠实时检查点。仍按现有 Astra→真实 Sol→DSH 调度；只有本机显式启用并验证的预准入 HY4 回退策略可在“未受理”时按 `docs/hy4-fallback.md` 转一次 HY4，否则不把被拒绝的任务交给 Sol/Luna/WorkBuddy 代做。不允许为了日程控制而扩大权限，也不实现通用日程绕过。详细配置见 `docs/offpeak-schedule.md`。
+由用户选择当前会话是否应用峰谷。默认日历将工作日 UTC+8 09:00–12:00、14:00–18:00 设为峰时，开启后提前 10 分钟拒绝新任务，并检查任务预算加 60 秒余量。峰时停止的任务标记为 `schedule_stopped`，不会自动恢复。关闭会话日程会解除本会话运行任务的定时停工。详细配置见 `docs/offpeak-schedule.md`，预准入回退继续按 `docs/hy4-fallback.md` 执行。
