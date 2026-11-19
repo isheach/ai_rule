@@ -149,7 +149,7 @@ node .\scripts\manage.mjs --apply --enable-dsh --dsh-instance alpha --dsh-instan
 node .\scripts\manage.mjs --verify
 ```
 
-默认和命名服务使用注册的日历，省略 `--schedule-config` 时使用内置日历。新会话默认关闭日程。用户切换时，协调者记录当前会话选择，后续派单传 `scheduleEnabled`，并用 `set_dsh_task_schedule` 更新本会话仍在运行的任务。使用根池时由 `set_pool_schedule` 持久化根会话选择。详见 [峰谷调度](offpeak-schedule.md)。
+默认和命名服务使用注册或内置日历。新会话默认模式 1（无峰谷），模式 2 在峰时把新的独立任务交给 WorkBuddy DSF，模式 3 应用原峰谷。协调者为本会话保存 `scheduleMode` 并随派单传递，用 `set_dsh_task_schedule` 更新本会话仍在运行的 DSH。根池用 `set_pool_schedule` 保存同样的三种模式。旧布尔参数 false/true 对应 1/3。详见 [峰谷调度](offpeak-schedule.md)。
 
 ## 8. 验证与排障
 

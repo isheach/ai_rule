@@ -1,8 +1,9 @@
 #!/usr/bin/env node
 // Minimal, dependency-free stdio MCP server. No HTTP listener and no shell command strings.
 import { TaskManager, discoverDsh, redact, VERSION, normalizeInstanceName, serverNameForInstance } from './core.mjs';
-import { PreAdmissionRejection } from './routing.mjs';
-import { loadSchedule } from './schedule.mjs';
+import { PreAdmissionRejection, RoutingConflictError } from './routing.mjs';
+import { loadSchedule, ScheduleMode, scheduleModeProperty, selectScheduleMode } from './schedule.mjs';
+import { workBuddyDispatchTools, WORKBUDDY_FAILURE } from '../workbuddy/dispatch.mjs';
 import { fileURLToPath } from 'node:url';
 
 const argv = process.argv.slice(2);
@@ -30,16 +31,19 @@ const taskSchema = {
     permissionMode: { type: 'string', enum: ['read-only', 'workspace-write'], description: 'Defaults to workspace-write unless this bridge is configured read-only.' },
     authorizationNote: { type: 'string', description: 'Optional audit reference to the user’s task authorization.' },
     scheduleEnabled: { type: 'boolean', default: false, description: 'Apply the configured schedule to this task only.' },
+    scheduleMode: scheduleModeProperty,
+    workBuddyContinuationKey: { type: 'string', description: 'Continue a recorded WorkBuddy DSF session in the same workspace, only during a peak in mode 2.' },
     sessionId: { type: 'string', description: `Resume a DSH session recorded by ${scoped} from the SAME cwd; never use an invented or foreign ID.` }
   }
 };
 const idSchema = { type: 'object', additionalProperties: false, required: ['taskId'], properties: { taskId: { type: 'string', description: `Task ID scoped to ${scoped}` } } };
 const tools = [
-  { name: 'get_dsh_schedule_status', description: `Local schedule phase, admission gate, next hard stop and offpeak time for ${scoped} No model call.`, inputSchema: { type: 'object', additionalProperties: false, properties: {} }, annotations: { readOnlyHint: true } },
+  { name: 'get_dsh_schedule_status', description: `Local phase and admission gate for ${scoped} Omit scheduleMode for the active/default mode, or supply one to preview. No model call.`, inputSchema: { type: 'object', additionalProperties: false, properties: { scheduleMode: scheduleModeProperty } }, annotations: { readOnlyHint: true } },
   {
     name: 'set_dsh_task_schedule',
     description: `Change the schedule for the active child owned by this ${scoped} process. Other tasks retain their own setting.`,
-    inputSchema: { ...idSchema, required: ['taskId', 'enabled'], properties: { ...idSchema.properties, enabled: { type: 'boolean' } } },
+    inputSchema: { ...idSchema, oneOf: [{ required: ['enabled'] }, { required: ['scheduleMode'] }],
+      properties: { ...idSchema.properties, enabled: { type: 'boolean' }, scheduleMode: scheduleModeProperty } },
     annotations: { readOnlyHint: false }
   },
   { name: 'get_dsh_bridge_status', description: `Local readiness, instance identity and active task for ${scoped} Does not call a model or reveal credentials.`, inputSchema: { type: 'object', additionalProperties: false, properties: {} }, annotations: { readOnlyHint: true } },
@@ -47,7 +51,8 @@ const tools = [
   { name: 'run_dsh_task', description: `Run one bounded DSH task in ${scoped} and wait internally until its final receipt. Prefer for no-intervention tasks when host MCP timeout safely covers the budget; otherwise use start+wait. Peak schedule may block or stop work. No model fallback.`, inputSchema: taskSchema, annotations: { readOnlyHint: false, openWorldHint: true } },
   { name: 'get_dsh_task', description: `Read a task receipt from ${scoped} completed means agent-loop completion, NOT independent acceptance of the project result.`, inputSchema: idSchema, annotations: { readOnlyHint: true } },
   { name: 'wait_dsh_task', description: `Event-driven wait for ${scoped} up to 60 seconds, without model polling or duplicate execution. Repeat only after timeout, or use the host native wait when available.`, inputSchema: { ...idSchema, properties: { ...idSchema.properties, waitMs: { type: 'integer', minimum: 0, maximum: 60000, default: 25000 } } }, annotations: { readOnlyHint: true } },
-  { name: 'cancel_dsh_task', description: `Cancel only a task owned by this ${scoped} process. Attempts to terminate its process tree; inspect the receipt afterwards.`, inputSchema: idSchema, annotations: { readOnlyHint: false, destructiveHint: true } }
+  { name: 'cancel_dsh_task', description: `Cancel only a task owned by this ${scoped} process. Attempts to terminate its process tree; inspect the receipt afterwards.`, inputSchema: idSchema, annotations: { readOnlyHint: false, destructiveHint: true } },
+  ...workBuddyDispatchTools
 ];
 let initialized = false, input = '', shuttingDown = false;
 const inFlight = new Map();
@@ -60,13 +65,23 @@ async function call(name, args, requestId) {
   for (const key of Object.keys(args)) if (!(key in schema.properties)) throw Error(`Unknown argument: ${key}`);
   for (const key of schema.required || []) if (!(key in args)) throw Error(`Missing argument: ${key}`);
   if (name === 'get_dsh_bridge_status') return manager.status();
-  if (name === 'get_dsh_schedule_status') return manager.scheduleStatus();
-  if (name === 'set_dsh_task_schedule') return manager.setTaskSchedule(args.taskId, args.enabled);
+  if (name === 'get_dsh_schedule_status') {
+    return manager.scheduleStatus(args.scheduleMode === undefined ? undefined : selectScheduleMode(args.scheduleMode));
+  }
+  if (name === 'set_dsh_task_schedule') {
+    if (args.scheduleMode === undefined && args.enabled === undefined) throw Error('scheduleMode or enabled is required.');
+    return manager.setTaskSchedule(args.taskId, selectScheduleMode(args.scheduleMode, args.enabled));
+  }
+  if (name === 'get_workbuddy_dsf_dispatch') return manager.workBuddy.get(args.idempotencyKey);
+  if (name === 'claim_workbuddy_dsf_dispatch') {
+    return manager.workBuddy.claim(args, () => manager.scheduleStatus(ScheduleMode.WORKBUDDY_AT_PEAK));
+  }
+  if (name === 'finish_workbuddy_dsf_dispatch') return manager.workBuddy.finish(args);
   if (name === 'get_dsh_task') return manager.get(args.taskId);
   if (name === 'wait_dsh_task') return manager.wait(args.taskId, args.waitMs ?? 25000);
   if (name === 'cancel_dsh_task') return manager.cancel(args.taskId);
   const record = await manager.start(args);
-  if (name === 'start_dsh_task') return record;
+  if (name === 'start_dsh_task' || record.workbuddy_dispatch) return record;
   if (!record.replayed) inFlight.set(requestId, record.task_id);
   try {
     while (manager.pending.has(record.task_id)) await manager.wait(record.task_id, 60000);
@@ -94,17 +109,18 @@ async function dispatch(message) {
   if (method !== 'tools/call') return error(id, -32601, 'Method not supported.');
   try {
     const result = await call(params.name, params.arguments ?? {}, id);
-    send({ jsonrpc: '2.0', id, result: { content: [{ type: 'text', text: JSON.stringify(result) }], isError: ['failed', 'timed_out', 'cancelled', 'schedule_stopped'].includes(result.status) } });
+    const failureStatuses = result.workbuddy_dispatch ? WORKBUDDY_FAILURE : ['failed', 'timed_out', 'cancelled', 'schedule_stopped'];
+    send({ jsonrpc: '2.0', id, result: { content: [{ type: 'text', text: JSON.stringify(result) }], isError: failureStatuses.includes(result.status) } });
   } catch (e) {
     const result = { isError: true, content: [{ type: 'text', text: redact(e.message) }] };
     // Additive structured contract for new clients. The text item remains the
     // v0.3.0-compatible error channel and is never converted into success.
-    if (e instanceof PreAdmissionRejection) {
+    if (e instanceof PreAdmissionRejection || e instanceof RoutingConflictError) {
       result.structuredContent = { error: {
         code: e.code,
         admission_state: e.admission_state,
-        fallback_eligible: e.fallback_eligible,
-        details: e.details
+        fallback_eligible: e.fallback_eligible === true,
+        details: e.details ?? {}
       } };
     }
     send({ jsonrpc: '2.0', id, result });

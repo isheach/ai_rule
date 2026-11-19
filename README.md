@@ -1,6 +1,6 @@
 # ai_rule
 
-两台 Windows 电脑共用的 Codex 调度规则、Skill 和 DSH MCP 桥接器。桥接器/安装器版本 **v0.3.0**；规则修订 **2026-11-19.dsh-session-controls-r1**。
+两台 Windows 电脑共用的 Codex 调度规则、Skill 和 DSH MCP 桥接器。桥接器和安装器版本为 **v0.3.0**，规则修订为 **2026-11-19.dsh-peak-modes-r1**。
 
 ## 已落地与尚未验收
 
@@ -212,4 +212,6 @@ npm test
 
 ## DSH 峰谷时段控制
 
-用户可在 Codex 里说“本会话开启峰谷”或“本会话关闭峰谷”。根池通过 `set_pool_schedule` 修改当前已验证的根会话，包括本根正在运行的 DSH。使用默认或命名服务时，Sol 在本会话保存选择，每次通过 `scheduleEnabled` 传递，并用 `set_dsh_task_schedule` 更新本会话的在途任务。新会话默认关闭。默认日历为工作日中国/新加坡时间 **09:00–12:00、14:00–18:00**。已因峰时停止的任务不会自动恢复。详见 [峰谷调度](docs/offpeak-schedule.md)。
+用户可以说“本会话用峰谷模式 2”来选择 DSH 调度。模式 1 无峰谷且是默认值。模式 2 谷时用 DSH，实际峰时的新任务由 Sol 领取一次性派发并调用已部署的 WorkBuddy DSF。模式 3 延续原峰谷规则和原有的可选 HY4 回退。“关闭峰谷”和“开启峰谷”分别选 1 和 3。
+
+根池用 `set_pool_schedule` 保存 `scheduleMode`。默认和命名服务由 Sol 保存会话选项，每次派单传 `scheduleMode`，用 `set_dsh_task_schedule` 更新本会话正在运行的 DSH。旧布尔参数仍可用。默认峰时为工作日中国/新加坡时间 **09:00–12:00、14:00–18:00**。峰时停止的 DSH 保持原终态，WorkBuddy 未部署时只阻塞模式 2 的峰时任务。详见 [峰谷调度](docs/offpeak-schedule.md)。

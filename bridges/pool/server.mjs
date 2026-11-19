@@ -5,11 +5,12 @@ import path from 'node:path';
 import { pathToFileURL } from 'node:url';
 import { loadPoolConfig, PoolService } from './service.mjs';
 import { resolveContext } from './context.mjs';
-import { loadSchedule } from '../dsh/schedule.mjs';
+import { loadSchedule, scheduleModeProperty, selectScheduleMode } from '../dsh/schedule.mjs';
 import { PreAdmissionRejection, RoutingConflictError } from '../dsh/routing.mjs';
 import { redact } from '../dsh/core.mjs';
+import { workBuddyDispatchTools, WORKBUDDY_FAILURE } from '../workbuddy/dispatch.mjs';
 
-const FAILURE = new Set(['failed', 'timed_out', 'cancelled', 'schedule_stopped', 'refused', 'unknown', 'unknown_after_disconnect', 'not_accepted']);
+const FAILURE = new Set([...WORKBUDDY_FAILURE, 'schedule_stopped', 'unknown', 'not_accepted']);
 const safeText = value => redact(value).replace(/[A-Za-z]:\\[^\s"']+/g, '<local-path>');
 function publicReceipt(value) {
   if (!value || typeof value !== 'object') return value ?? null;
@@ -43,6 +44,7 @@ const taskProperties = {
   capability: { type: 'string', enum: ['default', 'text-only', 'workspace-read', 'workspace-write'], default: 'default' },
   authorizationNote: { type: 'string', maxLength: 2000 },
   sessionId: { type: 'string' },
+  workBuddyContinuationKey: { type: 'string', description: 'Continue a recorded WorkBuddy DSF session in this root and workspace, only during a peak in mode 2.' },
   writeScopes: {
     type: 'array', maxItems: 32, items: {
       type: 'object', additionalProperties: false, required: ['path', 'operations'], properties: {
@@ -71,22 +73,23 @@ const tools = [
   },
   {
     name: 'set_pool_schedule',
-    description: 'Enable or disable the configured schedule for this verified root, including its running DSH workers.',
+    description: 'Set the schedule mode for this verified root, including its running DSH workers.',
     inputSchema: {
-      type: 'object', additionalProperties: false, required: ['context', 'enabled'],
-      properties: { context: contextProperty, enabled: { type: 'boolean' } }
+      type: 'object', additionalProperties: false, required: ['context'],
+      oneOf: [{ required: ['enabled'] }, { required: ['scheduleMode'] }],
+      properties: { context: contextProperty, enabled: { type: 'boolean' }, scheduleMode: scheduleModeProperty }
     },
     annotations: { readOnlyHint: false }
   },
   {
     name: 'start_pool_task',
-    description: 'Start a DSH-first task in this root. DSH is attempted first; HY4 is used only after a proven pre-admission schedule rejection when locally authorized and ready. Returns a durable task ID. No model API and no cross-root fallback.',
+    description: 'Start a scheduled task in this root. Returns a task ID, or a pending WorkBuddy DSF handoff at peak in mode 2. Original DSH/HY4 admission otherwise applies.',
     inputSchema: { type: 'object', additionalProperties: false, required: ['context', 'prompt', 'cwd', 'idempotencyKey'], properties: taskProperties },
     annotations: { readOnlyHint: false, openWorldHint: true }
   },
   {
     name: 'run_pool_task',
-    description: 'Start and wait internally for one bounded pooled task in this root. Same DSH-first/pre-admission-HY4 policy and schedule hard stop; no automatic resume.',
+    description: 'Start and wait internally for one bounded local task. A WorkBuddy DSF peak handoff returns immediately for the coordinator.',
     inputSchema: { type: 'object', additionalProperties: false, required: ['context', 'prompt', 'cwd', 'idempotencyKey'], properties: taskProperties },
     annotations: { readOnlyHint: false, openWorldHint: true }
   },
@@ -110,7 +113,14 @@ const tools = [
     description: 'Cancel only a backend child owned by this stdio server and only for this context root. Non-owner requests are read-only snapshots; no kill, finish or lease mutation.',
     inputSchema: { type: 'object', additionalProperties: false, required: ['context'], properties: locatorProperties },
     annotations: { readOnlyHint: false, destructiveHint: true }
-  }
+  },
+  ...workBuddyDispatchTools.map(tool => ({
+    ...tool,
+    inputSchema: {
+      ...tool.inputSchema, required: ['context', ...tool.inputSchema.required],
+      properties: { context: contextProperty, ...tool.inputSchema.properties }
+    }
+  }))
 ];
 
 function validateArgs(tool, args) {
@@ -145,7 +155,15 @@ export async function startPoolServer({
     if (args.context !== undefined) rootId = contextFor(args.context).rootId;
     if (name === 'get_pool_status') return service.status(rootId);
     if (!rootId) throw Error('A verified root context is required.');
-    if (name === 'set_pool_schedule') return service.setSchedule(rootId, args.enabled);
+    if (name === 'set_pool_schedule') {
+      if (args.scheduleMode === undefined && args.enabled === undefined) throw Error('scheduleMode or enabled is required.');
+      return service.setSchedule(rootId, selectScheduleMode(args.scheduleMode, args.enabled));
+    }
+    if (name === 'get_workbuddy_dsf_dispatch') return service.workBuddyFor(rootId).get(args.idempotencyKey);
+    if (name === 'claim_workbuddy_dsf_dispatch') {
+      return service.workBuddyFor(rootId).claim(args, () => service.scheduleStatus(rootId));
+    }
+    if (name === 'finish_workbuddy_dsf_dispatch') return service.workBuddyFor(rootId).finish(args);
     if (name === 'get_pool_task') return service.get(rootId, { idempotencyKey: args.idempotencyKey, taskId: args.taskId });
     if (name === 'wait_pool_task') return service.wait(rootId, { idempotencyKey: args.idempotencyKey, taskId: args.taskId }, args.waitMs ?? 25000);
     if (name === 'cancel_pool_task') return service.cancel(rootId, { idempotencyKey: args.idempotencyKey, taskId: args.taskId });

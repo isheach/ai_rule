@@ -2,6 +2,8 @@
 
 本仓库不重建用户的定制 WorkBuddy `server.mjs`：目前只有部分代码片段，不能安全重现其授权 profile、实验 runner 及监守扩展。安装器默认保留 `hy4-workbuddy` 与 `deepseek-v4-flash-workbuddy` 的现有配置。
 
+模式 2 的实际峰时通过 `dispatch.mjs` 管理 Sol 的一次性交接和回执。Sol 使用宿主已加载的 `deepseek-v4-flash-workbuddy` 原工具，按实际 schema 执行固定 `deepseek-v4-flash` 的任务。该模式按已部署桥接器的状态和 profile 验证权限。未部署或验证失败时，峰时交接记录阻塞。完整调用步骤和离线验证见 [峰谷调度](../../docs/offpeak-schedule.md)。
+
 第二台电脑如已有完整桥接器，可执行：
 
 ```powershell

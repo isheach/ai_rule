@@ -1,6 +1,6 @@
 # isheach/ai_rule — 多代理长期规则
 
-规则修订：2026-11-19.dsh-session-controls-r1；HY4 预准入回退候选：2026-11-13.hy4-preadmission-r1。桥接器/安装器版本 v0.3.0。
+规则修订为 2026-11-19.dsh-peak-modes-r1，HY4 预准入策略为 2026-11-13.hy4-preadmission-r1。桥接器和安装器版本 v0.3.0。
 本文件是用户确认的长期偏好，不是绕过宿主安全策略的授权。遵守当前会话明确要求及更高优先级指令。
 安装后在新会话加载；GitHub 上的文件本身不会远程注入其他电脑。
 
@@ -87,7 +87,7 @@ Astra 用宿主真实提供的内置 wait 等待 Sol 的原生 agent ID；Sol �
 - 传统实例各自串行，不同实例可同时运行独立任务。按各任务记录的实例、task_id、idempotencyKey 和 session_id 查询、等待、取消或在原 cwd 续跑。已受理任务保持原实例，busy/lock 不回退 HY4。
 - 断连后先只读核实原任务、锁 owner 与进程，不删锁、不重复提交。非所有者只得到 `unknown_after_disconnect`，不能取消别人的子进程。
 - 继续会话必须同实例、同 cwd，并使用该实例回执/索引中的 session_id；新任务由 DSH 生成新 UUID。不得伪造、复制或把旧 runtime 数据搬进命名实例。
-- 默认和命名入口的日历由 `--schedule-config` 指定，省略时使用内置日历。协调者在本会话保存峰谷选择，新会话默认关闭，派单通过 `scheduleEnabled` 传递。用户切换时，协调者只用 `set_dsh_task_schedule` 更新本会话仍在运行的任务。启用时保留峰谷门禁、预算余量、硬停和不自动恢复。
+- 默认和命名入口使用注册或内置日历。协调者按会话保存 `scheduleMode`，派单时传值，并用 `set_dsh_task_schedule` 更新本会话仍在运行的 DSH。旧 `scheduleEnabled` / `enabled` 的 false/true 对应模式 1/3。启用时保留 DSH 门禁、预算余量、硬停和不自动恢复。
 - DSH 正常任务默认使用 `workspace-write`，按用户的本次任务授权和宿主工作区边界执行。单任务可传 `permissionMode: "read-only"`，本机可注册 `--read-only`。各实例继续共享当前账户和宿主权限。
 - 新增/修改 MCP 注册需受支持的加载/重启流程；有活动任务时保留原进程，不承诺热加载无中断。
 - 实际链路仍为 Astra → 真实 Sol Max → 所选 DSH MCP 实例 → DSH。实例只是 MCP 端点，不是额外代理层。交接保留 `session_mode=DSH`、实例名、服务名、协调者 ID、活动 task_id 和授权范围。详见 `docs/multisession.md`。
@@ -96,7 +96,7 @@ Astra 用宿主真实提供的内置 wait 等待 Sol 的原生 agent ID；Sol �
 
 `bridges/pool/server.mjs` 是额外、opt-in stdio MCP；保留现有注册、命名 DSH、日程、runtime 和 v0.3 回执。Windows 临时标准 stdio 已由 Sol 用一个真实根、两个批准 cwd 的 DSH 任务和两个真实命名实例验证；独立合成根仍只用 mock stdio。**本机按 `docs/root-pool.md` 注册 `dsh-root-pool` 并受支持地 reload、工具可见后**，用户说“使用 DSH”或同义选择即选择根池，无需“根池”/root/instance 名；显式指定命名旧服务仍用旧服务，未安装根池的电脑继续原 DSH；已启动任务保持原后端。Sol 在自己的宿主 shell 先 `codex mcp get dsh-root-pool --json`，只取 `transport.command/args`，用已注册 server 旁的 `cli.mjs` 和同一 `--config` 运行 `context`，再把 opaque ref 交给该 MCP；不得手填 rootId/lease、不得假定 stdio 能读到 `CODEX_THREAD_ID`，也不得把 context 当身份认证。
 - 每个已验证根聊天保留原 `dsh/` 主实例、`hy4/` 与 `routing/` 数据，可以同时运行多个独立 DSH worker。每个 worker 独立且只运行一个子进程。全池运行上限默认 3，起动和未知状态计入上限。
-- `set_pool_schedule` 按本根聊天开关峰谷，并更新已有任务。新根默认关闭，选择持久化。开启后执行预算检查和硬停，已停止的任务保持原终态。
+- `set_pool_schedule` 用 `scheduleMode` 按本根保存峰谷选择，并更新已有 DSH。新根默认模式 1。开启后执行预算检查和硬停，已停止的任务保持原终态。
 - 普通 DSH 默认 `workspace-write`。显式单任务只读和池配置 `allow_write: false` 或 `--read-only` 仍然生效。HY4 的授权、能力和写入范围沿用独立规则。
 - DSH 先尝试；仅结构化 `not_accepted` 预准入拒绝、显式本机授权且 HY4 ready 时最多回退一次。已受理/unknown/超时/断连/权限/参数/busy/lock/停止/继续/修复均不回退。
 - 完整 handle 需要 rootId+ordinal+generation+lease，并加每次运行唯一 operation proof；不输出 lease。终止回放不重启模型；非所有者 get/wait/cancel 只读不 kill/finish。
@@ -114,4 +114,6 @@ AGENTS/Skill 是行为规则，不是 OS 沙箱或程序强制的路由状态机
 
 ## 可选 DSH 谷时执行和定时停工
 
-由用户选择当前会话是否应用峰谷。默认日历将工作日 UTC+8 09:00–12:00、14:00–18:00 设为峰时，开启后提前 10 分钟拒绝新任务，并检查任务预算加 60 秒余量。峰时停止的任务标记为 `schedule_stopped`，不会自动恢复。关闭会话日程会解除本会话运行任务的定时停工。详细配置见 `docs/offpeak-schedule.md`，预准入回退继续按 `docs/hy4-fallback.md` 执行。
+峰谷选项适用于当前 DSH 会话。模式 1 不应用日历，也是新会话默认值和“关闭峰谷”的含义。模式 2 谷时按原日历准入 DSH，实际峰时的新任务选择 WorkBuddy DSF。模式 3 延续原峰谷及其可选 HY4 回退，对应“开启峰谷”。默认峰时是工作日 UTC+8 09:00–12:00、14:00–18:00。模式 2 和 3 均保留 DSH 提前十分钟的准入门禁、60 秒预算余量和硬停。已因峰时停止的任务保持 `schedule_stopped`。
+
+模式 2 的峰时新任务须从正常 DSH 派单拿到 `workbuddy_pending`。真实 Sol 核实宿主已加载的 `deepseek-v4-flash-workbuddy` 状态、固定 `deepseek-v4-flash` 和实际权限 schema，然后领取一次性交接并调用同一服务的 `run_workbuddy_task`。结果写回交接，保留原键、所属根或实例、真实任务 ID 和终态。缺少服务或授权就记录阻塞。受理不明、已受理、续跑、修复、取消和已停止任务保留原后端与状态。明确的 WorkBuddy 续跑仅在模式 2 的实际峰段，使用同目录已完成记录和真实 WorkBuddy 会话。完整流程见 `docs/offpeak-schedule.md`。
