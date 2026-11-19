@@ -6,11 +6,46 @@ import path from 'node:path';
 import { fileURLToPath } from 'node:url';
 import { OFFPEAK_DEFAULT,validateSchedule,scheduleSnapshot,scheduleTaskPreamble,loadSchedule } from '../bridges/dsh/schedule.mjs';
 import { TaskManager } from '../bridges/dsh/core.mjs';
+import { RootPool } from '../bridges/pool/core.mjs';
 const cfg=validateSchedule(OFFPEAK_DEFAULT);
 const at=s=>scheduleSnapshot(cfg,new Date(s));
 const temp=()=>fs.mkdtempSync(path.join(os.tmpdir(),'ai-rule-schedule-'));
 const mock=path.resolve(path.dirname(fileURLToPath(import.meta.url)),'mock-dsh.mjs');
 const cli={command:process.execPath,prefix:[mock]};
+
+test('a persisted root toggle updates running workers and leaves another root on its own calendar', async () => {
+  const rootA = '00000000-0000-4000-8000-000000000001';
+  const rootB = '00000000-0000-4000-8000-000000000002';
+  const pool = new RootPool({ root: temp() });
+  const otherConnection = new RootPool({ root: pool.root });
+  let instant = '2026-11-09T00:30:00Z';
+  const worker = rootId => new TaskManager({
+    cli, runtime: temp(), check: () => ({}), schedule: cfg, scheduleTickMs: 15,
+    scheduleEnabledForRoot: () => pool.scheduleEnabled(rootId), clock: () => new Date(instant)
+  });
+  const [a, b] = [worker(rootA), worker(rootB)];
+  const cwd = temp();
+  assert.equal(pool.scheduleEnabled(rootA), false);
+  assert.equal(pool.scheduleEnabled(rootB), false);
+  pool.setSchedule(rootA, true);
+  pool.setSchedule(rootB, true);
+  try {
+    const stay = await a.start({ cwd, prompt: 'sleep:850', idempotencyKey: 'stay', timeoutMs: 5000 });
+    const stop = await b.start({ cwd, prompt: 'hang', idempotencyKey: 'stop', timeoutMs: 5000 });
+    otherConnection.setSchedule(rootA, false);
+    instant = '2026-11-09T01:00:01Z';
+    assert.equal((await b.wait(stop.task_id, 3000)).status, 'schedule_stopped');
+    assert.equal((await a.wait(stay.task_id, 3000)).status, 'completed');
+    assert.equal(otherConnection.scheduleEnabled(rootB), true);
+    const alreadyRunning = await a.start({ cwd, prompt: 'hang', idempotencyKey: 'already-running', timeoutMs: 5000 });
+    otherConnection.setSchedule(rootA, true);
+    assert.equal((await a.wait(alreadyRunning.task_id, 3000)).status, 'schedule_stopped');
+    pool.setSchedule(rootA, false);
+    assert.equal(a.get(alreadyRunning.task_id).status, 'schedule_stopped');
+  } finally {
+    await Promise.all([a.close(), b.close()]);
+  }
+});
 
 test('weekdays UTC+8 peak boundary and 10-minute gate',()=>{
   assert.equal(at('2026-11-09T00:49:59Z').phase,'offpeak');

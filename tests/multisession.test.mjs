@@ -239,11 +239,11 @@ test('adding a named instance preserves the existing default runtime, write flag
   assert.ok(config.includes('"--instance","alpha"'));
   assert.ok(config.includes('--schedule-config'));
   const alphaSection = config.split(/(?=^\[mcp_servers\.[^\].]+\]\s*$)/m).find(section => section.includes('[mcp_servers.dsh-opencode-go-alpha]')) || '';
-  assert.ok(!alphaSection.includes('--allow-write'), 'new named instance should stay read-only by default');
+  assert.ok(!alphaSection.includes('--read-only'), 'new named instance should use the workspace-write default');
   const defaultPlan = built.dshInstances.find(x => x.instance === 'default');
   assert.equal(defaultPlan.preserved, true);
   assert.equal(pathKey(defaultPlan.runtime), pathKey(customRuntime));
-  assert.throws(() => buildPlan({ home, codexHome: ch, enableDsh: true, dshEntry: mock, dshInstances: ['bravo'], offpeakSchedule: true }), /must not silently rewrite/);
+  assert.throws(() => buildPlan({ home, codexHome: ch, enableDsh: true, dshEntry: mock, dshInstances: ['bravo'], offpeakSchedule: true }), /preserves the existing default calendar/);
 });
 
 test('a named stdio MCP process exposes its instance identity and scoped status', async () => {

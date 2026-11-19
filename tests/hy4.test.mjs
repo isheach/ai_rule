@@ -38,7 +38,7 @@ const auth = Object.freeze({ schema: 1, enabled: true, authorization_ref: 'test-
 
 test('manifest is local and rejects env/credential-shaped overrides', () => {
   const f = fixture();
-  assert.equal(loadManifest(f.file).workspace_root, fs.realpathSync(f.workspace));
+  assert.equal(loadManifest(f.file).workspace_root, fs.realpathSync.native(f.workspace));
   const bad = temp(), file = path.join(bad, 'm.json');
   fs.writeFileSync(file, JSON.stringify({ ...f.value, env: { CODEBUDDY_AUTH_TOKEN: 'x' } }));
   assert.throws(() => loadManifest(file), /Unknown HY4 manifest field: env/);

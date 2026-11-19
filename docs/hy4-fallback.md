@@ -38,7 +38,7 @@ DSH 核心已调整为：幂等回执读取 → 同实例 busy → `active.lock`
 - 运行中、正在取消、`unknown_after_disconnect`、结果/回执未知、网络超时、可能已产生副作用。
 - 权限/策略/审批拒绝（`DSH_PERMISSION_REFUSED`）、参数非法（`DSH_INVALID_PARAMS`）、会话冲突（`DSH_SESSION_CONFLICT`）。
 - **任何带 `sessionId` 的请求，或显式 `continuationOfTaskId`/`repairOfTaskId` 的继续/修复请求**：始终锁定 DSH，即使日程门禁拒绝也不得转 HY4。
-- 同实例 busy（`DSH_BUSY`）或跨进程锁（`DSH_LOCKED`）：作为独立类别，**本阶段不自动回退**。没有“证明不是同一工作重复提交”的安全证据，因此不实现猜测式回退。
+- 同实例忙碌（`DSH_BUSY`）和跨进程锁（`DSH_LOCKED`）均不得回退。等待原任务或查明锁的所有权，并保留原任务实例。
 - 预检失败（`DSH_PREFLIGHT_FAILED`）或任何非结构化错误：可能发生在 spawn 之后，标记 `unknown`，禁止回退/重试。
 - 停止、取消、部分结果、`schedule_stopped`。
 - 显式 HY4 选择而 HY4 不可用：报阻塞，不回退 DSH。

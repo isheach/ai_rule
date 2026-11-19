@@ -58,7 +58,7 @@ read-only / workspace-write 是传给 DSH 的权限预设，--approval-policy ne
 本仓库没有实现自己的 OS 沙箱，cwd 不等于文件访问隔离。读权限、网络、凭据访问及 Windows sandbox 边界受 DSH/宿主配置影响；未通过本机负向权限测试前，不要开放敏感目录。
 - AllowWrite 由人本机启用；authorizationNote 记录批准出处，但它不是密码学意义的授权令牌。真正的用户批准和宿主 MCP 审批仍不可跳过。
 - 命名实例只隔离任务队列、锁、回执、幂等域和会话所有权；它们共享同一 Windows 用户、DSH 凭据、模型额度和 DSH 会话存储，不是账户隔离、额度隔离或 OS 沙箱。
-- “仅新增命名实例”不会重写已有默认服务；默认已有的 `--runtime`、`--allow-write` 和自定义 `--schedule-config` 原样保留，新命名实例默认只读并继承该日程路径。要改默认策略须用不带 `--dsh-instance` 的独立安装命令；添加实例时夹带日程开关会被拒绝。`--verify` 明确只验证 managed 块，未管理服务列在 `unmanaged_dsh_services` 但不改写、不验证。
+- 新增命名实例保留现有默认服务的 runtime、显式权限和日历。新 DSH 实例默认工作区可写，可注册 `--read-only`。日历由服务提供，各会话自行选择是否应用。`--verify` 检查托管块，手工服务列在 `unmanaged_dsh_services`。
 - 本桥接器不直接打开凭据文件、不修改持久凭据、不改全局审批。DSH 自身按用户已有设置读取凭据。
 - 桥接器不记录 prompt 明文、tool 参数/完整结果或 thinking；保留有限最终答案与诊断，并做尽力脱敏。脱敏不是保证，DSH 自身会话文件仍由 DSH 管理。
 - 输出最多 2 MiB，最终答案最多 60000 字符；超限取消，不会无限缓存。回执可能含项目细节，不提交 Git。

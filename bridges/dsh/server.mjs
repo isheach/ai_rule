@@ -3,6 +3,7 @@
 import { TaskManager, discoverDsh, redact, VERSION, normalizeInstanceName, serverNameForInstance } from './core.mjs';
 import { PreAdmissionRejection } from './routing.mjs';
 import { loadSchedule } from './schedule.mjs';
+import { fileURLToPath } from 'node:url';
 
 const argv = process.argv.slice(2);
 function option(name) { const i = argv.indexOf(name); if (i < 0) return undefined; if (!argv[i + 1] || argv[i + 1].startsWith('--')) throw Error(`Missing value for ${name}`); return argv[i + 1]; }
@@ -10,8 +11,11 @@ let instance;
 let manager;
 try {
   instance = normalizeInstanceName(option('--instance'));
-  manager = new TaskManager({ cli: discoverDsh(option('--dsh-entry')), runtime: option('--runtime'), instance,
-    allowWrite: argv.includes('--allow-write'), schedule: loadSchedule(option('--schedule-config')) });
+  const calendar = option('--schedule-config') ?? fileURLToPath(new URL('../../config/offpeak.schedule.json', import.meta.url));
+  manager = new TaskManager({
+    cli: discoverDsh(option('--dsh-entry')), runtime: option('--runtime'), instance,
+    allowWrite: !argv.includes('--read-only'), schedule: loadSchedule(calendar), scheduleDefaultEnabled: false
+  });
 } catch (error) {
   console.error(`DSH bridge startup failed: ${redact(error.message)}`);
   process.exit(1);
@@ -23,14 +27,21 @@ const taskSchema = {
     prompt: { type: 'string', minLength: 1, maxLength: 60000 }, cwd: { type: 'string' },
     idempotencyKey: { type: 'string', description: `Stable unique key for this task revision in ${scoped} Reuse only for retrying the SAME submission.` },
     timeoutMs: { type: 'integer', minimum: 1000, maximum: 3600000, default: 900000 },
-    permissionMode: { type: 'string', enum: ['read-only', 'workspace-write'], default: 'read-only' },
-    authorizationNote: { type: 'string', description: 'Reference to the user approval; cannot substitute for actual approval.' },
+    permissionMode: { type: 'string', enum: ['read-only', 'workspace-write'], description: 'Defaults to workspace-write unless this bridge is configured read-only.' },
+    authorizationNote: { type: 'string', description: 'Optional audit reference to the user’s task authorization.' },
+    scheduleEnabled: { type: 'boolean', default: false, description: 'Apply the configured schedule to this task only.' },
     sessionId: { type: 'string', description: `Resume a DSH session recorded by ${scoped} from the SAME cwd; never use an invented or foreign ID.` }
   }
 };
 const idSchema = { type: 'object', additionalProperties: false, required: ['taskId'], properties: { taskId: { type: 'string', description: `Task ID scoped to ${scoped}` } } };
 const tools = [
   { name: 'get_dsh_schedule_status', description: `Local schedule phase, admission gate, next hard stop and offpeak time for ${scoped} No model call.`, inputSchema: { type: 'object', additionalProperties: false, properties: {} }, annotations: { readOnlyHint: true } },
+  {
+    name: 'set_dsh_task_schedule',
+    description: `Change the schedule for the active child owned by this ${scoped} process. Other tasks retain their own setting.`,
+    inputSchema: { ...idSchema, required: ['taskId', 'enabled'], properties: { ...idSchema.properties, enabled: { type: 'boolean' } } },
+    annotations: { readOnlyHint: false }
+  },
   { name: 'get_dsh_bridge_status', description: `Local readiness, instance identity and active task for ${scoped} Does not call a model or reveal credentials.`, inputSchema: { type: 'object', additionalProperties: false, properties: {} }, annotations: { readOnlyHint: true } },
   { name: 'start_dsh_task', description: `Start the native DSH headless agent through the configured OpenCode Go route in ${scoped} Returns task ID. Sol Max delegates execution; DSH owns tool work and self-monitoring. Does not start OpenCode CLI.`, inputSchema: taskSchema, annotations: { readOnlyHint: false, openWorldHint: true } },
   { name: 'run_dsh_task', description: `Run one bounded DSH task in ${scoped} and wait internally until its final receipt. Prefer for no-intervention tasks when host MCP timeout safely covers the budget; otherwise use start+wait. Peak schedule may block or stop work. No model fallback.`, inputSchema: taskSchema, annotations: { readOnlyHint: false, openWorldHint: true } },
@@ -50,12 +61,13 @@ async function call(name, args, requestId) {
   for (const key of schema.required || []) if (!(key in args)) throw Error(`Missing argument: ${key}`);
   if (name === 'get_dsh_bridge_status') return manager.status();
   if (name === 'get_dsh_schedule_status') return manager.scheduleStatus();
+  if (name === 'set_dsh_task_schedule') return manager.setTaskSchedule(args.taskId, args.enabled);
   if (name === 'get_dsh_task') return manager.get(args.taskId);
   if (name === 'wait_dsh_task') return manager.wait(args.taskId, args.waitMs ?? 25000);
   if (name === 'cancel_dsh_task') return manager.cancel(args.taskId);
   const record = await manager.start(args);
   if (name === 'start_dsh_task') return record;
-  inFlight.set(requestId, record.task_id);
+  if (!record.replayed) inFlight.set(requestId, record.task_id);
   try {
     while (manager.pending.has(record.task_id)) await manager.wait(record.task_id, 60000);
     return manager.get(record.task_id);

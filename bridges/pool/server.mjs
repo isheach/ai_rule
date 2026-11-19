@@ -1,7 +1,6 @@
 #!/usr/bin/env node
 // Opt-in stdio MCP endpoint for the root-chat DSH pool. No HTTP listener, no
-// model API, no per-request process. One TaskManager/Hy4AcpManager/coordinator
-// per verified root stays in this connection for its whole lifetime.
+// model API or global schedule switch. Each verified root owns its workers.
 import path from 'node:path';
 import { pathToFileURL } from 'node:url';
 import { loadPoolConfig, PoolService } from './service.mjs';
@@ -40,7 +39,7 @@ const taskProperties = {
   cwd: { type: 'string' },
   idempotencyKey: { type: 'string' },
   timeoutMs: { type: 'integer', minimum: 1000, maximum: 3600000, default: 900000 },
-  permissionMode: { type: 'string', enum: ['read-only', 'workspace-write'], default: 'read-only' },
+  permissionMode: { type: 'string', enum: ['read-only', 'workspace-write'], description: 'Ordinary DSH work defaults to workspace-write when locally permitted. Set read-only to restrict a task.' },
   capability: { type: 'string', enum: ['default', 'text-only', 'workspace-read', 'workspace-write'], default: 'default' },
   authorizationNote: { type: 'string', maxLength: 2000 },
   sessionId: { type: 'string' },
@@ -69,6 +68,15 @@ const tools = [
     description: 'Local pooled-DSH status for this root. Read-only: never creates a binding, spawns a model or refreshes idle TTL. Omit context for server-level counts.',
     inputSchema: { type: 'object', additionalProperties: false, properties: { context: contextProperty } },
     annotations: { readOnlyHint: true }
+  },
+  {
+    name: 'set_pool_schedule',
+    description: 'Enable or disable the configured schedule for this verified root, including its running DSH workers.',
+    inputSchema: {
+      type: 'object', additionalProperties: false, required: ['context', 'enabled'],
+      properties: { context: contextProperty, enabled: { type: 'boolean' } }
+    },
+    annotations: { readOnlyHint: false }
   },
   {
     name: 'start_pool_task',
@@ -114,7 +122,7 @@ function validateArgs(tool, args) {
 }
 
 export async function startPoolServer({
-  configPath, allowWrite = false, clock = () => new Date(), schedule, stdin = process.stdin, stdout = process.stdout,
+  configPath, allowWrite = true, clock = () => new Date(), schedule, stdin = process.stdin, stdout = process.stdout,
   sessionsRoot, env = process.env
 } = {}) {
   if (typeof configPath !== 'string' || !path.isAbsolute(configPath)) throw Error('--config must be an absolute path');
@@ -137,6 +145,7 @@ export async function startPoolServer({
     if (args.context !== undefined) rootId = contextFor(args.context).rootId;
     if (name === 'get_pool_status') return service.status(rootId);
     if (!rootId) throw Error('A verified root context is required.');
+    if (name === 'set_pool_schedule') return service.setSchedule(rootId, args.enabled);
     if (name === 'get_pool_task') return service.get(rootId, { idempotencyKey: args.idempotencyKey, taskId: args.taskId });
     if (name === 'wait_pool_task') return service.wait(rootId, { idempotencyKey: args.idempotencyKey, taskId: args.taskId }, args.waitMs ?? 25000);
     if (name === 'cancel_pool_task') return service.cancel(rootId, { idempotencyKey: args.idempotencyKey, taskId: args.taskId });
@@ -246,7 +255,7 @@ if (invoked) {
   const argv = process.argv.slice(2);
   const index = argv.indexOf('--config');
   const configPath = index >= 0 ? argv[index + 1] : undefined;
-  startPoolServer({ configPath, allowWrite: argv.includes('--allow-write') }).catch(error => {
+  startPoolServer({ configPath, allowWrite: !argv.includes('--read-only') }).catch(error => {
     console.error(`pool MCP startup failed: ${redact(error.message)}`);
     process.exit(1);
   });

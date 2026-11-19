@@ -25,7 +25,7 @@ try {
     runtime: option('--dsh-runtime', true),
     schedule: loadSchedule(schedulePath)
   });
-  if (path.resolve(dsh.runtime) === path.resolve(manager.runtime)) throw Error('HY4 and DSH runtimes must remain physically separate.');
+  if (path.relative(dsh.runtime, manager.runtime) === '') throw Error('HY4 and DSH runtimes must remain physically separate.');
   const authRef = option('--fallback-authorization');
   const authorization = authRef ? {
     schema: 1, enabled: true, authorization_ref: authRef, scope: 'pre_admission_only', max_attempts: 1

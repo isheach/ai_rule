@@ -9,7 +9,7 @@ const iso = opt('clock');
 const clock = iso ? () => new Date(iso) : undefined;
 startPoolServer({
   configPath: opt('config'),
-  allowWrite: argv.includes('--allow-write'),
+  allowWrite: !argv.includes('--read-only'),
   clock,
   sessionsRoot: opt('sessions-root')
 }).catch(error => {
