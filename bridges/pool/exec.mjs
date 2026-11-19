@@ -5,7 +5,7 @@
 import fs from 'node:fs';
 import path from 'node:path';
 import { loadPoolConfig, PoolService } from './service.mjs';
-import { loadSchedule } from '../dsh/schedule.mjs';
+import { loadSchedule, selectScheduleMode } from '../dsh/schedule.mjs';
 import { resolveRootChain } from './host.mjs';
 import { discoverDsh, redact } from '../dsh/core.mjs';
 
@@ -44,11 +44,13 @@ try {
       ...(input.writes ? { writes: input.writes } : {}),
       ...(input.writeScopes ? { writeScopes: input.writeScopes } : {}),
       ...(input.commands ? { commands: input.commands } : {}),
-      ...(input.sessionId ? { sessionId: input.sessionId } : {})
+      ...(input.sessionId ? { sessionId: input.sessionId } : {}),
+      ...(input.workBuddyContinuationKey !== undefined ? { workBuddyContinuationKey: input.workBuddyContinuationKey } : {})
     };
     result = await service.run(resolved.rootChatId, task);
   } else if (input.action === 'set-schedule') {
-    result = service.setSchedule(resolved.rootChatId, input.enabled);
+    if (input.scheduleMode === undefined && input.enabled === undefined) fail('scheduleMode or enabled is required');
+    result = service.setSchedule(resolved.rootChatId, selectScheduleMode(input.scheduleMode, input.enabled));
   } else if (input.action === 'get') {
     result = service.get(resolved.rootChatId, locator);
   } else if (input.action === 'wait') {
@@ -59,7 +61,9 @@ try {
   const receipt = result.receipt ?? null;
   process.stdout.write(JSON.stringify({
     task_id: result.task_id, status: result.status, backend: result.backend,
-    receipt_path: receipt?.receipt_path ?? null, answer: receipt?.answer ?? null
+    receipt_path: receipt?.receipt_path ?? null, answer: receipt?.answer ?? result.workbuddy_dispatch?.answer ?? null,
+    ...(result.workbuddy_dispatch ? { admission_state: result.admission_state, workbuddy_dispatch: result.workbuddy_dispatch } : {}),
+    ...(input.action === 'set-schedule' ? { schedule: result.schedule } : {})
   }) + '\n');
   await service.close();
   process.exit(input.action === 'run' && result.status !== 'completed' ? 2 : 0);

@@ -4,8 +4,9 @@ import crypto from 'node:crypto';
 import { RootPool, poolInstanceName, poolRootKey } from './core.mjs';
 import { resolveContext } from './context.mjs';
 import { TaskManager, discoverDsh, redact, runtimeBase } from '../dsh/core.mjs';
-import { loadSchedule, scheduleSnapshot } from '../dsh/schedule.mjs';
+import { loadSchedule, ScheduleMode, schedulePolicySnapshot } from '../dsh/schedule.mjs';
 import { RoutingCoordinator, RoutingConflictError, UnavailableWorkBuddyHy4, AdmissionCode, PreAdmissionRejection } from '../dsh/routing.mjs';
+import { validateWorkBuddyContinuation, WorkBuddyDispatch } from '../workbuddy/dispatch.mjs';
 import { Hy4AcpManager } from '../hy4/acp.mjs';
 import { loadManifest } from '../hy4/manifest.mjs';
 import { normalizeTaskAuthorization, safeWriteMetadata } from '../hy4/policy.mjs';
@@ -125,6 +126,9 @@ export class PoolService {
   runtimeFor(rootId) {
     return this.pool.rootPath(rootId);
   }
+  workBuddyFor(rootId) {
+    return new WorkBuddyDispatch({ runtime: this.runtimeFor(rootId), clock: this.clock, redact });
+  }
   _workerRuntime(rootId, worker) {
     const expected = path.join(this.pool.workerPath(rootId, worker), 'dsh');
     const actual = real(expected);
@@ -181,7 +185,7 @@ export class PoolService {
     const manager = new TaskManager({
       cli: this.cli, runtime: this._workerRuntime(rootId, worker), instance: poolInstanceName(rootId, worker),
       allowWrite: this.allowWrite, schedule: this.schedule, clock: this.clock,
-      scheduleEnabledForRoot: () => this.pool.scheduleEnabled(rootId)
+      scheduleModeForRoot: () => this.pool.scheduleMode(rootId)
     });
     const coordinator = new RoutingCoordinator({
       runtime, dsh: { submit: task => manager.start(task) }, hy4: root.hy4 ?? new UnavailableWorkBuddyHy4(),
@@ -194,7 +198,7 @@ export class PoolService {
 
   _prepare(args, rootId) {
     if (!args || typeof args !== 'object' || Array.isArray(args)) throw new PreAdmissionRejection(AdmissionCode.INVALID_PARAMS, 'Task arguments must be an object.');
-    const allowed = new Set(['prompt', 'cwd', 'idempotencyKey', 'timeoutMs', 'permissionMode', 'capability', 'authorizationNote', 'sessionId', 'writes', 'writeScopes', 'commands']);
+    const allowed = new Set(['prompt', 'cwd', 'idempotencyKey', 'timeoutMs', 'permissionMode', 'capability', 'authorizationNote', 'sessionId', 'workBuddyContinuationKey', 'writes', 'writeScopes', 'commands']);
     for (const key of Object.keys(args)) if (!allowed.has(key)) throw new PreAdmissionRejection(AdmissionCode.INVALID_PARAMS, `Unknown task field: ${key}`);
     if (typeof args.prompt !== 'string' || !args.prompt.trim() || Buffer.byteLength(args.prompt) > 60000) {
       throw new PreAdmissionRejection(AdmissionCode.INVALID_PARAMS, 'prompt must contain 1..60000 UTF-8 bytes.');
@@ -244,6 +248,7 @@ export class PoolService {
     if (args.sessionId !== undefined && (typeof args.sessionId !== 'string' || !/^[A-Za-z0-9_.:-]{1,160}$/.test(args.sessionId))) {
       throw new PreAdmissionRejection(AdmissionCode.INVALID_PARAMS, 'Invalid sessionId.');
     }
+    validateWorkBuddyContinuation(args);
     const task = {
       prompt: args.prompt, cwd, idempotencyKey: args.idempotencyKey,
       timeoutMs, permissionMode,
@@ -253,6 +258,7 @@ export class PoolService {
     };
     if (args.authorizationNote !== undefined) task.authorizationNote = args.authorizationNote;
     if (args.sessionId !== undefined) task.sessionId = args.sessionId;
+    if (args.workBuddyContinuationKey !== undefined) task.workBuddyContinuationKey = args.workBuddyContinuationKey;
     if (capability !== 'default') task.capability = capability;
     const options = {
       sessionMode: 'DSH', taskCapability: capability,
@@ -265,7 +271,8 @@ export class PoolService {
       timeoutMs: task.timeoutMs, permissionMode, sessionId: task.sessionId ?? null,
       capability, task_capability: capability, authorization_note: task.authorizationNote ?? null,
       write_scopes: task.writeScopes, writes: task.writes, commands: task.commands,
-      metadata, root: rootId, session_mode: 'DSH', requested_backend: 'dsh'
+      metadata, root: rootId, session_mode: 'DSH', requested_backend: 'dsh',
+      ...(task.workBuddyContinuationKey === undefined ? {} : { workbuddy_continuation_key: task.workBuddyContinuationKey })
     };
     const requestHash = sha256(JSON.stringify(requestIdentity));
     const legacyHash = args.permissionMode === undefined && permissionMode === 'workspace-write'
@@ -419,6 +426,9 @@ export class PoolService {
 
   async _submitPrepared(rootId, prepared) {
     const { task, options, requestHash, key } = prepared;
+    const workBuddy = this.workBuddyFor(rootId);
+    const workBuddyReplay = workBuddy.replay(key, requestHash);
+    if (workBuddyReplay) return workBuddyReplay;
     const prior = this._readDecision(rootId, key);
     if (prior) return this._replay(rootId, prepared, prior);
     if (this.closing) throw Error('pool server is shutting down; no new tasks are admitted');
@@ -463,9 +473,19 @@ export class PoolService {
       decision = await entry.coordinator.submit(task, options);
     } catch (error) {
       if (error?.admission_state === 'not_accepted') {
-        try { this.pool.reject(handle, { operationId, idempotencyKey: key }); }
+        let released = false;
+        try {
+          this.pool.reject(handle, { operationId, idempotencyKey: key });
+          released = true;
+        }
         catch { try { this.pool.markUnknown(handle, { operationId }); } catch {} }
-        settleStarting('released');
+        settleStarting(released ? 'released' : 'unknown');
+        // The structured peak decision comes from the owned DSH worker after
+        // validating input, session, exclusive lock and schedule, before spawn.
+        const rejection = error.cause;
+        if (released && rejection instanceof PreAdmissionRejection && rejection.code === AdmissionCode.WORKBUDDY_DSF_PEAK) {
+          return workBuddy.offer(task, requestHash, rejection.details.schedule);
+        }
       } else {
         try { this.pool.markUnknown(handle, { operationId }); } catch {}
         settleStarting('unknown');
@@ -572,6 +592,7 @@ export class PoolService {
 
   async run(rootId, args, onAccepted = null) {
     const started = await this.submit(rootId, args);
+    if (started.workbuddy_dispatch) return started;
     if (typeof onAccepted === 'function' && started.task_id) onAccepted(started);
     if (started.replayed) return started;
     if (started.receipt && TERMINAL.has(started.receipt.status)) {
@@ -595,7 +616,14 @@ export class PoolService {
     return { ...this._pack(rootId, { ...started.routing, selected_backend: started.backend, task_id: taskId, admission_state: 'accepted' }, receipt), task_id: taskId, backend: started.backend };
   }
 
+  _workBuddyForQuery(rootId, query) {
+    return query.idempotencyKey !== undefined && query.taskId === undefined
+      ? this.workBuddyFor(rootId).lookup(query.idempotencyKey) : null;
+  }
+
   get(rootId, query) {
+    const workBuddy = this._workBuddyForQuery(rootId, query);
+    if (workBuddy) return workBuddy;
     const { decision } = this._resolveDecision(rootId, query);
     if (decision.admission_state !== 'accepted') return this._pack(rootId, decision, null);
     return this._pack(rootId, decision, this._readReceipt(rootId, decision));
@@ -603,6 +631,8 @@ export class PoolService {
 
   async wait(rootId, query, waitMs = 25000) {
     if (!Number.isInteger(waitMs) || waitMs < 0 || waitMs > 60000) throw Error('waitMs must be an integer 0..60000.');
+    const workBuddy = this._workBuddyForQuery(rootId, query);
+    if (workBuddy) return workBuddy;
     const { owner, decision } = this._resolveDecision(rootId, query);
     if (decision.admission_state !== 'accepted') return this._pack(rootId, decision, null);
     if (!owner) return this._pack(rootId, decision, this._readReceipt(rootId, decision));
@@ -617,6 +647,10 @@ export class PoolService {
   }
 
   async cancel(rootId, query) {
+    const workBuddy = this._workBuddyForQuery(rootId, query);
+    if (workBuddy) {
+      return { ...workBuddy, cancelled: false, owner: false, warning: 'The WorkBuddy MCP owns its external task. For an unclaimed handoff use finish_workbuddy_dsf_dispatch with status cancelled.' };
+    }
     const { owner: owned, decision } = this._resolveDecision(rootId, query);
     if (decision.admission_state !== 'accepted') throw Error('Routing decision has no accepted task to cancel.');
     if (!owned) {
@@ -646,11 +680,16 @@ export class PoolService {
     return { ...this._pack(rootId, decision, receipt), cancelled: true, owner: true };
   }
 
-  setSchedule(rootId, enabled) {
-    this.pool.setSchedule(rootId, enabled);
+  setSchedule(rootId, mode) {
+    this.pool.setSchedule(rootId, mode);
     const root = this.roots.get(rootId);
     if (root) for (const { manager } of root.workers.values()) manager.refreshSchedule();
     return this.status(rootId);
+  }
+
+  scheduleStatus(rootId) {
+    const mode = rootId ? this.pool.scheduleMode(rootId) : ScheduleMode.UNRESTRICTED;
+    return schedulePolicySnapshot(this.schedule, mode, nowIso(this.clock));
   }
 
   status(rootId) {
@@ -658,14 +697,14 @@ export class PoolService {
     const workers = rootId ? list.bindings.filter(binding => binding.root_id === rootId).map(safeBinding) : [];
     workers.sort((a, b) => a.worker - b.worker);
     const binding = workers.length ? { ...workers[0], workers } : null;
-    const enabled = Boolean(rootId && this.pool.scheduleEnabled(rootId));
-    const schedule = scheduleSnapshot(enabled ? this.schedule : null, nowIso(this.clock));
+    const schedule = this.scheduleStatus(rootId);
     return {
       server: 'pooled-dsh', transport: 'stdio', backend_default: 'dsh', pool_scope: 'root-chat',
       binding_cap: list.binding_cap, running_cap: list.concurrency, running: list.running,
       bindings: new Set(list.bindings.map(item => item.root_id)).size, worker_bindings: list.bindings.length, root: binding,
       schedule: {
-        configured: Boolean(this.schedule), enabled: schedule.enabled, phase: schedule.phase, accept_new_tasks: schedule.accept_new_tasks,
+        configured: Boolean(this.schedule), enabled: schedule.enabled, mode: schedule.mode, phase: schedule.phase,
+        new_task_backend: schedule.new_task_backend, accept_new_tasks: schedule.accept_new_tasks,
         next_offpeak_at: schedule.next_offpeak_at, hard_stop_at: schedule.hard_stop_at,
         reject_if_budget_exceeds_window: schedule.reject_if_budget_exceeds_window, resume_automatically: false
       },

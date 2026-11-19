@@ -5,6 +5,34 @@ import fs from 'node:fs';
 const OFFSET=8*60*60*1000;
 const MINUTE=60000;
 const WEEKDAY=new Set([1,2,3,4,5]);
+export const ScheduleMode = Object.freeze({ UNRESTRICTED: 1, WORKBUDDY_AT_PEAK: 2, OFFPEAK_ONLY: 3 });
+
+export function normalizeScheduleMode(value) {
+  if (value === false) return ScheduleMode.UNRESTRICTED;
+  if (value === true) return ScheduleMode.OFFPEAK_ONLY;
+  if (Object.values(ScheduleMode).includes(value)) return value;
+  throw Error('scheduleMode must be 1, 2 or 3.');
+}
+
+export function selectScheduleMode(mode, enabled, fallback = ScheduleMode.UNRESTRICTED) {
+  if (enabled !== undefined && typeof enabled !== 'boolean') throw Error('enabled must be a boolean.');
+  if (mode !== undefined && typeof mode !== 'number') throw Error('scheduleMode must be 1, 2 or 3.');
+  if (mode !== undefined && enabled !== undefined) throw Error('Supply either a schedule mode or the legacy Boolean.');
+  return normalizeScheduleMode(mode ?? enabled ?? fallback);
+}
+
+export const scheduleModeProperty = {
+  type: 'integer', enum: [1, 2, 3],
+  description: '1: unrestricted DSH; 2: scheduled DSH with WorkBuddy DSF only at peak; 3: original scheduled DSH.'
+};
+
+export function schedulePolicySnapshot(calendar, mode, date) {
+  const snapshot = scheduleSnapshot(mode === ScheduleMode.UNRESTRICTED ? null : calendar, date);
+  let backend = snapshot.accept_new_tasks ? 'dsh' : null;
+  if (mode === ScheduleMode.WORKBUDDY_AT_PEAK && snapshot.phase === 'peak') backend = 'workbuddy-dsf';
+  return { ...snapshot, mode, new_task_backend: backend };
+}
+
 export const OFFPEAK_DEFAULT=Object.freeze({
   enabled:true,timezone:'Asia/Shanghai',
   weekdayPeakWindows:['09:00-12:00','14:00-18:00'],

@@ -1,6 +1,7 @@
 import fs from 'node:fs';
 import path from 'node:path';
 import crypto from 'node:crypto';
+import { normalizeScheduleMode, ScheduleMode } from '../dsh/schedule.mjs';
 
 // Schema 3 keeps the primary worker at its original key and runtime and adds
 // sibling workers and schedule choices. Older schemas remain readable.
@@ -112,7 +113,8 @@ export class RootPool {
     data.generations ||= {};
     data.schedule_choices ??= {};
     if (typeof data.schedule_choices !== 'object' || Array.isArray(data.schedule_choices)
-      || Object.entries(data.schedule_choices).some(([rootId, enabled]) => !UUID.test(rootId) || typeof enabled !== 'boolean')) {
+      || Object.entries(data.schedule_choices).some(([rootId, choice]) => !UUID.test(rootId)
+        || (typeof choice !== 'boolean' && ![1, 2, 3].includes(choice)))) {
       throw Error('pool state contains an invalid schedule choice');
     }
     return data;
@@ -271,16 +273,19 @@ export class RootPool {
     if (!UUID.test(rootId || '')) throw Error('root chat ID must be a UUID');
     return this._withLock(() => this._view(this._read().roots[rootId] || null));
   }
-  scheduleEnabled(rootId) {
+  scheduleMode(rootId) {
     poolRootKey(rootId);
-    return this._read().schedule_choices[rootId] === true;
+    return normalizeScheduleMode(this._read().schedule_choices[rootId] ?? ScheduleMode.UNRESTRICTED);
   }
-  setSchedule(rootId, enabled) {
+  scheduleEnabled(rootId) {
+    return this.scheduleMode(rootId) !== ScheduleMode.UNRESTRICTED;
+  }
+  setSchedule(rootId, choice) {
     poolRootKey(rootId);
-    if (typeof enabled !== 'boolean') throw Error('enabled must be a boolean');
+    const mode = normalizeScheduleMode(choice);
     this._withLock(() => {
       const data = this._read();
-      data.schedule_choices[rootId] = enabled;
+      data.schedule_choices[rootId] = mode === ScheduleMode.WORKBUDDY_AT_PEAK ? mode : mode === ScheduleMode.OFFPEAK_ONLY;
       this._write(data);
     });
   }

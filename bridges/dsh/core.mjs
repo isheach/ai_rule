@@ -3,8 +3,9 @@ import path from 'node:path';
 import os from 'node:os';
 import crypto from 'node:crypto';
 import { spawn, spawnSync } from 'node:child_process';
-import { scheduleSnapshot, scheduleTaskPreamble } from './schedule.mjs';
+import { normalizeScheduleMode, ScheduleMode, schedulePolicySnapshot, scheduleTaskPreamble, selectScheduleMode } from './schedule.mjs';
 import { AdmissionCode, PreAdmissionRejection } from './routing.mjs';
+import { validateWorkBuddyContinuation, WorkBuddyDispatch, WORKBUDDY_DSF } from '../workbuddy/dispatch.mjs';
 
 export const ROUTE = Object.freeze({ provider: 'opencode-go', model: 'deepseek-v4.1-flash', reasoningEffort: 'max' });
 export const VERSION = '0.3.0';
@@ -130,7 +131,7 @@ export function preflight(cli) {
 }
 export function validateTask(input, allowWrite = true) {
   if (!input || typeof input !== 'object' || Array.isArray(input)) throw Error('Task must be an object.');
-  const allowed = new Set(['prompt', 'cwd', 'idempotencyKey', 'timeoutMs', 'permissionMode', 'authorizationNote', 'sessionId', 'scheduleEnabled']);
+  const allowed = new Set(['prompt', 'cwd', 'idempotencyKey', 'timeoutMs', 'permissionMode', 'authorizationNote', 'sessionId', 'scheduleEnabled', 'scheduleMode', 'workBuddyContinuationKey']);
   for (const key of Object.keys(input)) if (!allowed.has(key)) throw Error(`Unknown task field: ${key}`);
   if (typeof input.prompt !== 'string' || !input.prompt.trim() || Buffer.byteLength(input.prompt) > 60000) throw Error('prompt must contain 1..60000 UTF-8 bytes.');
   if (typeof input.cwd !== 'string' || !path.isAbsolute(input.cwd)) throw Error('cwd must be an absolute existing directory.');
@@ -147,7 +148,8 @@ export function validateTask(input, allowWrite = true) {
   if (input.authorizationNote !== undefined && (typeof input.authorizationNote !== 'string' || input.authorizationNote.length > 2000)) {
     throw Error('authorizationNote must be a string of at most 2000 characters.');
   }
-  if (input.scheduleEnabled !== undefined && typeof input.scheduleEnabled !== 'boolean') throw Error('scheduleEnabled must be a boolean.');
+  selectScheduleMode(input.scheduleMode, input.scheduleEnabled);
+  validateWorkBuddyContinuation(input);
   const timeoutMs = input.timeoutMs ?? 900000;
   if (!Number.isInteger(timeoutMs) || timeoutMs < 1000 || timeoutMs > 3600000) throw Error('timeoutMs must be an integer between 1000 and 3600000.');
   if (input.sessionId !== undefined && (typeof input.sessionId !== 'string' || !/^[A-Za-z0-9_.:-]{1,160}$/.test(input.sessionId))) throw Error('Invalid sessionId.');
@@ -171,7 +173,7 @@ function killTree(child) {
 export class TaskManager {
   constructor({
     cli, runtime, instance = INSTANCE_DEFAULT, allowWrite = true, check = preflight,
-    schedule = null, scheduleDefaultEnabled = Boolean(schedule), scheduleEnabledForRoot,
+    schedule = null, scheduleDefaultEnabled = Boolean(schedule), scheduleModeForRoot, scheduleEnabledForRoot,
     clock = () => new Date(), scheduleTickMs = 15000
   } = {}) {
     this.cli = cli;
@@ -180,14 +182,15 @@ export class TaskManager {
     this.allowWrite = allowWrite;
     this.check = check;
     this.schedule = schedule;
-    this.scheduleDefaultEnabled = scheduleDefaultEnabled;
-    this.scheduleEnabledForRoot = scheduleEnabledForRoot;
+    this.scheduleDefaultMode = normalizeScheduleMode(scheduleDefaultEnabled);
+    this.scheduleModeForRoot = scheduleModeForRoot ?? scheduleEnabledForRoot;
     this.clock = clock;
     this.scheduleTickMs = scheduleTickMs;
     this.active = null;
     this.pending = new Map();
     fs.mkdirSync(this.runtime, { recursive: true, mode: 0o700 });
     this.runtime = resolvedPath(this.runtime);
+    if (!this.scheduleModeForRoot) this.workBuddy = new WorkBuddyDispatch({ runtime: this.runtime, clock, redact });
     fs.mkdirSync(path.join(this.runtime, 'requests'), { recursive: true, mode: 0o700 });
     this.instanceMetadataPath = path.join(this.runtime, 'instance.json');
     this.ensureInstanceMetadata();
@@ -210,9 +213,9 @@ export class TaskManager {
     if (!meta || meta.schema !== 1 || typeof meta.instance !== 'string') throw Error(`Invalid DSH instance metadata at ${this.instanceMetadataPath}; refusing to reuse a shared runtime.`);
     if (meta.instance !== this.instance) throw Error(`Runtime ${this.runtime} belongs to DSH instance "${meta.instance}", not "${this.instance}". Each named instance needs its own runtime; do not point two instances at one path.`);
   }
-  scheduleStatus(enabled = this.active?.scheduleEnabled) {
-    const effective = this.scheduleEnabledForRoot ? this.scheduleEnabledForRoot() : (enabled ?? this.scheduleDefaultEnabled);
-    return scheduleSnapshot(effective ? this.schedule : null, this.clock());
+  scheduleStatus(mode = this.active?.scheduleMode) {
+    const effective = this.scheduleModeForRoot ? this.scheduleModeForRoot() : (mode ?? this.scheduleDefaultMode);
+    return schedulePolicySnapshot(this.schedule, normalizeScheduleMode(effective), this.clock());
   }
   refreshSchedule() {
     const active = this.active;
@@ -236,18 +239,18 @@ export class TaskManager {
       this.cancel(active.record.task_id, 'scheduled_peak');
       return;
     }
-    if (!window.enabled && !this.scheduleEnabledForRoot) return;
+    if (!window.enabled && !this.scheduleModeForRoot) return;
     const until = Date.parse(window.hard_stop_at) - this.clock().getTime();
     tick(Number.isFinite(until) ? Math.max(5, Math.min(this.scheduleTickMs, until)) : this.scheduleTickMs);
   }
-  setTaskSchedule(id, enabled) {
-    if (typeof enabled !== 'boolean') throw Error('enabled must be a boolean');
-    if (this.scheduleEnabledForRoot) throw Error('Use the root schedule control for a pooled task.');
-    if (enabled && !this.schedule) throw Error('This DSH bridge has no configured schedule calendar.');
+  setTaskSchedule(id, choice) {
+    const mode = normalizeScheduleMode(choice);
+    if (this.scheduleModeForRoot) throw Error('Use the root schedule control for a pooled task.');
+    if (mode !== ScheduleMode.UNRESTRICTED && !this.schedule) throw Error('This DSH bridge has no configured schedule calendar.');
     if (this.active?.record.task_id !== id || this.active.stopReason) {
       throw Error('Only an active task owned by this bridge can change its schedule.');
     }
-    this.active.scheduleEnabled = enabled;
+    this.active.scheduleMode = mode;
     this.refreshSchedule();
     return { task_id: id, schedule: this.scheduleStatus() };
   }
@@ -400,21 +403,29 @@ export class TaskManager {
       throw new PreAdmissionRejection(AdmissionCode.INVALID_PARAMS, error.message, { details: { stage: 'validate' } });
     }
     const requestFile = path.join(this.runtime, 'requests', `${digest(task.idempotencyKey)}.json`);
-    const fingerprint = digest(JSON.stringify(task, Object.keys(task).sort()));
+    const mode = selectScheduleMode(task.scheduleMode, task.scheduleEnabled, this.scheduleDefaultMode);
+    const { scheduleMode: explicitMode, scheduleEnabled, ...legacyShape } = task;
+    const legacyBoolean = { ...legacyShape, scheduleEnabled: mode === ScheduleMode.OFFPEAK_ONLY };
+    const shapes = explicitMode === undefined || explicitMode === ScheduleMode.WORKBUDDY_AT_PEAK ? [task] : [legacyBoolean];
+    if (mode !== ScheduleMode.WORKBUDDY_AT_PEAK && mode === this.scheduleDefaultMode) shapes.push(legacyShape, legacyBoolean);
+    const fingerprints = shapes.map(shape => digest(JSON.stringify(shape, Object.keys(shape).sort())));
+    const fingerprint = fingerprints[0];
     const replay = () => {
+      const workBuddy = this.workBuddy?.replay(task.idempotencyKey, fingerprint);
+      if (workBuddy) return workBuddy;
       if (!fs.existsSync(requestFile)) return null;
       const old = readJSON(requestFile);
-      let matches = old.fingerprint === fingerprint;
+      let matches = fingerprints.includes(old.fingerprint);
       if (old.schema === undefined && !matches) {
-        matches = old.fingerprint === digest(JSON.stringify(task))
-          || (input.permissionMode === undefined && old.fingerprint === digest(JSON.stringify({ ...task, permissionMode: 'read-only' })));
+        matches = shapes.some(shape => old.fingerprint === digest(JSON.stringify(shape))
+          || (input.permissionMode === undefined && old.fingerprint === digest(JSON.stringify({ ...shape, permissionMode: 'read-only' }))));
       }
       if (!matches) throw Error(`Idempotency key already used with different arguments in DSH instance "${this.instance}".`);
       return { ...this.get(old.task_id), replayed: true };
     };
     const prior = replay();
     if (prior) return prior;
-    if (task.scheduleEnabled && !this.schedule) {
+    if (mode !== ScheduleMode.UNRESTRICTED && !this.schedule && (scheduleEnabled || explicitMode !== undefined)) {
       throw new PreAdmissionRejection(AdmissionCode.INVALID_PARAMS, 'This DSH bridge has no configured schedule calendar.');
     }
     if (this.active) {
@@ -452,16 +463,33 @@ export class TaskManager {
       }
       // Session ownership is proven before the schedule can produce an
       // apparently eligible rejection. Idempotent reads still happen above.
-      window = this.scheduleStatus(task.scheduleEnabled);
+      window = this.scheduleStatus(mode);
+      const workBuddyAtPeak = window.new_task_backend === WORKBUDDY_DSF.backend && !task.sessionId;
+      if (task.workBuddyContinuationKey && !workBuddyAtPeak) {
+        throw new PreAdmissionRejection(AdmissionCode.SCHEDULE_GATE,
+          'This WorkBuddy DSF session can only continue in a peak window in schedule mode 2.',
+          { allowFallback: false, details: { phase: window.phase } });
+      }
+      if (workBuddyAtPeak) {
+        if (!this.workBuddy) {
+          throw new PreAdmissionRejection(AdmissionCode.WORKBUDDY_DSF_PEAK, 'This peak window selects WorkBuddy DSF.',
+            { details: { schedule: window } });
+        }
+        const dispatch = this.workBuddy.offer(task, fingerprint, window);
+        this.releaseLock();
+        return dispatch;
+      }
       if (!window.accept_new_tasks) {
         throw new PreAdmissionRejection(AdmissionCode.SCHEDULE_GATE,
           `DSH instance "${this.instance}" is blocked by the offpeak schedule (${window.phase}); next offpeak at ${window.next_offpeak_at || 'see schedule status'}.`,
-          { details: { phase: window.phase, next_offpeak_at: window.next_offpeak_at, hard_stop_at: window.hard_stop_at } });
+          { allowFallback: window.mode !== ScheduleMode.WORKBUDDY_AT_PEAK,
+            details: { phase: window.phase, next_offpeak_at: window.next_offpeak_at, hard_stop_at: window.hard_stop_at } });
       }
       if (window.enabled && window.reject_if_budget_exceeds_window && this.clock().getTime() + task.timeoutMs + 60000 >= Date.parse(window.hard_stop_at)) {
         throw new PreAdmissionRejection(AdmissionCode.SCHEDULE_GATE,
           'Task timeout budget exceeds the remaining offpeak window (plus 60s margin). Shorten the budget or use the next offpeak window.',
-          { details: { phase: window.phase, gate: 'budget_exceeds_window', next_offpeak_at: window.next_offpeak_at, hard_stop_at: window.hard_stop_at } });
+          { allowFallback: window.mode !== ScheduleMode.WORKBUDDY_AT_PEAK,
+            details: { phase: window.phase, gate: 'budget_exceeds_window', next_offpeak_at: window.next_offpeak_at, hard_stop_at: window.hard_stop_at } });
       }
       let verified;
       try { verified = this.check(this.cli); }
@@ -474,7 +502,7 @@ export class TaskManager {
       fs.mkdirSync(dir, { mode: 0o700 });
       record = { task_id: id, instance: this.instance, instance_id: `dsh:${this.instance}`, runtime: this.runtime, backend: 'dsh', ...verified,
         requested_route: ROUTE, actual_route: null,
-        schedule_at_start: window.enabled ? { hard_stop_at: window.hard_stop_at, stop_new_at: window.stop_new_at, timezone: window.timezone, resume_automatically: false } : null,
+        schedule_at_start: window.enabled ? { mode: window.mode, hard_stop_at: window.hard_stop_at, stop_new_at: window.stop_new_at, timezone: window.timezone, resume_automatically: false } : null,
         session_id: task.sessionId || null, session_resume: Boolean(task.sessionId), session_owner_task_id: sessionOwner?.owner_task_id || null,
         cwd: task.cwd, permission_mode: task.permissionMode, approval_policy: 'never', user_authorization_note: redact(task.authorizationNote || ''),
         prompt_sha256: digest(task.prompt), status: 'starting', started_at: now(), finished_at: null, pid: null, exit_code: null, timed_out: false,
@@ -484,7 +512,7 @@ export class TaskManager {
       fs.writeFileSync(lock, JSON.stringify({ schema: 1, instance: this.instance, runtime: this.runtime, owner_pid: process.pid, task_id: id, started_at: record.started_at }));
       let finishPromise;
       const finished = new Promise(resolve => { finishPromise = resolve; });
-      const active = { record, child: null, stopReason: null, finished, finishPromise, scheduleTimer: null, scheduleEnabled: task.scheduleEnabled };
+      const active = { record, child: null, stopReason: null, finished, finishPromise, scheduleTimer: null, scheduleMode: mode };
       this.active = active;
       this.pending.set(id, finished);
       const child = spawn(this.cli.command, [...this.cli.prefix, ...dshArgs(task)], {

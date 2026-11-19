@@ -29,6 +29,7 @@ export const AdmissionCode = Object.freeze({
   BUSY: 'DSH_BUSY',
   LOCKED: 'DSH_LOCKED',
   SCHEDULE_GATE: 'DSH_SCHEDULE_GATE',
+  WORKBUDDY_DSF_PEAK: 'WORKBUDDY_DSF_PEAK',
   PRE_ACCEPTANCE_UNAVAILABLE: 'DSH_PRE_ACCEPTANCE_UNAVAILABLE',
   PREFLIGHT_FAILED: 'DSH_PREFLIGHT_FAILED',
   UNKNOWN: 'DSH_ADMISSION_UNKNOWN',
@@ -53,6 +54,7 @@ const SAFE_REASON = Object.freeze({
   [AdmissionCode.BUSY]: 'The DSH instance already has an active task.',
   [AdmissionCode.LOCKED]: 'A live or unknown DSH instance lock exists.',
   [AdmissionCode.SCHEDULE_GATE]: 'The local DSH schedule gate rejected new work before admission.',
+  [AdmissionCode.WORKBUDDY_DSF_PEAK]: 'This peak window selects WorkBuddy DSF before DSH admission.',
   [AdmissionCode.PRE_ACCEPTANCE_UNAVAILABLE]: 'A supported pre-admission check reported provider unavailability.',
   [AdmissionCode.PREFLIGHT_FAILED]: 'The local DSH preflight check failed before task acceptance.',
   [AdmissionCode.UNKNOWN]: 'Task acceptance is unknown; no fallback or retry is allowed.',
@@ -69,19 +71,20 @@ const safeTaskId = value => typeof value === 'string' && /^[A-Za-z0-9_.:-]{1,160
 // A failure that this bridge can prove happened before task acceptance. The
 // `admission_state` is part of the object, not inferred from the message.
 export class PreAdmissionRejection extends Error {
-  constructor(code, message, { details = {}, evidence = null } = {}) {
+  constructor(code, message, { details = {}, evidence = null, allowFallback = true } = {}) {
     super(message);
     this.name = 'PreAdmissionRejection';
     this.code = code;
     this.admission_state = 'not_accepted';
     this.details = details && typeof details === 'object' ? { ...details } : {};
     this.evidence = evidence && typeof evidence === 'object' ? { ...evidence } : null;
+    this.allowFallback = allowFallback;
     this.fallback_eligible = isFallbackEligible(this);
   }
 }
 
 export function isFallbackEligible(value) {
-  if (!(value instanceof PreAdmissionRejection) || value.admission_state !== 'not_accepted') return false;
+  if (!(value instanceof PreAdmissionRejection) || value.admission_state !== 'not_accepted' || !value.allowFallback) return false;
   if (!DSH_PRE_ACCEPTANCE_CODES.has(value.code)) return false;
   if (value.code === AdmissionCode.SCHEDULE_GATE) return true;
   // A provider auth/quota probe is eligible only when trusted code records that
@@ -178,7 +181,7 @@ export class RoutingDecisionError extends Error {
 
 function basicTask(value) {
   if (!value || typeof value !== 'object' || Array.isArray(value)) throw new PreAdmissionRejection(AdmissionCode.INVALID_PARAMS, 'Task must be an object.');
-  const allowed = new Set(['prompt', 'cwd', 'idempotencyKey', 'timeoutMs', 'permissionMode', 'authorizationNote', 'sessionId', 'capability', 'writes', 'writeScopes', 'commands']);
+  const allowed = new Set(['prompt', 'cwd', 'idempotencyKey', 'timeoutMs', 'permissionMode', 'authorizationNote', 'sessionId', 'workBuddyContinuationKey', 'capability', 'writes', 'writeScopes', 'commands']);
   for (const key of Object.keys(value)) {
     if (!allowed.has(key)) throw new PreAdmissionRejection(AdmissionCode.INVALID_PARAMS, `Unknown task field: ${key}`);
   }
@@ -251,7 +254,8 @@ function fingerprint(task, { sessionMode, requestedBackend, continuationOfTaskId
     writes: (task.writes ?? []).map(write => ({ path: write.path, mode: write.mode, content_sha256: write.content_sha256 ?? null })),
     commands: task.commands ?? [],
     continuation_of_task_id: continuationOfTaskId ?? null,
-    repair_of_task_id: repairOfTaskId ?? null
+    repair_of_task_id: repairOfTaskId ?? null,
+    ...(task.workBuddyContinuationKey === undefined ? {} : { workbuddy_continuation_key: task.workBuddyContinuationKey })
   }));
 }
 
@@ -442,7 +446,7 @@ export class RoutingCoordinator {
     }
     const continuationOfTaskId = options.continuationOfTaskId ?? null;
     const repairOfTaskId = options.repairOfTaskId ?? null;
-    const noFallback = Boolean(task.sessionId || continuationOfTaskId || repairOfTaskId);
+    const noFallback = Boolean(task.sessionId || task.workBuddyContinuationKey || continuationOfTaskId || repairOfTaskId);
     if (noFallback && (sessionMode === 'HY4' || requestedBackend === 'hy4')) {
       throw new PreAdmissionRejection(AdmissionCode.INVALID_PARAMS, 'A session continuation/repair cannot be routed to HY4; a new approved cwd is a new HY4 session.');
     }
@@ -529,10 +533,11 @@ export class RoutingCoordinator {
         decision.fallback.eligible = isFallbackEligible(error);
         if (noFallback) {
           decision.fallback.eligible = false;
-          decision.fallback.blocked_reason = 'session_continuation_or_repair_is_dsh_only';
+          decision.fallback.blocked_reason = task.workBuddyContinuationKey
+            ? 'workbuddy_session_continuation' : 'session_continuation_or_repair_is_dsh_only';
           decision.updated_at = now();
           this._write(decision);
-          throw new RoutingDecisionError(error.code, `DSH rejected a session continuation/repair before acceptance (${error.code}); HY4 fallback is forbidden for this request.`, decision, { cause: error });
+          throw new RoutingDecisionError(error.code, `The local admission check returned ${error.code} for a continuation/repair. HY4 fallback is forbidden for this request.`, decision, { cause: error });
         }
         if (!isFallbackEligible(error)) {
           decision.updated_at = now();

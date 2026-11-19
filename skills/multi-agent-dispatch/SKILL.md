@@ -2,7 +2,7 @@
 name: multi-agent-dispatch
 description: Maintain a conversation-scoped execution mode and require a real Sol coordinator between Astra and HY4, WorkBuddy DeepSeek, or DSH. Use for delegation, caller verification, safe handoff, low-overhead waiting, monitoring, acceptance, and native Sol tasks.
 ---
-<!-- ai-rule-managed: v0.3.0; rules: 2026-11-19.dsh-session-controls-r1; fallback: 2026-11-13.hy4-preadmission-r1 (candidate) -->
+<!-- ai-rule-managed: v0.3.0; rules: 2026-11-19.dsh-peak-modes-r1; fallback: 2026-11-13.hy4-preadmission-r1 (candidate) -->
 
 # 多代理调度
 
@@ -111,7 +111,7 @@ DSH 自己用其原生工具执行、测试、观察程序与纠错；桥接器�
 - 不同命名实例有独立 runtime、锁、回执、幂等域和 session 索引，可以并行；同一实例仍单任务互斥，第二个提交应等待而不是换键重跑。
 - task_id、幂等键和 session_id 只在所属实例有效。禁止跨实例 get/wait/cancel；用错实例应得到 not found 或 `unknown_after_disconnect`，不能借只读回执取消别人的子进程。
 - 断连后先检查原锁 owner、任务和进程；不删锁、不重启原任务、不因切换聊天而迁移已启动任务。
-- 默认或命名桥没有根会话身份。协调者在会话保存用户的日程选择（默认关），用 `scheduleEnabled` 派单。切换时用 `set_dsh_task_schedule` 和本会话仍在运行的原 task ID。开启时使用指定或内置日历、峰谷门禁、预算加 60 秒余量、硬停工，不自动恢复。保留选择与原任务 ID 以便交接。
+- 默认或命名桥的协调者在会话保存 `scheduleMode`，用该参数派单。切换时用 `set_dsh_task_schedule` 和本会话仍在运行的原 task ID。旧布尔参数的 false/true 对应 1/3。使用日历时保留峰谷门禁、预算加 60 秒余量和硬停。交接时保留模式及原任务 ID。
 - 普通 DSH 默认在本次任务授权范围使用 `workspace-write`。单任务可明确传只读，本机可注册 `--read-only`。实例继续共享账户、额度和宿主权限。
 - 新注册/修改 MCP 后按宿主支持方式重启或新开会话加载；有活动任务时保留原进程，不保证热加载无中断。跨电脑只同步代码/规则，不同步 runtime、锁、会话或凭据。
 
@@ -142,7 +142,7 @@ DSH 自己用其原生工具执行、测试、观察程序与纠错；桥接器�
 2. 将返回的 opaque `context_ref` 传给 `start_pool_task` / `run_pool_task`；后续 `get/wait/cancel_pool_task` 也用同一 context，过期后重新运行 helper。优先 `run`；需要 task_id 或中途取消时才 `start` + `wait`（最长 60000 ms）。
 3. 同根可用不同幂等键并发派发不同任务。续跑用同一 cwd 和原回执的 session ID，根池把它发给所属 worker。按幂等键或原任务 ID 查询、等待或取消。非所有者只得到只读快照。根身份由 context 验证。
 4. 普通 DSH 默认在工作区可写，显式 `permissionMode: "read-only"` 及本机 `allow_write: false` 或 `--read-only` 优先。HY4 写入仍需显式能力、权限、授权引用及 `writeScopes` 或 `writes`，范围变化使用新幂等键。
-5. 通过 `set_pool_schedule` 按已验证根聊天开关日程，`get_pool_status` 检查有效状态和 worker。新根默认关闭，显式选择保留，切换影响同根已运行的 DSH。开启时使用 `schedule_config` 日历、预算和硬停，已停止任务不自动恢复。仅结构化预准入拒绝且本机授权/ready 时按 §5.5 最多一次 HY4。
+5. 通过 `set_pool_schedule` 按已验证根聊天保存 `scheduleMode`，`get_pool_status` 检查有效状态和 worker。新根默认 1，切换影响同根已运行的 DSH。启用日历时保留预算和硬停。模式 2 的真峰使用下方交接流程，模式 3 的可选 HY4 回退继续依照 §5.5。
 6. 标准 `tool_timeout_sec=3700` 只是示例，必须以当次宿主实际生效值为准。任何“lease 未打印、结果没有 prompt/路径”都不是身份认证或 OS 隔离；临时标准 stdio 已验证真实单根 DSH 与 HY4 文件任务，但不等于每机全局注册、桌面 app、多聊天、认证或 provider 计费验证。
 
 ## 6. 等待、异常和验收
@@ -168,4 +168,12 @@ completed 要求 DSH 进程退出 0 且 final.reason.kind 为 completed；它只
 
 ## DSH 峰谷选择
 
-用户开关的是当前会话。根池通过 `set_pool_schedule` 保存选择，默认或命名入口通过 `scheduleEnabled` 派单和 `set_dsh_task_schedule` 更新在途任务。检查对应任务或根会话的状态。硬停任务保持终态，预准入回退仍按 §5.5。详见 `docs/offpeak-schedule.md`。
+峰谷模式作用于当前 DSH 会话。模式 1 无峰谷（默认及“关闭峰谷”），模式 2 谷时按原日历用 DSH、真实峰时选择 WorkBuddy DSF，模式 3 为原峰谷（“开启峰谷”）。保留原模式和活动任务的后端。模式 2 的提前门禁和谷时预算拒绝原样返回，DSH 的硬停终态不自动复跑。
+
+模式 2 收到正常派单的 `workbuddy_pending` 后，由同一 Sol 按顺序执行：
+
+1. 核对宿主当前加载的 `deepseek-v4-flash-workbuddy` 的 `get_task_bridge_status` 与 `run_workbuddy_task` 的实际 schema。确认 ready、模型 `deepseek-v4-flash`、原目录及原授权范围可保留。无法执行时直接用 `finish_workbuddy_dsf_dispatch` 记录 `unavailable` 或 `refused`。
+2. 用原实例或验证根上下文、原 `idempotencyKey` 和 `dispatchId` 调用 `claim_workbuddy_dsf_dispatch`。只有取得 `claimed: true` 和新的 `claimToken` 时，才可在回执 `expires_at` 前调用原 WorkBuddy 的 `run_workbuddy_task` 一次。根据实际 schema 和现有授权选择 profile。继续时使用已验证会话 ID。
+3. 用 `finish_workbuddy_dsf_dispatch` 及原 token 回填真实终态、返回的任务/会话 ID 和共享答复。结果不明时记录 `unknown_after_disconnect`。用 `get_workbuddy_dsf_dispatch` 及原键追踪原记录。重复领取、重放、未知或取消均不继续派发。
+
+固定模式 2 后，下一项独立谷时任务走 DSH。显式续跑 WorkBuddy 使用同会话、同目录的已完成交接键 `workBuddyContinuationKey`，给本次请求新键，并仅在真实峰段且版本支持时使用厂商续跑能力。已运行的任务继续由原后端负责。传统服务若在领取前切出模式 2，取消本会话待领取的交接。详见 `docs/offpeak-schedule.md`。

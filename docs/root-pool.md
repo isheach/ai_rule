@@ -56,9 +56,10 @@ HY4 retains its own explicit capability. For HY4 file edits, supply `permissionM
 | Tool | Effect |
 |---|---|
 | `get_pool_status` | Read-only pool counts, effective schedule and this root's worker bindings. |
-| `set_pool_schedule` | Store `enabled` for the verified root and apply it to that root's running DSH workers. |
-| `start_pool_task` | Validates cwd/context, reserves capacity, submits DSH first, returns a durable task ID. |
-| `run_pool_task` | Same submission path, then waits internally for the terminal receipt. |
+| `set_pool_schedule` | Store `scheduleMode` for the verified root and apply it to that root's running DSH workers. |
+| `start_pool_task` | Validate and reserve capacity, then return a durable local task ID or a WorkBuddy DSF handoff in mode 2 at peak. |
+| `run_pool_task` | Same submission path. Waits for local work and returns a WorkBuddy handoff immediately. |
+| `get_workbuddy_dsf_dispatch`, `claim_workbuddy_dsf_dispatch`, `finish_workbuddy_dsf_dispatch` | Inspect the handoff, claim it once at peak, and record the verified external outcome. Each takes the verified root context. |
 | `get_pool_task` | Reads by durable idempotency key; a direct task ID is accepted only when mapped to the same root by its routing decision. |
 | `wait_pool_task` | Event-driven wait up to 60 s on an accepted task. No resubmission. |
 | `cancel_pool_task` | Cancels only the backend child owned by this live stdio server and only for this context root. A non-owner gets a read-only snapshot. |
@@ -103,7 +104,7 @@ mutation. Neither prints a lease.
 - The primary DSH instance retains its original name and `dsh/` runtime. Extra workers use private `workers/<number>/dsh/` directories with stable suffixed instance names. Routing and HY4 data are shared within the root.
 - A binding remains lazy and idle bindings retain their data without starting a child.
 - One coordinator can submit multiple independent tasks in parallel under one context. Each worker keeps one child. `binding_cap` optionally limits bound roots. `running_cap` defaults to **3** across roots and pool processes, including active, starting and unknown workers.
-- Every backend dispatch and settlement still requires the original binding handle and unique per-run operation proof.
+- Local DSH and HY4 dispatch and settlement require the original binding handle and unique operation proof. For a WorkBuddy handoff, the pool releases the local reservation before Sol claims the external dispatch with the verified root context.
 - Reserve before submit. Only after the backend returns an actual task ID is the binding
   marked active with the backend. A classified pre-admission rejection releases the
   reservation; an unstructured/unknown failure is pinned `unknown`. Unknown/starting is
@@ -120,15 +121,15 @@ mutation. Neither prints a lease.
 
 ## DSH-first and pre-admission HY4
 
-The same routing coordinator/decision files are used by MCP and the one-shot compatibility
-wrapper. DSH is attempted first. HY4 is possible only when all of these hold: this is a new
+The same routing coordinator and decision files are used by MCP and the one-shot compatibility
+wrapper. The original DSH-first policy applies in mode 3. HY4 is possible only when all of these hold: this is a new
 task (no `sessionId`, continuation or repair); a supported DSH pre-admission rejection is
 structurally `not_accepted`; local authorization exists; the HY4 route is ready; and a
 supported capability was explicitly selected. The attempt is at most once. No fallback is
 allowed after acceptance, unknown/timeout/disconnect, permission/approval/parameter failure,
 invalid input, busy/lock, or for continuation/repair. The selected backend is then fixed.
 
-`schedule_config` defines the calendar. New roots default to off. Use `set_pool_schedule` with the root context and a Boolean `enabled`. The choice persists across connections and idle bindings. With scheduling on, each owner applies the pre-peak gate, budget check and hard stop. Owners recheck the current choice before stopping a task. A stopped task stays terminal. See [peak scheduling](offpeak-schedule.md).
+`schedule_config` defines the calendar. New roots use mode 1 without a calendar. Use `set_pool_schedule` with the root context and `scheduleMode`. Mode 2 uses local DSH in offpeak and lets Sol claim the selected WorkBuddy DSF handoff at peak. Mode 3 applies the original gate and optional authorized HY4 route. Legacy `enabled: false` and `enabled: true` select modes 1 and 3. The choice persists across connections and idle bindings. Mode 2 and mode 3 apply the pre-peak gate, budget check and hard stop to DSH. Owners recheck the current choice before stopping a task. A stopped task stays terminal. See [peak scheduling](offpeak-schedule.md).
 
 The pool reads existing schema 1 and 2 binding stores, primary worker receipts and replay proofs. It writes schema 3 when binding or schedule state changes. Upgrade processes that share a pool after their active work completes.
 
@@ -138,7 +139,7 @@ The pool reads existing schema 1 and 2 binding stores, primary worker receipts a
 wrapper. `tests/pool-mcp.test.mjs` drives the actual stdio MCP subprocess with mock DSH,
 fake ACP, synthetic `CODEX_HOME`, injected deterministic clocks and bounded child shutdown:
 replay/continuation, root isolation, peak rejection, HY4 fallback, non-owner cancellation,
-and normalized `writeScopes` reaching the HY4 file fallback. All 113 isolated mocks passed
+and normalized `writeScopes` reaching the HY4 file fallback. Mode 2 tests connect the real stdio schedulers to a separate offline WorkBuddy fixture and record its actual tool results. All 113 earlier isolated mocks passed
 with 0 skips, including opt-in native command fakes. These mocks still do not prove a real
 CodeBuddy provider, billing, desktop app, global registration, multi-chat host behavior, OS
 account isolation or authentication. The temporary real stdio checks above supplement but do

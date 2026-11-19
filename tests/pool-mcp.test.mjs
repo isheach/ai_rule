@@ -4,16 +4,18 @@ import fs from 'node:fs';
 import os from 'node:os';
 import path from 'node:path';
 import { spawn } from 'node:child_process';
-import { fileURLToPath } from 'node:url';
+import { fileURLToPath, pathToFileURL } from 'node:url';
 import { sha256File } from '../bridges/hy4/manifest.mjs';
 
 const root = path.resolve(path.dirname(fileURLToPath(import.meta.url)), '..');
 const fakeAcp = path.join(root, 'tests', 'fake-codebuddy-acp.mjs');
 const mockDsh = path.join(root, 'tests', 'mock-dsh.mjs');
+const fakeWorkBuddy = path.join(root, 'tests', 'fake-workbuddy-dsf.mjs');
 const temp = () => fs.mkdtempSync(path.join(fs.realpathSync.native(os.tmpdir()), 'ai-rule-pool-mcp-'));
 const id = n => `00000000-0000-4000-8000-${String(n).padStart(12, '0')}`;
 const OFFPEAK = '2026-11-16T00:30:00.000Z';
 const PEAK = '2026-11-16T02:00:00.000Z';
+const PREPEAK = '2026-11-16T00:55:00.000Z';
 const HOOK_SHELL = (() => {
   const candidates = process.platform === 'win32'
     ? ['C:\\Program Files\\Git\\bin\\bash.exe', 'C:\\Program Files\\Git\\usr\\bin\\bash.exe']
@@ -153,6 +155,229 @@ async function stop(server) {
   ]);
   if (server.child.exitCode === null) server.child.kill('SIGKILL');
 }
+
+async function startFixturePeer(t, args, env = {}) {
+  const child = spawn(process.execPath, args, {
+    env: { ...process.env, ...env }, stdio: ['pipe', 'pipe', 'pipe'], windowsHide: true
+  });
+  t.after(() => stop({ child }));
+  const client = mcpClient(child);
+  let stderr = '';
+  child.stderr.on('data', data => { stderr += data; });
+  const initialized = await Promise.race([
+    client.init(),
+    new Promise((_, reject) => child.once('close', code => reject(Error('Fixture exited during initialization (' + code + '): ' + stderr))))
+  ]);
+  assert.ok(initialized.result, JSON.stringify(initialized.error));
+  return client;
+}
+
+async function runWorkBuddyHandoff({ scheduler, provider, route, task, context }) {
+  assert.equal(route.status, 'workbuddy_pending');
+  assert.equal(route.admission_state, 'not_accepted');
+  assert.equal(route.task_id, null);
+  const dispatch = route.workbuddy_dispatch;
+  assert.equal(dispatch.server_name, 'deepseek-v4-flash-workbuddy');
+  const discovery = await provider.rpc('tools/list');
+  const providerTools = discovery.result.tools;
+  assert.ok(providerTools.some(tool => tool.name === dispatch.status_tool));
+  const runTool = providerTools.find(tool => tool.name === dispatch.run_tool);
+  assert.ok(runTool.inputSchema.properties.profile);
+
+  const { parsed: readiness } = await provider.call(dispatch.status_tool, {});
+  assert.equal(readiness.model, dispatch.model);
+  assert.equal(readiness.ready, true);
+  assert.equal(dispatch.permission_mode, 'read-only');
+  const locator = { idempotencyKey: task.idempotencyKey, dispatchId: dispatch.dispatch_id, ...(context ? { context } : {}) };
+  const claims = await Promise.all([
+    scheduler.call('claim_workbuddy_dsf_dispatch', locator),
+    scheduler.call('claim_workbuddy_dsf_dispatch', locator)
+  ]);
+  const successfulClaims = claims.map(result => result.parsed).filter(result => result.claimed);
+  assert.equal(successfulClaims.length, 1);
+  assert.equal(claims.filter(result => Object.hasOwn(result.parsed, 'claimToken')).length, 1);
+  const { claimToken } = successfulClaims[0];
+  const { parsed: actual } = await provider.call(runTool.name, {
+    task: task.prompt, directory: task.cwd, profile: readiness.profile,
+    ...(dispatch.continuation ? { resumeSession: dispatch.continuation.backend_session_id } : {})
+  });
+  assert.equal(actual.status, 'completed');
+  await assert.rejects(scheduler.call('finish_workbuddy_dsf_dispatch', { ...locator, status: actual.status }), /claim token/);
+  const { parsed: final } = await scheduler.call('finish_workbuddy_dsf_dispatch', {
+    ...locator, claimToken, status: actual.status, backendTaskId: actual.task_id, backendSessionId: actual.session_id, answer: actual.answer
+  });
+  assert.equal(final.status, 'completed');
+  assert.equal(final.workbuddy_dispatch.backend_task_id, actual.task_id);
+  assert.equal(final.workbuddy_dispatch.answer, actual.answer);
+  assert.equal(Object.hasOwn(final, 'claimToken'), false);
+  return final.workbuddy_dispatch;
+}
+
+test('mode 2 pool dispatch reaches the WorkBuddy stdio fixture exactly once, with replay and continuation', async t => {
+  const f = fixture({ clock: PEAK, hy4: true });
+  const server = await startServer(f);
+  t.after(() => stop(server));
+  const provider = await startFixturePeer(t, [fakeWorkBuddy]);
+  const context = await issueContext(f);
+  const { client } = server;
+  const state = await client.call('set_pool_schedule', { context, scheduleMode: 2 });
+  assert.equal(state.parsed.schedule.mode, 2);
+  assert.equal(state.parsed.schedule.new_task_backend, 'workbuddy-dsf');
+  assert.equal(state.parsed.schedule.accept_new_tasks, false);
+
+  const task = { context, cwd: f.workspace, prompt: 'peak work', idempotencyKey: 'workbuddy-peak', permissionMode: 'read-only' };
+  const { parsed: route } = await client.call('run_pool_task', task);
+  assert.deepEqual(taskDirs(f), []);
+  assert.equal((await client.call('get_pool_status', { context })).parsed.running, 0);
+  assert.equal((await client.call('cancel_pool_task', { context, idempotencyKey: task.idempotencyKey })).parsed.cancelled, false);
+  const final = await runWorkBuddyHandoff({ scheduler: client, provider, route, task, context });
+  const { parsed: observed } = await client.call('get_pool_task', { context, idempotencyKey: task.idempotencyKey });
+  assert.equal(observed.workbuddy_dispatch.backend_task_id, final.backend_task_id);
+  const { parsed: replay } = await client.call('start_pool_task', task);
+  assert.equal(replay.replayed, true);
+  assert.equal(replay.status, 'completed');
+  await assert.rejects(client.call('start_pool_task', { ...task, prompt: 'different input' }), /different WorkBuddy/);
+
+  const next = { ...task, prompt: 'peak follow-up', idempotencyKey: 'workbuddy-follow-up', workBuddyContinuationKey: task.idempotencyKey };
+  const { parsed: continuation } = await client.call('start_pool_task', next);
+  const nextFinal = await runWorkBuddyHandoff({ scheduler: client, provider, route: continuation, task: next, context });
+  assert.equal(nextFinal.backend_session_id, final.backend_session_id);
+  assert.equal((await provider.call('get_task_bridge_status', {})).parsed.runs, 2);
+  assert.deepEqual(taskDirs(f), []);
+  await assert.rejects(client.call('start_pool_task', { ...task, idempotencyKey: 'foreign-dsh-session', sessionId: 'foreign' }),
+    error => error.code === 'DSH_SESSION_CONFLICT');
+
+  const blockedTask = { ...task, idempotencyKey: 'workbuddy-unavailable' };
+  const { parsed: blocked } = await client.call('start_pool_task', blockedTask);
+  const { parsed: unavailable } = await client.call('finish_workbuddy_dsf_dispatch', {
+    context, idempotencyKey: blockedTask.idempotencyKey, dispatchId: blocked.workbuddy_dispatch.dispatch_id, status: 'unavailable'
+  });
+  assert.equal(unavailable.admission_state, 'not_accepted');
+  assert.equal((await client.call('start_pool_task', blockedTask)).parsed.status, 'unavailable');
+  assert.equal((await provider.call('get_task_bridge_status', {})).parsed.runs, 2);
+
+  const unknownTask = { ...task, idempotencyKey: 'workbuddy-transport-unknown' };
+  const { parsed: unknownOffer } = await client.call('start_pool_task', unknownTask);
+  const unknownLocator = { context, idempotencyKey: unknownTask.idempotencyKey, dispatchId: unknownOffer.workbuddy_dispatch.dispatch_id };
+  const { parsed: unknownClaim } = await client.call('claim_workbuddy_dsf_dispatch', unknownLocator);
+  const { parsed: unknown } = await client.call('finish_workbuddy_dsf_dispatch', {
+    ...unknownLocator, claimToken: unknownClaim.claimToken, status: 'unknown_after_disconnect'
+  });
+  assert.equal(unknown.admission_state, 'unknown');
+  assert.equal((await client.call('claim_workbuddy_dsf_dispatch', unknownLocator)).parsed.claimed, false);
+  assert.equal((await client.call('start_pool_task', unknownTask)).parsed.status, 'unknown_after_disconnect');
+
+  const pending = { ...task, idempotencyKey: 'workbuddy-switch-mode' };
+  const { parsed: offered } = await client.call('start_pool_task', pending);
+  await client.call('set_pool_schedule', { context, enabled: false });
+  const locator = { context, idempotencyKey: pending.idempotencyKey, dispatchId: offered.workbuddy_dispatch.dispatch_id };
+  const { parsed: expired } = await client.call('claim_workbuddy_dsf_dispatch', locator);
+  assert.equal(expired.claimed, false);
+  assert.equal(expired.status, 'expired');
+  assert.equal((await client.call('run_pool_task', pending)).parsed.replayed, true);
+  assert.equal((await client.call('run_pool_task', { ...task, idempotencyKey: 'unrestricted-after-switch' })).parsed.backend, 'dsh');
+  const inFlight = { ...task, idempotencyKey: 'hot-enable-active-dsh', prompt: 'hang', timeoutMs: 15000 };
+  const { parsed: live } = await client.call('start_pool_task', inFlight);
+  assert.equal(live.backend, 'dsh');
+  await client.call('set_pool_schedule', { context, scheduleMode: 2 });
+  const { parsed: stopped } = await client.call('wait_pool_task', { context, taskId: live.task_id, waitMs: 10000 });
+  assert.equal(stopped.status, 'schedule_stopped');
+  assert.equal((await client.call('run_pool_task', inFlight)).parsed.status, 'schedule_stopped');
+  assert.equal((await provider.call('get_task_bridge_status', {})).parsed.runs, 2);
+});
+
+test('mode 2 uses DSH in the valley and preserves its prepeak and budget gates in real pool stdio', async t => {
+  const f = fixture({ hy4: true });
+  const valley = await startServer(f);
+  t.after(() => stop(valley));
+  let context = await issueContext(f);
+  await valley.client.call('set_pool_schedule', { context, scheduleMode: 2 });
+  const task = { context, idempotencyKey: 'workbuddy-mode-valley', cwd: f.workspace, prompt: 'valley DSH', timeoutMs: 6000 };
+  const { parsed: accepted } = await valley.client.call('run_pool_task', task);
+  assert.equal(accepted.backend, 'dsh');
+  assert.equal(accepted.status, 'completed');
+  assert.equal(accepted.receipt.schedule_at_start.mode, 2);
+  await assert.rejects(valley.client.call('start_pool_task', { ...task, idempotencyKey: 'too-long', timeoutMs: 3600000 }),
+    error => error.code === 'DSH_SCHEDULE_GATE');
+
+  const prepeak = await startServer(f, PREPEAK);
+  t.after(() => stop(prepeak));
+  context = await issueContext({ ...f, clock: PREPEAK });
+  const { parsed: reopened } = await prepeak.client.call('get_pool_status', { context });
+  assert.equal(reopened.schedule.mode, 2);
+  assert.equal(reopened.schedule.phase, 'prepeak');
+  assert.equal(reopened.schedule.new_task_backend, null);
+  await assert.rejects(prepeak.client.call('start_pool_task', { ...task, context, idempotencyKey: 'too-late' }),
+    error => error.code === 'DSH_SCHEDULE_GATE');
+});
+
+test('default and named DSH stdio expose the same WorkBuddy handoff without a DSH child', async t => {
+  const provider = await startFixturePeer(t, [fakeWorkBuddy]);
+  const legacy = path.join(root, 'bridges', 'dsh', 'server.mjs');
+  const clock = path.join(root, 'tests', 'dsh-clock-fixture.mjs');
+  for (const instance of ['default', 'named']) {
+    const runtime = temp();
+    const scheduler = await startFixturePeer(t, ['--import', pathToFileURL(clock).href, legacy, '--dsh-entry', mockDsh, '--runtime', runtime,
+      ...(instance === 'default' ? [] : ['--instance', instance])], { AI_RULE_FIXTURE_CLOCK: PEAK });
+    const task = { cwd: runtime, prompt: instance + ' peak work', idempotencyKey: 'workbuddy-peak', permissionMode: 'read-only', scheduleMode: 2 };
+    assert.equal((await scheduler.call('get_dsh_schedule_status', {})).parsed.mode, 1);
+    assert.equal((await scheduler.call('get_dsh_schedule_status', { scheduleMode: 2 })).parsed.phase, 'peak');
+    const { parsed: route } = await scheduler.call(instance === 'default' ? 'run_dsh_task' : 'start_dsh_task', task);
+    assert.equal((await scheduler.call('get_dsh_bridge_status', {})).parsed.active_task_id, null);
+    assert.equal(fs.readdirSync(path.join(runtime, 'requests')).length, 0);
+    const final = await runWorkBuddyHandoff({ scheduler, provider, route, task });
+    const { parsed: lookup } = await scheduler.call('get_workbuddy_dsf_dispatch', { idempotencyKey: task.idempotencyKey });
+    assert.equal(lookup.workbuddy_dispatch.backend_task_id, final.backend_task_id);
+    assert.equal((await scheduler.call('run_dsh_task', task)).parsed.replayed, true);
+    const { scheduleMode, ...legacyTask } = task;
+    await assert.rejects(scheduler.call('start_dsh_task', { ...legacyTask, idempotencyKey: 'old-scheduled', scheduleEnabled: true }),
+      error => error.code === 'DSH_SCHEDULE_GATE');
+    const noSchedule = { ...legacyTask, idempotencyKey: 'original-unscheduled-key', timeoutMs: 5000 };
+    const { parsed: legacyReceipt } = await scheduler.call('run_dsh_task', noSchedule);
+    assert.equal(legacyReceipt.status, 'completed');
+    const { parsed: explicitReplay } = await scheduler.call('start_dsh_task', { ...noSchedule, scheduleMode: 1 });
+    assert.equal(explicitReplay.task_id, legacyReceipt.task_id);
+    assert.equal(explicitReplay.replayed, true);
+    const lockPath = path.join(runtime, 'active.lock');
+    fs.writeFileSync(lockPath, JSON.stringify({ owner_pid: 1, task_id: null }));
+    await assert.rejects(scheduler.call('start_dsh_task', { ...task, idempotencyKey: 'locked-at-peak' }),
+      error => error.code === 'DSH_LOCKED');
+    fs.unlinkSync(lockPath);
+
+    const idempotencyKey = 'legacy-switch-before-claim';
+    const { parsed: endOfMode } = await scheduler.call('start_dsh_task', { ...task, idempotencyKey });
+    const locator = { idempotencyKey, dispatchId: endOfMode.workbuddy_dispatch.dispatch_id };
+    const { parsed: cancelled } = await scheduler.call('finish_workbuddy_dsf_dispatch', { ...locator, status: 'cancelled' });
+    assert.equal(cancelled.status, 'cancelled');
+    assert.equal((await scheduler.call('claim_workbuddy_dsf_dispatch', locator)).parsed.claimed, false);
+  }
+  assert.equal((await provider.call('get_task_bridge_status', {})).parsed.runs, 2);
+});
+
+test('mode 2 returns to DSH at the peak end and old handoffs cannot restart across the boundary', async t => {
+  const f = fixture({ clock: PEAK });
+  const peak = await startServer(f);
+  t.after(() => stop(peak));
+  let context = await issueContext(f);
+  await peak.client.call('set_pool_schedule', { context, scheduleMode: 2 });
+  const task = { idempotencyKey: 'workbuddy-across-peak-boundary', cwd: f.workspace, prompt: 'new work', timeoutMs: 5000 };
+  const { parsed: pending } = await peak.client.call('start_pool_task', { ...task, context });
+  assert.equal(pending.status, 'workbuddy_pending');
+  const nextValley = pending.workbuddy_dispatch.expires_at;
+  await stop(peak);
+  const valley = await startServer(f, nextValley);
+  t.after(() => stop(valley));
+  context = await issueContext({ ...f, clock: nextValley });
+  const { parsed: expired } = await valley.client.call('claim_workbuddy_dsf_dispatch', {
+    context, idempotencyKey: task.idempotencyKey, dispatchId: pending.workbuddy_dispatch.dispatch_id
+  });
+  assert.equal(expired.claimed, false);
+  assert.equal(expired.status, 'expired');
+  assert.equal((await valley.client.call('start_pool_task', { ...task, context })).parsed.status, 'expired');
+  const { parsed: next } = await valley.client.call('run_pool_task', { ...task, context, idempotencyKey: 'first-valley-dsh' });
+  assert.equal(next.status, 'completed');
+  assert.equal(next.backend, 'dsh');
+});
 
 function taskDirs(f, backend = 'dsh') {
   const state = JSON.parse(fs.readFileSync(path.join(f.config.pool_root, 'bindings.json'), 'utf8'));

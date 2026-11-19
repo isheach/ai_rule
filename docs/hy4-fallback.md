@@ -23,10 +23,12 @@
 
 | 代码 | 含义 | 是否可回退 |
 |---|---|---|
-| `DSH_SCHEDULE_GATE` | 本地峰时/预峰门禁拒绝新任务，或预算跨越 hard stop；尚未创建任务 | 是，需显式授权、HY4 ready，并显式选择受支持的 `text-only`/`workspace-read`/`workspace-write` 且 permission/scope 匹配本地策略 |
+| `DSH_SCHEDULE_GATE` | 模式 3 的本地峰时、峰前门禁拒绝或预算跨越 hard stop，尚未创建任务 | 是，需显式授权、HY4 ready，并显式选择受支持的 `text-only`/`workspace-read`/`workspace-write` 且 permission/scope 匹配本地策略 |
 | `DSH_PRE_ACCEPTANCE_UNAVAILABLE` | 受支持的预准入 auth/quota/可达性探测明确报告不可用，且 `task_accepted=false` | 仅当证据含 `provider_check=supported`、`task_accepted=false`、`cause∈{auth_rejected,quota_exhausted,provider_unreachable}`，且能力/permission/scope 匹配；当前仍未接入该探测 |
 
 当前桥接器**没有**接入第二行的 auth/quota 探测；因此它不能用普通 CLI 错误冒充。已测试的正式路径是显式 capability + matching permission/scope，不再限定为 text-only。
+
+模式 2 只在实际峰时为新的独立任务选择 WorkBuddy DSF。模式 2 的峰前、谷时预算拒绝和 WorkBuddy 不可用均直接返回原状态。详见 [峰谷调度](offpeak-schedule.md)。
 
 DSH 核心已调整为：幂等回执读取 → 同实例 busy → `active.lock` 独占 → session ownership → 日程/预算门禁 → preflight。日程门禁不再先于外部锁/会话检查，因此 live/unknown lock 或 session 冲突不会被伪装成可回退的 `DSH_SCHEDULE_GATE`。拒绝时释放本次刚创建的锁，不删除任何既有锁。
 
