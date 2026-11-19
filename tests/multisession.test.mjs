@@ -151,12 +151,13 @@ test('peak admission and budget checks are evaluated per instance', async () => 
 
 test('a scheduled hard stop terminates only that instance child', async () => {
   const cfg = validateSchedule(OFFPEAK_DEFAULT);
-  const begin = Date.now(), base = Date.parse('2026-11-09T00:00:00Z');
-  const clock = () => new Date(base + (Date.now() - begin) * 300000);
+  let instant = new Date('2026-11-09T00:00:00Z');
+  const clock = () => instant;
   const scheduled = new TaskManager({ cli, runtime: temp('stop-a'), instance: 'scheduled', schedule: cfg, clock, scheduleTickMs: 5 });
   const free = new TaskManager({ cli, runtime: temp('stop-b'), instance: 'free' });
   const a = await scheduled.start({ ...task(temp('stop-cwd-a'), 'hang', 'stop-1'), timeoutMs: 10000 });
   const b = await free.start({ ...task(temp('stop-cwd-b'), 'hang', 'stop-2'), timeoutMs: 10000 });
+  instant = new Date('2026-11-09T01:00:00Z');
   const stopped = await scheduled.wait(a.task_id, 4000);
   assert.equal(stopped.status, 'schedule_stopped');
   assert.equal(stopped.stop_reason, 'scheduled_peak');

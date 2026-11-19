@@ -5,6 +5,7 @@ import { loadManifest } from './manifest.mjs';
 import { RoutingCoordinator, PreAdmissionRejection, Hy4UnavailableError, AdmissionCode } from '../dsh/routing.mjs';
 import { TaskManager, discoverDsh, redact } from '../dsh/core.mjs';
 import { loadSchedule } from '../dsh/schedule.mjs';
+import fs from 'node:fs';
 import path from 'node:path';
 
 const argv = process.argv.slice(2);
@@ -25,7 +26,9 @@ try {
     runtime: option('--dsh-runtime', true),
     schedule: loadSchedule(schedulePath)
   });
-  if (path.relative(dsh.runtime, manager.runtime) === '') throw Error('HY4 and DSH runtimes must remain physically separate.');
+  const dshRuntime = fs.realpathSync.native(dsh.runtime);
+  const hy4Runtime = fs.realpathSync.native(manager.runtime);
+  if (path.relative(dshRuntime, hy4Runtime) === '') throw Error('HY4 and DSH runtimes must remain physically separate.');
   const authRef = option('--fallback-authorization');
   const authorization = authRef ? {
     schema: 1, enabled: true, authorization_ref: authRef, scope: 'pre_admission_only', max_attempts: 1

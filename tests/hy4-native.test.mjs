@@ -11,7 +11,7 @@ import { sha256 } from '../bridges/hy4/policy.mjs';
 
 const root = path.resolve(path.dirname(fileURLToPath(import.meta.url)), '..');
 const fake = path.join(root, 'tests', 'fake-codebuddy-acp.mjs');
-const temp = () => fs.mkdtempSync(path.join(os.tmpdir(), 'ai-rule-hy4-native-'));
+const temp = () => fs.mkdtempSync(path.join(fs.realpathSync.native(os.tmpdir()), 'ai-rule-hy4-native-'));
 const digest = value => crypto.createHash('sha256').update(value).digest('hex');
 const HOOK_SHELL = (() => {
   const candidates = process.platform === 'win32'

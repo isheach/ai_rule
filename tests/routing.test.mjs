@@ -9,7 +9,7 @@ import {
   validateFallbackAuthorization, ROUTING_POLICY_VERSION
 } from '../bridges/dsh/routing.mjs';
 
-const temp = () => fs.mkdtempSync(path.join(os.tmpdir(), 'ai-rule-routing-'));
+const temp = () => fs.mkdtempSync(path.join(fs.realpathSync.native(os.tmpdir()), 'ai-rule-routing-'));
 const task = (key = 'task-1', extra = {}) => ({
   prompt: 'PRIVATE-PROMPT-MUST-NOT-BE-STORED', cwd: temp(), idempotencyKey: key, timeoutMs: 1000, ...extra
 });

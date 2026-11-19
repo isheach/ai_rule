@@ -10,7 +10,7 @@ import { sha256File } from '../bridges/hy4/manifest.mjs';
 const root = path.resolve(path.dirname(fileURLToPath(import.meta.url)), '..');
 const fakeAcp = path.join(root, 'tests', 'fake-codebuddy-acp.mjs');
 const mockDsh = path.join(root, 'tests', 'mock-dsh.mjs');
-const temp = () => fs.mkdtempSync(path.join(os.tmpdir(), 'ai-rule-pool-mcp-'));
+const temp = () => fs.mkdtempSync(path.join(fs.realpathSync.native(os.tmpdir()), 'ai-rule-pool-mcp-'));
 const id = n => `00000000-0000-4000-8000-${String(n).padStart(12, '0')}`;
 const OFFPEAK = '2026-11-16T00:30:00.000Z';
 const PEAK = '2026-11-16T02:00:00.000Z';

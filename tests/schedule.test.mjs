@@ -88,10 +88,11 @@ test('manager blocks peak tasks and over-budget tasks before spawn',async()=>{
 });
 test('owned process is stopped at scheduled boundary without auto resume',async()=>{
   const runtime=temp(),cwd=temp();
-  const begin=Date.now(),base=Date.parse('2026-11-09T00:00:00Z');
-  const clock=()=>new Date(base+(Date.now()-begin)*300000);
+  let instant=new Date('2026-11-09T00:00:00Z');
+  const clock=()=>instant;
   const manager=new TaskManager({cli,runtime,schedule:cfg,clock,scheduleTickMs:5});
   const first=await manager.start({cwd,prompt:'hang',idempotencyKey:'peak-stop',timeoutMs:10000});
+  instant=new Date('2026-11-09T01:00:00Z');
   const finished=await manager.wait(first.task_id,4000);
   assert.equal(finished.status,'schedule_stopped');
   assert.equal(finished.stop_reason,'scheduled_peak');
