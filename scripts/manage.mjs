@@ -153,7 +153,7 @@ export function buildPlan({
   home = os.homedir(), codexHome = process.env.CODEX_HOME || path.join(home, '.codex'),
   enableDsh = false, dshEntry, allowWrite = false, readOnly = false, workbuddyBridge, workbuddyProjectConfig, replaceWorkBuddyDsf = false,
   offpeakSchedule = false, disableOffpeakSchedule = false, dshInstances = [], removeDshInstances = [],
-  solCoordinatorConfig, solWorkspaceRoot, solModel, solReasoningEffort
+  solCoordinatorConfig, solWorkspaceRoot, solModel, solReasoningEffort, solReadOnlyByDefault
 } = {}) {
   codexHome = path.resolve(codexHome);
   if (allowWrite && readOnly) throw Error('Cannot combine --allow-write and --read-only.');
@@ -268,7 +268,7 @@ export function buildPlan({
     solRegistration = buildSolRegistration({
       toml: original, plannedDsh: parts.find(section => sectionName(section) === DSH_SERVER),
       codexHome, repo, explicit: solCoordinatorConfig, workspace: solWorkspaceRoot,
-      model: solModel, effort: solReasoningEffort, dshEntry
+      model: solModel, effort: solReasoningEffort, dshEntry, readOnlyByDefault: solReadOnlyByDefault
     });
     const prior = existing.sections.find(section => sectionName(section) === SOL_SERVER);
     const priorArgs = prior && tomlStringArray(prior, 'args');
@@ -321,9 +321,10 @@ export function buildPlan({
     } else plan.push({ file: configFile, data: original });
   }
   return { plan, codexHome, skillDirectory, modelCheck, usesOverride: agentsPath === override, dshInstances: dshPlan, preservedServices, useSchedule,
-    solCoordinatorConfig: solRegistration?.filename ?? null, workbuddyProjectConfig: project?.configPath ?? null };
+    solCoordinatorConfig: solRegistration?.filename ?? null, solConfig: solRegistration?.config ?? null,
+    workbuddyProjectConfig: project?.configPath ?? null };
 }
-function apply(plan, codexHome, skillDirectory) {
+export function apply(plan, codexHome, skillDirectory) {
   assertSkillDirectories(skillDirectory);
   const changed = plan.filter(x => read(x.file) !== x.data);
   if (!changed.length) return console.log('No changes; installation is already up to date.');

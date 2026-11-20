@@ -1,4 +1,4 @@
-<!-- ai-rule-managed: 2026-11-20.unified-dispatch-r1 -->
+<!-- ai-rule-managed: 2026-11-21.unified-dispatch-r2 -->
 # DSH 派发与日程
 
 ## 选择入口

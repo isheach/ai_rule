@@ -12,30 +12,30 @@ Astra 负责总体方向。A 由原生 Sol 执行，外部模式由所选 Harnes
 
 ## Windows 安装
 
-使用当前 Codex 和 DSH 所在的 Windows 用户，准备 Git、Node 22 或更新版本及能正常运行的 DSH headless 配置。DSH 所用路由为 `opencode-go / deepseek-v4.1-flash / max`。已有仓库副本可以直接进入其目录。
+在运行 Codex 和 DSH 的普通 Windows 账户中操作，准备 Git、Node 22 或更新版本及能正常运行的 DSH headless 配置。DSH 所用路由为 `opencode-go / deepseek-v4.1-flash / max`。将示例的 `$sourceRoot` 设为要安装的本机源码副本的绝对路径。按未合并的 PR 或指定提交安装时，先获取并核对该提交。 [固定源码修订](docs/sol-coordinator.md#固定源码修订)
 
 ```powershell
-git clone https://github.com/isheach/ai_rule.git "$env:USERPROFILE\ai_rule"
-Set-Location "$env:USERPROFILE\ai_rule" -ErrorAction Stop
-
-.\scripts\install.ps1 -EnableDsh
-.\scripts\install.ps1 -Apply -EnableDsh
-.\scripts\install.ps1 -Verify
+$sourceRoot = Join-Path ([Environment]::GetFolderPath('UserProfile')) 'ai_rule'
+$manage = Join-Path $sourceRoot 'scripts\manage.mjs'
+& {
+    $ErrorActionPreference = 'Stop'
+    if (-not (Test-Path -LiteralPath $sourceRoot)) {
+        git clone --quiet https://github.com/isheach/ai_rule.git $sourceRoot
+        if ($LASTEXITCODE -ne 0) { throw 'Git 克隆失败' }
+    }
+    node $manage --enable-dsh
+    if ($LASTEXITCODE -ne 0) { throw '安装预览失败' }
+    node $manage --apply --enable-dsh
+    if ($LASTEXITCODE -ne 0) { throw '安装失败' }
+    node $manage --verify
+}
 ```
 
-PowerShell 执行策略限制脚本时，使用等价的 Node 命令。
-
-```powershell
-node .\scripts\manage.mjs --enable-dsh
-node .\scripts\manage.mjs --apply --enable-dsh
-node .\scripts\manage.mjs --verify
-```
-
-第一条命令预览，第二条应用，第三条检查文件与托管注册。DSH 预检查核对现有 CLI、headless 路由和工具参数。若需要手动定位入口，用 `-DshEntry` 或 `--dsh-entry` 指向实际 `@deepseek-ai\dsh\lib\bin.js`。修订本机 headless 配置时，按原 profile 的结构合并相关字段。 [headless 配置示例](config/headless.patch.example.yml)
+三个 Node 调用依次预览、应用以及检查文件与托管注册。DSH 预检查核对现有 CLI、headless 路由和工具参数。若需要手动定位入口，用 `--dsh-entry` 指向实际 `@deepseek-ai\dsh\lib\bin.js`。修订本机 headless 配置时，按原 profile 的结构合并相关字段。 [headless 配置示例](config/headless.patch.example.yml)
 
 新 DSH 服务默认 `workspace-write`，按本次授权和宿主边界工作。可用 `-ReadOnly` 或 `--read-only` 设置服务只读，或以 `permissionMode: "read-only"` 限制单项任务。安装器保留已注册服务的显式只读设置。已有 WorkBuddy 或 HY4 的机器按下方对应文档管理这些入口。
 
-只有当新注册已按宿主支持的方式加载、真实 Sol 可看到并调用工具时，才算本机完成接入。已有任务先由原入口收尾。选择下一项已批准的有用任务验收真实调用者、任务回执和结果即可。 [安装验收](docs/implementation.md)
+在目标 Windows 机核对安装结构，再按实际 Codex 宿主支持的方式加载，由真实 Sol 确认工具可用。已有任务先由原入口收尾。下一项已批准的任务可以核验真实调用者、任务回执和结果。若当前只具备云端源码入口，先完成代码和离线检查，目标机接入以本机证据另行核验。 [安装验收](docs/implementation.md)
 
 ## 可选入口
 
@@ -43,7 +43,7 @@ node .\scripts\manage.mjs --verify
 |---|---|
 | 同一根会话并行多个独立 DSH 任务 | [DSH 根池](docs/root-pool.md) |
 | 宿主按 MCP 服务分配多个独立 DSH 实例 | [DSH 命名实例](docs/multisession.md) |
-| 切换订阅/API Sol，安装 Windows 独立密钥代理并离线验证 | [Sol 协调器与安装步骤](docs/sol-coordinator.md) |
+| 切换订阅/API Sol，按固定提交运行 `scripts/setup-sol.ps1` 并检查本机就绪 | [Sol 协调器与安装步骤](docs/sol-coordinator.md) |
 | 复用既有 WorkBuddy 安装、账户及项目授权 | [WorkBuddy DSF 项目入口](docs/workbuddy-project-entry.md) |
 | 启用官方 CodeBuddy ACP 的 HY4 | [CodeBuddy ACP](docs/codebuddy-acp.md) |
 | DSH 谷时治理及模式 2 实际峰时的 WorkBuddy 交接 | [峰谷调度](docs/offpeak-schedule.md) |
@@ -53,22 +53,22 @@ node .\scripts\manage.mjs --verify
 
 ## 更新规则与回滚
 
-只更新规则及 Skill 时，在每台电脑的实际仓库副本执行：
+只更新规则及 Skill 时，先准备各目标机要安装的源码。更新已发布分支可在其实际副本运行 `git -C $sourceRoot pull --ff-only` 并检查 `HEAD`。安装尚未合并的 PR 或指定提交时，按固定源码流程检出。将 `$sourceRoot` 指向已核对的本机源码绝对路径，然后在目标普通用户账户运行以下命令。 [固定源码修订](docs/sol-coordinator.md#固定源码修订)
 
 ```powershell
-Set-Location "$env:USERPROFILE\ai_rule" -ErrorAction Stop
-git pull --ff-only
-if ($LASTEXITCODE -ne 0) { throw 'Git 同步失败' }
-
-node .\scripts\manage.mjs
-if ($LASTEXITCODE -ne 0) { throw '安装预览失败' }
-node .\scripts\manage.mjs --apply
-if ($LASTEXITCODE -ne 0) { throw '规则安装失败' }
-node .\scripts\manage.mjs --verify
+$manage = Join-Path $sourceRoot 'scripts\manage.mjs'
+& {
+    $ErrorActionPreference = 'Stop'
+    node $manage
+    if ($LASTEXITCODE -ne 0) { throw '安装预览失败' }
+    node $manage --apply
+    if ($LASTEXITCODE -ne 0) { throw '规则安装失败' }
+    node $manage --verify
+}
 ```
 
 无入口选项时，预览只列当前有效的全局 AGENTS 和 `~/.agents/skills/multi-agent-dispatch` 中的 Skill 及其引用。非空 `AGENTS.override.md` 是合并目标。验证时应看到 `rules_current: true`，表示这些文件与当前源码相符。若需更新某个 MCP 注册，按对应入口文档预览并应用。Git 同步的内容在各机器上分别安装，本机配置、凭据、会话及运行目录各自保留。
 
 会话内继续已有工作时，让 Astra 与原 Sol 显式重读已安装规则。现有任务先保留原进程和权限。更新桥接源码或注册后，在任务取得终态时通过宿主支持的方式加载相关服务一次，再确认工具可见。同一已批准项目里的任务输入变更直接随派单传入。
 
-应用命令输出本机备份 `manifest.json`，可用 `.\scripts\install.ps1 -RollbackManifest '<实际 manifest 路径>'` 回滚。安装后又修改过的目标需按哈希冲突提示核对并合并。备份留在本机。离线回归用 `npm test`。 [实现边界与验收](docs/implementation.md)
+应用命令输出本机备份 `manifest.json`，可用 `node $manage --rollback $manifest` 回滚，传入该 manifest 的绝对路径。安装后又修改过的目标需按哈希冲突提示核对并合并。备份留在本机。离线回归用 `npm.cmd --prefix $sourceRoot test`。 [实现边界与验收](docs/implementation.md)

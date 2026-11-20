@@ -17,6 +17,8 @@ $credentialFile = Join-Path $root 'state\credential.dpapi'
 $exe = Join-Path $root 'SolBroker.exe'
 $svc = 'AiRuleSolBroker'
 $node = (Get-Command node.exe -ErrorAction Stop).Source
+$git = (Get-Command git.exe -ErrorAction Stop).Source
+$powershell = Join-Path ([Environment]::SystemDirectory) 'WindowsPowerShell\v1.0\powershell.exe'
 $scratch = Join-Path ([Environment]::GetFolderPath('CommonDocuments')) ('sol-broker-ci-' + [Guid]::NewGuid().ToString('N'))
 $build = Join-Path $native 'build.ps1'
 $fixture = Join-Path $scratch 'NativeTests.exe'
@@ -43,15 +45,17 @@ function New-TestAccount {
     return [PSCustomObject]@{ Name = $name; Password = $password; Sid = $account.SID.Value }
 }
 
-function Invoke-TestUser($Account, [string]$File, [string]$ArgumentLine, [string]$InputText = '') {
+function Invoke-TestUser($Account, [string]$File, [string]$ArgumentLine, [string]$InputText = '',
+    [string]$WorkingDirectory = $scratch, [string]$FixtureProfile) {
     $info = [Diagnostics.ProcessStartInfo]::new()
     $info.FileName = $File
     $info.Arguments = $ArgumentLine
-    $info.WorkingDirectory = $scratch
+    $info.WorkingDirectory = $WorkingDirectory
     $info.Domain = [Environment]::MachineName
     $info.UserName = $Account.Name
     $info.Password = $Account.Password
     $info.LoadUserProfile = $true
+    if ($FixtureProfile) { $info.EnvironmentVariables['USERPROFILE'] = $FixtureProfile }
     $info.UseShellExecute = $false
     $info.CreateNoWindow = $true
     $info.RedirectStandardInput = $true
@@ -76,6 +80,102 @@ function Invoke-TestUser($Account, [string]$File, [string]$ArgumentLine, [string
         return [PSCustomObject]@{ Status = $process.ExitCode; Output = $output.GetAwaiter().GetResult(); Error = $errors.GetAwaiter().GetResult() }
     }
     finally { $process.Dispose() }
+}
+
+function Assert-TestCommand($Result, [string]$Step) {
+    if ($Result.Status -ne 0) { throw "$Step failed (exit $($Result.Status)): $($Result.Error) $($Result.Output)" }
+}
+
+function New-SetupFixture($Account, [string]$Revision) {
+    $home = Join-Path $scratch "ordinary caller's profile"
+    $checkout = Join-Path $home ('reviewed checkout ' + [char]0x9879)
+    $codexHome = Join-Path $home '.codex'
+    $workspace = Join-Path $home 'approved project'
+    $configuration = Join-Path $home 'coordinator.local.json'
+    $pool = Join-Path $home 'pool.local.json'
+    $dsh = Join-Path $home 'never-run.mjs'
+    $archive = Join-Path $scratch 'reviewed-checkout.zip'
+    $null = New-Item -Path $home -ItemType Directory
+    $acl = Get-Acl -LiteralPath $home
+    $sid = [Security.Principal.SecurityIdentifier]::new($Account.Sid)
+    $acl.AddAccessRule([Security.AccessControl.FileSystemAccessRule]::new($sid, 'Modify', 'ContainerInherit, ObjectInherit', 'None', 'Allow'))
+    Set-Acl -LiteralPath $home -AclObject $acl
+    $null = New-Item -Path $codexHome, $workspace -ItemType Directory
+    $gitRoot = '-C "{0}"' -f $checkout
+    $template = Join-Path $home 'git-template'
+    $null = [IO.Directory]::CreateDirectory($template)
+    Assert-TestCommand (Invoke-TestUser $Account $git ('init --template="{0}" "{1}"' -f $template, $checkout) -FixtureProfile $home) 'Initialize checkout under ordinary SID'
+    & $git -C $repository archive --format=zip "--output=$archive" $Revision
+    if ($LASTEXITCODE -ne 0) { throw 'The source checkout fixture could not be archived.' }
+    Expand-Archive -LiteralPath $archive -DestinationPath $checkout
+    [IO.File]::Delete($archive)
+    Assert-TestCommand (Invoke-TestUser $Account $git "$gitRoot -c core.autocrlf=true add --all" -FixtureProfile $home) 'Stage checkout under ordinary SID'
+    Assert-TestCommand (Invoke-TestUser $Account $git "$gitRoot -c user.name=Fixture -c user.email=fixture@example.invalid -c commit.gpgsign=false commit -m fixture" -FixtureProfile $home) 'Pin fixture revision'
+    $head = Invoke-TestUser $Account $git "$gitRoot rev-parse HEAD" -FixtureProfile $home
+    Assert-TestCommand $head 'Read the pinned fixture revision'
+    $fixedRevision = $head.Output.Trim()
+    $toml = Join-Path $codexHome 'config.toml'
+    $prior = "# preserve unrelated registrations`n[mcp_servers.unrelated]`ncommand = `"existing-service`"`n"
+    Set-Content -LiteralPath $toml -Value $prior -NoNewline -Encoding ASCII
+    Set-Content -LiteralPath $dsh -Value "throw Error('The setup must never start DSH.');" -Encoding ASCII
+    @{
+        pool_root = Join-Path $home 'pool'; workspace_root = $workspace; dsh_entry = $dsh
+        schedule_config = Join-Path $checkout 'config\offpeak.schedule.json'; allow_write = $false
+    } | ConvertTo-Json | Set-Content -LiteralPath $pool -Encoding UTF8
+    @{
+        state_dir = Join-Path $home 'sol-state'; pool_config = $pool
+        openai = @{ model = 'gpt-6.2-sol'; reasoning_effort = 'max'; api_key_env = 'OPENAI_API_KEY' }
+    } | ConvertTo-Json | Set-Content -LiteralPath $configuration -Encoding UTF8
+    $entry = Join-Path $checkout 'scripts\setup-sol.ps1'
+    $setupArgs = '-NoLogo -NoProfile -NonInteractive -File "{0}" -CodexHome "{1}" -SolCoordinatorConfig "{2}"' -f $entry, $codexHome, $configuration
+    return [PSCustomObject]@{ Home = $home; Checkout = $checkout; CodexHome = $codexHome; Configuration = $configuration; Revision = $fixedRevision; Arguments = $setupArgs; OriginalToml = $prior }
+}
+
+function Test-SetupPreflight($Account, $Setup) {
+    $base = "$($Setup.Arguments) -ExpectedRevision"
+    $system = [Environment]::SystemDirectory
+    $wrong = Invoke-TestUser $Account $powershell "$base $('0' * 40)" -FixtureProfile $Setup.Home -WorkingDirectory $system
+    if ($wrong.Status -eq 0 -or $wrong.Error -notmatch 'does not match the reviewed deployment commit') { throw "Setup did not reject the wrong revision. $($wrong.Error)" }
+    $tracked = Join-Path $Setup.Checkout 'scripts\sol-install.mjs'
+    $source = [IO.File]::ReadAllBytes($tracked)
+    try {
+        [IO.File]::AppendAllText($tracked, "`r`n// offline changed source fixture`r`n")
+        $dirty = Invoke-TestUser $Account $powershell "$base $($Setup.Revision)" -FixtureProfile $Setup.Home -WorkingDirectory $system
+        if ($dirty.Status -eq 0 -or $dirty.Error -notmatch 'local source differs') { throw "Setup did not reject modified source. $($dirty.Error)" }
+        $crlf = [Text.Encoding]::UTF8.GetString($source).Replace("`r`n", "`n").Replace("`n", "`r`n")
+        [IO.File]::WriteAllText($tracked, $crlf, [Text.UTF8Encoding]::new($false))
+        $plan = Invoke-TestUser $Account $powershell "$base $($Setup.Revision)" -FixtureProfile $Setup.Home -WorkingDirectory $system
+        Assert-TestCommand $plan 'Preflight from Windows system32 with a CRLF checkout file'
+        if ($plan.Output -notmatch 'SOL_BROKER_UNAVAILABLE|SOL_BROKER_NOT_READY' -or $plan.Output -notmatch '"pool_allow_write"\s*:\s*false') {
+            throw 'Preflight reported an unexpected readiness or scope.'
+        }
+    }
+    finally { [IO.File]::WriteAllBytes($tracked, $source) }
+}
+
+function Test-SetupApply($Account, $Setup) {
+    $command = "$($Setup.Arguments) -ExpectedRevision $($Setup.Revision) -Apply"
+    $system = [Environment]::SystemDirectory
+    $first = Invoke-TestUser $Account $powershell $command -FixtureProfile $Setup.Home -WorkingDirectory $system
+    Assert-TestCommand $first 'Apply setup using the existing ready broker'
+    if ($first.Output -notmatch '"rules_current"\s*:\s*true' -or $first.Output -notmatch '"structure_valid"\s*:\s*true') { throw 'Setup did not verify the installed rules and Sol MCP registration.' }
+    $coordinator = Get-Content -LiteralPath $Setup.Configuration -Raw | ConvertFrom-Json
+    if ($coordinator.openai.credential_source -ne 'windows-broker' -or $coordinator.openai.PSObject.Properties['api_key_env']) {
+        throw 'Setup did not migrate the existing credential reference in place.'
+    }
+    $toml = Get-Content -LiteralPath (Join-Path $Setup.CodexHome 'config.toml') -Raw
+    if (-not $toml.StartsWith($Setup.OriginalToml)) { throw 'Setup changed an unrelated MCP registration.' }
+    $second = Invoke-TestUser $Account $powershell $command -FixtureProfile $Setup.Home -WorkingDirectory $system
+    Assert-TestCommand $second 'Reapply setup with an existing broker and config'
+    if ($second.Output -notmatch 'No changes; installation is already up to date\.') { throw 'The second setup was not idempotent.' }
+}
+
+function Invoke-ReviewedElevation([string]$Encoded) {
+    # No UAC consent UI is available to the CI runner, which is already elevated.
+    # Run the same encoded bootstrap and keep stderr for the digest assertion.
+    $ErrorActionPreference = 'Continue'
+    $output = & $powershell -NoLogo -NoProfile -NonInteractive -EncodedCommand $Encoded 2>&1
+    return [PSCustomObject]@{ Status = $LASTEXITCODE; Output = ($output | Out-String) }
 }
 
 function Assert-Status([string]$Step, $Reply, [bool]$Ready) {
@@ -138,7 +238,23 @@ try {
 
     $allowed = New-TestAccount
     $unlisted = New-TestAccount
-    & $install -ClientSid $allowed.Sid -ProjectId 'proj_ci_example' -OrganizationId 'org-ci-example'
+    $revision = (& $git -C $repository rev-parse HEAD).Trim()
+    if ($LASTEXITCODE -ne 0) { throw 'Could not read the CI checkout revision.' }
+    $setup = New-SetupFixture $allowed $revision
+    Test-SetupPreflight $allowed $setup
+    $bundle = Join-Path $scratch "broker transfer's bundle.json"
+    $prepare = Join-Path $PSScriptRoot 'sol-setup-fixture.mjs'
+    $encoded = & $node $prepare $repository $git $revision $bundle $allowed.Sid
+    if ($LASTEXITCODE -ne 0) { throw 'Could not prepare the reviewed broker installation.' }
+    $checkedBundle = [IO.File]::ReadAllBytes($bundle)
+    [IO.File]::AppendAllText($bundle, 'modified')
+    $deniedBundle = Invoke-ReviewedElevation $encoded
+    if ($deniedBundle.Status -eq 0 -or $deniedBundle.Output -notmatch 'changed after revision verification' -or (Test-Path -LiteralPath $root)) {
+        throw "The protected bootstrap did not reject a changed bundle: $($deniedBundle.Output)"
+    }
+    [IO.File]::WriteAllBytes($bundle, $checkedBundle)
+    $installResult = Invoke-ReviewedElevation $encoded
+    if ($installResult.Status -ne 0) { throw "The protected broker install failed: $($installResult.Output)" }
     $installed = $true
     $statusJson = '{"op":"status"}'
     Assert-Status 'Authorized native status before enrollment' (Invoke-TestUser $allowed $exe 'client' $statusJson) $false
@@ -154,6 +270,12 @@ try {
     & $fixture 'ci-enroll'
     if ($LASTEXITCODE -ne 0) { throw 'Offline synthetic enrollment failed.' }
     Assert-Status 'Authorized native status after enrollment' (Invoke-TestUser $allowed $exe 'client' $statusJson) $true
+    [IO.File]::Delete($bundle)
+    $encoded = & $node $prepare $repository $git $revision $bundle $allowed.Sid 'Enroll'
+    if ($LASTEXITCODE -ne 0) { throw 'Could not prepare existing broker policy validation.' }
+    $existingResult = Invoke-ReviewedElevation $encoded
+    if ($existingResult.Status -ne 0) { throw "The protected broker did not reuse the existing key: $($existingResult.Output)" }
+    Test-SetupApply $allowed $setup
     if ((Invoke-TestUser $allowed $fixture 'ci-deny-state').Status -ne 0) { throw 'The API client SID could read the broker credential file.' }
     [IO.File]::WriteAllBytes($cipherFixture, [IO.File]::ReadAllBytes($credentialFile))
     if ((Invoke-TestUser $allowed $fixture ('ci-deny-decrypt "{0}"' -f $cipherFixture)).Status -ne 0) {
@@ -183,9 +305,11 @@ finally {
     try { if ($installed) { & $install -Uninstall } }
     finally {
         foreach ($accountName in $accountNames) { Remove-LocalUser -Name $accountName -ErrorAction Continue }
-        foreach ($leaf in @('NativeTests.exe', 'status.mjs', 'broker.mjs', 'encrypted-test-copy.bin')) {
+        foreach ($leaf in @('NativeTests.exe', 'status.mjs', 'broker.mjs', 'encrypted-test-copy.bin', "broker transfer's bundle.json", 'reviewed-checkout.zip')) {
             [IO.File]::Delete((Join-Path $scratch $leaf))
         }
+        $fixtureHome = Join-Path $scratch "ordinary caller's profile"
+        if (Test-Path -LiteralPath $fixtureHome) { Remove-Item -LiteralPath $fixtureHome -Recurse -Force }
         [IO.Directory]::Delete($scratch, $false)
     }
 }

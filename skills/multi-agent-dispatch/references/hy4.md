@@ -1,4 +1,4 @@
-<!-- ai-rule-managed: 2026-11-20.unified-dispatch-r1 -->
+<!-- ai-rule-managed: 2026-11-21.unified-dispatch-r2 -->
 # HY4 与预准入回退
 
 ## 显式 HY4

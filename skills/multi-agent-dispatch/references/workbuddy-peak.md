@@ -1,4 +1,4 @@
-<!-- ai-rule-managed: 2026-11-20.unified-dispatch-r1 -->
+<!-- ai-rule-managed: 2026-11-21.unified-dispatch-r2 -->
 # 模式 2 峰时 WorkBuddy DSF 交接
 
 此流程在 [DSH 模式 2](dsh.md#schedulemode-如何作用) 的实际峰段使用。已受理任务继续由原执行者处理。订阅 Sol 执行下列步骤。API Sol 通过本机已配置的 WorkBuddy DSF 连接完成同一领取和回填合同。

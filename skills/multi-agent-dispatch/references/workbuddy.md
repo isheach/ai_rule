@@ -1,4 +1,4 @@
-<!-- ai-rule-managed: 2026-11-20.unified-dispatch-r1 -->
+<!-- ai-rule-managed: 2026-11-21.unified-dispatch-r2 -->
 # WorkBuddy DSF
 
 订阅 Sol 使用宿主加载的 `deepseek-v4-flash-workbuddy`。API Sol 使用本机协调配置所选的 WorkBuddy 连接。项目入口通过 `workbuddy.project_config` 指向同一本机项目 JSON，可直接复用项目授权。API 交接还须符合协调器配置的工作区和权限上限。

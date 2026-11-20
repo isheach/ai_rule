@@ -56,15 +56,19 @@ function Protect-Directory([string]$Location, [bool]$IsState) {
     Set-Acl -LiteralPath $Location -AclObject $acl
 }
 
-function Protect-Policy {
+function Protect-InstalledFile([string]$Location, [bool]$IsExecutable) {
     $acl = [Security.AccessControl.FileSecurity]::new()
     $acl.SetOwner($adminSid)
     $acl.SetAccessRuleProtection($true, $false)
     foreach ($sid in @($systemSid, $adminSid)) {
         $acl.AddAccessRule([Security.AccessControl.FileSystemAccessRule]::new($sid, 'FullControl', 'Allow'))
     }
-    $acl.AddAccessRule([Security.AccessControl.FileSystemAccessRule]::new($serviceSid, 'Read', 'Allow'))
-    Set-Acl -LiteralPath $policyFile -AclObject $acl
+    $rights = if ($IsExecutable) { 'ReadAndExecute' } else { 'Read' }
+    $acl.AddAccessRule([Security.AccessControl.FileSystemAccessRule]::new($serviceSid, $rights, 'Allow'))
+    if ($IsExecutable) {
+        $acl.AddAccessRule([Security.AccessControl.FileSystemAccessRule]::new($authenticatedSid, 'ReadAndExecute', 'Allow'))
+    }
+    Set-Acl -LiteralPath $Location -AclObject $acl
 }
 
 function Invoke-ServiceTool([string[]]$ServiceArguments) {
@@ -159,13 +163,14 @@ try {
     $null = New-Item -Path $state -ItemType Directory
     Protect-Directory $state $true
     & (Join-Path $PSScriptRoot 'build.ps1') -OutputPath $exe
+    Protect-InstalledFile $exe $true
 
     $policy = [ordered]@{ caller_sid = $caller.Value; model = $Model; reasoning_effort = $ReasoningEffort.ToLowerInvariant() }
     if ($ProjectId) { $policy.project = $ProjectId }
     if ($OrganizationId) { $policy.organization = $OrganizationId }
     $json = $policy | ConvertTo-Json -Compress
     [IO.File]::WriteAllText($policyFile, '', [Text.UTF8Encoding]::new($false))
-    Protect-Policy
+    Protect-InstalledFile $policyFile $false
     [IO.File]::WriteAllText($policyFile, $json, [Text.UTF8Encoding]::new($false))
 
     [AiRuleSolBrokerInstaller]::Create($name, $image, $account)
