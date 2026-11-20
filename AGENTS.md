@@ -1,6 +1,6 @@
 # isheach/ai_rule — 多代理长期规则
 
-规则修订为 2026-11-20.sol-coordinator-r1，HY4 预准入策略为 2026-11-13.hy4-preadmission-r1。桥接器和安装器版本 v0.3.0。
+规则修订为 2026-11-20.workbuddy-project-r1，HY4 预准入策略为 2026-11-13.hy4-preadmission-r1。桥接器和安装器版本 v0.3.0。
 本文件是用户确认的长期偏好，不是绕过宿主安全策略的授权。遵守当前会话明确要求及更高优先级指令。
 安装后在新会话加载；GitHub 上的文件本身不会远程注入其他电脑。
 
@@ -86,7 +86,7 @@ Sol 向指定执行者交付完整目标、输入、cwd、授权边界、输出�
 
 - HY4：MCP `hy4-workbuddy` 历史入口保留；新增**可选**官方 CodeBuddy ACP 适配器 `bridges/hy4/`，固定模型 `hy4free`（官方名 Hy4）、无全局工具；能力必须显式选择 `text-only` / `workspace-read` / `workspace-write`。workspace 能力受本地 manifest 开关、canonical cwd、`writeScopes`（目录 + create/replace/edit 子集）或精确 `writes`、task 授权和 `allow_once` 回调约束；不要求预计算内容，可选 `content_sha256` 仅用于 full-content create/write。每次 handshake/prompt 前核对当前 catalog 对 hy4free 明示 `x0.00 credits`，缺失/非零 fail closed，绝不换 `hy4std`/auto/其他模型；这是目录证据，不是账单/provider attestation。命令仅在本机 manifest 显式开启且任务逐条授权时可选；vendor 默认可能自动放行安全命令，不能据此声称所有命令都经 ACP callback 或 OS 隔离。Windows 临时标准 stdio 已由 Sol 实际验证读、create/Edit 和一次授权命令；尚未声明每台机器已注册/宿主已加载。配置名不等于 provider/账单证明；未启用的电脑继续 DSH/已有后端。详见 `docs/codebuddy-acp.md` 与 `docs/hy4-fallback.md`。
 - DSH 主后端与 HY4 回退：默认始终 DSH；`bridges/dsh/routing.mjs` 是预准入策略。CodeBuddy ACP 适配器仅在显式本地授权且 readiness/pin/catalog 验证通过时节入；没有显式授权、HY4 未 ready、或任何受理后状态时，不回退。临时标准 stdio 的隔离 DSH 预准入拒绝 + 真实 HY4 native 文件任务已由 Sol 验证；这不等于每机 MCP 注册或 OS 隔离。CodeBuddy/WorkBuddy 共享中国账号 credits，不把目录价当账单证明。
-- WorkBuddy DSF：MCP `deepseek-v4-flash-workbuddy`；历史配置模型 `deepseek-v4-flash`，不得擅自重命名为 V4.1。
+- WorkBuddy DSF：MCP `deepseek-v4-flash-workbuddy`，固定模型 `deepseek-v4-flash`。本机可一次迁移至下述项目入口，或继续使用已有定制桥接器。
 - DSH：订阅来源使用原生 Sol → `dsh-opencode-go` 或 `dsh-root-pool`；API 来源由 `sol-coordinator` 使用同一根池执行接口。两条链均使用 DSH headless → `opencode-go / deepseek-v4.1-flash`，配置推理档位 `max`。
 - OpenCode Go 只是模型服务和额度来源，不启动 OpenCode CLI，不叠加 OpenCode Harness。
 - 没有真实工具调用、退出码及结果证据，不得宣称执行成功。配置值、模型自我介绍都不等于服务端型号或账单证明。
@@ -124,8 +124,15 @@ AGENTS/Skill 定义宿主的行为边界。API 协调器按已验证根保存来
 继续项目时读取经批准的交接记录；不要仅凭此规则文件推断上次任务进度。
 本机只部署 DSH 是合法配置。第二台电脑暂不部署 WorkBuddy，不因两个 WorkBuddy 注册检查为 false 就补装或视为 DSH 失败。
 
+## WorkBuddy DSF 项目入口
+
+- 订阅 Sol 和 API Sol 使用各自已配置的 `deepseek-v4-flash-workbuddy` 入口。项目入口使用本机锁定的 WorkBuddy 实际 CLI，派发前核对 `deepseek-v4-flash` 目录及选择回执，并核验执行流实际模型。使用默认厂商权限模式。模型、版本、目录或权限核验失败时报告阻塞。
+- 本机一次配置已获准的物理项目根及其读、写、原生命令权限。Sol 以当前绝对 `cwd` 和任务所需 scope 调用 `get_task_bridge_status`，将回执中的 `project_id` 填入 `run_workbuddy_task` 的 `projectId`，传任务、原幂等键及批准的权限。`writes`、`writeScopes` 和 `commands` 可进一步收窄任务范围。`authorizationNote` 可以引用已有的项目授权。命令进程使用当前 OS 账户权限，遵守宿主和审批边界。
+- 同一项目中从一篇论文切到另一篇，或替换脚本、数据、子目录、任务名时，Sol 以新任务书和新幂等键继续派单，无需新增 profile、刷新服务或再次确认已有授权。来源和峰谷切换也沿用原项目授权。只有实际扩大获准项目或权限时才取得相应授权。交接保留相关可共享记忆和既有证据。
+- 失联时优先按原键调用 `get_workbuddy_task` 查原回执。已有定制入口按实际 schema 沿用已授权 profile。单次迁移、回滚和本机验收按 `docs/workbuddy-project-entry.md`，活动任务由原入口和原协调者收尾。
+
 ## 可选 DSH 谷时执行和定时停工
 
 峰谷选项适用于当前 DSH 会话。模式 1 不应用日历，也是新会话默认值和“关闭峰谷”的含义。模式 2 谷时按原日历准入 DSH，实际峰时的新任务选择 WorkBuddy DSF。模式 3 延续原峰谷及其可选 HY4 回退，对应“开启峰谷”。默认峰时是工作日 UTC+8 09:00–12:00、14:00–18:00。模式 2 和 3 均保留 DSH 提前十分钟的准入门禁、60 秒预算余量和硬停。已因峰时停止的任务保持 `schedule_stopped`。
 
-模式 2 的峰时新任务须从正常 DSH 派单拿到 `workbuddy_pending`。原生 Sol 核实宿主加载的 `deepseek-v4-flash-workbuddy`，API Sol 由其工具适配器核实本机显式配置的同一 WorkBuddy 桥接接口。核实 ready、固定 `deepseek-v4-flash` 与获批的权限 schema 后，领取一次性交接并调用 `run_workbuddy_task`。结果写回交接，保留原键、所属根或实例、真实任务 ID 和终态。缺少服务或授权就记录阻塞。受理不明、已受理、续跑、修复、取消和已停止任务保留原后端与状态。明确的 WorkBuddy 续跑仅在模式 2 的实际峰段，使用同目录已完成记录和真实 WorkBuddy 会话。完整流程见 `docs/offpeak-schedule.md`。
+模式 2 的峰时新任务须从正常 DSH 派单拿到 `workbuddy_pending`。订阅 Sol 使用宿主加载的 WorkBuddy DSF，API Sol 使用其显式配置的 WorkBuddy DSF。核实 ready、固定 `deepseek-v4-flash` 及原任务的项目、目录和权限后，领取一次性交接并在领取有效期内调用 `run_workbuddy_task`。结果写回交接，保留原键、所属根或实例、真实任务 ID 和终态。缺少服务或授权就记录阻塞。受理不明、已受理、续跑、修复、取消和已停止任务保留原后端与状态。明确的 WorkBuddy 续跑仅在模式 2 的实际峰段，使用同目录已完成记录和真实 WorkBuddy 会话。完整流程见 `docs/offpeak-schedule.md`。

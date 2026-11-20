@@ -5,11 +5,19 @@ import os from 'node:os';
 import crypto from 'node:crypto';
 import { fileURLToPath } from 'node:url';
 import { discoverDsh, preflight, VERSION, INSTANCE_DEFAULT, validateInstanceName, runtimeForInstance, serverNameForInstance, instanceFromServerName, pathKey } from '../bridges/dsh/core.mjs';
-import { buildSolRegistration, findMcpRegistration, solEnvironmentNames, solRegistrationStatus, tomlStringArray, SOL_SERVER } from './sol-install.mjs';
+import { WORKBUDDY_DSF } from '../bridges/workbuddy/dispatch.mjs';
+import { loadProjectConfig, PROJECT_SERVER_ENTRY } from '../bridges/workbuddy/project-config.mjs';
+import {
+  buildSolRegistration, findMcpRegistration, hasInlineEnv, isNodeCommand, solEnvironmentNames, solRegistrationStatus,
+  tomlString, tomlStringArray, SOL_SERVER
+} from './sol-install.mjs';
 
 const MANAGED_START = '# BEGIN isheach/ai_rule managed';
 const MANAGED_END = '# END isheach/ai_rule managed';
 const DSH_SERVER = 'dsh-opencode-go';
+const DSF_SERVER = WORKBUDDY_DSF.server_name;
+const MCP_TABLE = String.raw`(?:mcp_servers|"mcp_servers"|'mcp_servers')`;
+const DSF_KEY = `(?:${DSF_SERVER}|"${DSF_SERVER}"|'${DSF_SERVER}')`;
 export function mergeBlock(original, content, kind) {
   const start = kind === 'toml' ? MANAGED_START : '<!-- BEGIN isheach/ai_rule managed -->';
   const end = kind === 'toml' ? MANAGED_END : '<!-- END isheach/ai_rule managed -->';
@@ -64,17 +72,66 @@ function argValue(args, name) {
   return args[i + 1];
 }
 
+function removeLegacyWorkBuddy(toml) {
+  // Accept the standard table forms only. A multiline string can contain
+  // table-looking text, so leave unusual files for a deliberate local edit.
+  if (toml.includes('"""') || toml.includes("'''")) {
+    throw Error('The existing config has multiline TOML strings. Back it up and remove the old WorkBuddy DSF entry locally before installing the project entry.');
+  }
+  const tableName = new RegExp(`^${MCP_TABLE}[\\t ]*\\.[\\t ]*${DSF_KEY}(?:[\\t ]*\\.|[\\t ]*$)`);
+  const tables = [...toml.matchAll(/^[\t ]*\[\[?([^\]\r\n]+)\]\]?[\t ]*(?:#[^\r\n]*)?\r?$/gm)];
+  let result = toml;
+  for (let index = tables.length - 1; index >= 0; index--) {
+    const section = tables[index];
+    if (!tableName.test(section[1].trim())) continue;
+    const next = tables[index + 1]?.index ?? toml.length;
+    const body = toml.slice(section.index + section[0].length, next);
+    // Keep trailing comments and whitespace associated with the next table,
+    // including our managed block marker when it follows this service.
+    const tail = body.match(/(?:\r?\n[\t ]*(?:#[^\r\n]*)?)+\s*$/)?.[0] ?? '';
+    result = result.slice(0, section.index) + tail.replace(/^\r?\n/, '') + result.slice(next);
+  }
+  return result;
+}
+
+function assertStandardWorkBuddyRegistration(toml) {
+  const assignment = new RegExp(`^[\\t ]*(?:${MCP_TABLE}[\\t ]*\\.[\\t ]*)?${DSF_KEY}[\\t ]*[.=]`, 'm');
+  const inline = new RegExp(`^[\\t ]*${MCP_TABLE}[\\t ]*=[\\t ]*\\{[^\\r\\n]*${DSF_KEY}[\\t ]*=`, 'm');
+  if (assignment.test(toml) || inline.test(toml)) {
+    throw Error('The existing WorkBuddy DSF registration uses an unsupported TOML form. Back it up and remove that service locally before installing the project entry.');
+  }
+}
+
+function projectRegistrationStatus(section) {
+  const args = section && tomlStringArray(section, 'args');
+  if (!args || !path.isAbsolute(args[0] ?? '') || pathKey(args[0]) !== pathKey(PROJECT_SERVER_ENTRY)) return null;
+  try {
+    const command = tomlString(section, 'command');
+    const cwd = tomlString(section, 'cwd');
+    if (!isNodeCommand(command) || !path.isAbsolute(command) || !fs.statSync(command).isFile() ||
+      !cwd || !path.isAbsolute(cwd) || !fs.statSync(cwd).isDirectory() || !fs.statSync(PROJECT_SERVER_ENTRY).isFile() ||
+      args.length !== 3 || args[1] !== '--config' || hasInlineEnv(section, section, DSF_SERVER) ||
+      /^[\t ]*(?:enabled\s*=\s*false\b|env_vars\s*=)/m.test(section)) {
+      throw Error('The WorkBuddy project registration has invalid transport settings.');
+    }
+    loadProjectConfig(args[2]);
+    return { structure_valid: true };
+  } catch { return { structure_valid: false }; }
+}
+
 const solBridge = path.join(repo, 'bridges', 'sol', 'server.mjs');
 
 export function buildPlan({
   home = os.homedir(), codexHome = process.env.CODEX_HOME || path.join(home, '.codex'),
-  enableDsh = false, dshEntry, allowWrite = false, readOnly = false, workbuddyBridge,
+  enableDsh = false, dshEntry, allowWrite = false, readOnly = false, workbuddyBridge, workbuddyProjectConfig, replaceWorkBuddyDsf = false,
   offpeakSchedule = false, disableOffpeakSchedule = false, dshInstances = [], removeDshInstances = [],
   solCoordinatorConfig, solWorkspaceRoot, solModel, solReasoningEffort
 } = {}) {
   codexHome = path.resolve(codexHome);
   if (allowWrite && readOnly) throw Error('Cannot combine --allow-write and --read-only.');
   if ((allowWrite || readOnly) && !enableDsh) throw Error('DSH permission options require --enable-dsh.');
+  if (workbuddyBridge && workbuddyProjectConfig) throw Error('Install the legacy WorkBuddy bridge and the DSF project entry separately.');
+  if (replaceWorkBuddyDsf && !workbuddyProjectConfig) throw Error('--replace-workbuddy-dsf requires --workbuddy-project-config.');
   const permissionArgs = previous => {
     if (readOnly || (!allowWrite && previous?.includes('--read-only'))) return ['--read-only'];
     if (allowWrite || previous?.includes('--allow-write')) return ['--allow-write'];
@@ -97,7 +154,20 @@ export function buildPlan({
   ];
   let modelCheck = null;
   const configFile = path.join(codexHome, 'config.toml');
-  const original = read(configFile);
+  let original = read(configFile);
+  const project = workbuddyProjectConfig ? loadProjectConfig(workbuddyProjectConfig) : null;
+  if (project) {
+    const old = managedParts(original);
+    assertStandardWorkBuddyRegistration(original);
+    // Call the standard lookup on the whole file too, to detect duplicates.
+    findMcpRegistration(original, DSF_SERVER);
+    const external = findMcpRegistration(old.outside, DSF_SERVER);
+    const managed = old.sections.find(section => sectionName(section) === DSF_SERVER);
+    if (external !== null || (managed && !projectRegistrationStatus(managed))) {
+      if (!replaceWorkBuddyDsf) throw Error('Existing WorkBuddy DSF service requires explicit --replace-workbuddy-dsf for the one-time project entry migration.');
+      if (external !== null) original = removeLegacyWorkBuddy(original);
+    }
+  }
   const existing = managedParts(original);
   const oldDefaultSection = existing.sections.find(section => sectionName(section) === DSH_SERVER);
   const oldDefaultArgs = oldDefaultSection ? tomlArray(oldDefaultSection) : null;
@@ -156,6 +226,7 @@ export function buildPlan({
       parts.push(`[mcp_servers.${name}]`, `command = ${JSON.stringify(process.execPath)}`, `args = ${JSON.stringify([entry])}`, `cwd = ${JSON.stringify(path.dirname(entry))}`, 'tool_timeout_sec = 3700', `[mcp_servers.${name}.env]`, `WB_MODEL = ${JSON.stringify(model)}`, 'WB_SKIP_PERMISSIONS = "false"', '');
     }
   }
+  if (project) parts.push(mcpSection(DSF_SERVER, [PROJECT_SERVER_ENTRY, '--config', project.configPath]));
   let solRegistration = null;
   if (solCoordinatorConfig || solWorkspaceRoot || solModel || solReasoningEffort) {
     if (findMcpRegistration(existing.outside, SOL_SERVER) !== null) {
@@ -175,7 +246,7 @@ export function buildPlan({
     plan.push(...solRegistration.files);
     parts.push(mcpSection(SOL_SERVER, [solBridge, '--config', solRegistration.filename], solEnvironmentNames(solRegistration.config)));
   }
-  const configTouched = enableDsh || Boolean(workbuddyBridge) || removeNames.length > 0 || Boolean(solRegistration);
+  const configTouched = enableDsh || Boolean(workbuddyBridge || project) || removeNames.length > 0 || Boolean(solRegistration);
   if (configTouched) {
     const old = existing;
     const oldSections = old.sections;
@@ -217,7 +288,7 @@ export function buildPlan({
     } else plan.push({ file: configFile, data: original });
   }
   return { plan, codexHome, modelCheck, usesOverride: agentsPath === override, dshInstances: dshPlan, preservedServices, useSchedule,
-    solCoordinatorConfig: solRegistration?.filename ?? null };
+    solCoordinatorConfig: solRegistration?.filename ?? null, workbuddyProjectConfig: project?.configPath ?? null };
 }
 function apply(plan, codexHome) {
   const changed = plan.filter(x => read(x.file) !== x.data);
@@ -309,7 +380,8 @@ export function verifyInstallation({ home = os.homedir(), codexHome = process.en
     dsh_schedule_consistent: new Set(instances.map(x => x.schedule_enabled)).size <= 1,
     dsh_schedule_config_valid: instances.every(x => !x.schedule_enabled || x.schedule_config_exists),
     workbuddy_hy4_registered: /\[mcp_servers\.hy4-workbuddy\]/.test(config),
-    workbuddy_deepseek_registered: /\[mcp_servers\.deepseek-v4-flash-workbuddy\]/.test(config),
+    workbuddy_deepseek_registered: findMcpRegistration(config, DSF_SERVER) !== null,
+    workbuddy_dsf_project: projectRegistrationStatus(managed.sections.find(section => sectionName(section) === DSF_SERVER)),
     sol_coordinator: solRegistrationStatus({
       managedSection: managed.sections.find(section => sectionName(section) === SOL_SERVER), outside: managed.outside, bridgeEntry: solBridge
     }),
@@ -326,11 +398,13 @@ export function main(args) {
     const checks = verifyInstallation({ home, codexHome });
     console.log(JSON.stringify(checks, null, 2));
     if (!checks.effective_agents_has_rules || !checks.skill_installed || !checks.dsh_structure_valid
-      || checks.sol_coordinator.structure_valid === false) process.exitCode = 1;
+      || checks.sol_coordinator.structure_valid === false || checks.workbuddy_dsf_project?.structure_valid === false) process.exitCode = 1;
     return;
   }
   const result = buildPlan({ home, codexHome, enableDsh: args.includes('--enable-dsh'), dshEntry: option(args, '--dsh-entry'), allowWrite: args.includes('--allow-write'), readOnly: args.includes('--read-only'),
-    workbuddyBridge: option(args, '--workbuddy-bridge'), offpeakSchedule: args.includes('--offpeak-schedule'), disableOffpeakSchedule: args.includes('--disable-offpeak-schedule'),
+    workbuddyBridge: option(args, '--workbuddy-bridge'), workbuddyProjectConfig: option(args, '--workbuddy-project-config'),
+    replaceWorkBuddyDsf: args.includes('--replace-workbuddy-dsf'), offpeakSchedule: args.includes('--offpeak-schedule'),
+    disableOffpeakSchedule: args.includes('--disable-offpeak-schedule'),
     dshInstances: optionValues(args, '--dsh-instance'), removeDshInstances: optionValues(args, '--remove-dsh-instance'),
     solCoordinatorConfig: option(args, '--sol-coordinator-config'), solWorkspaceRoot: option(args, '--sol-workspace-root'),
     solModel: option(args, '--sol-model'), solReasoningEffort: option(args, '--sol-reasoning-effort') });
@@ -340,6 +414,7 @@ export function main(args) {
   for (const change of result.plan) console.log(`${read(change.file) === change.data ? 'UNCHANGED' : 'MERGE/INSTALL'} ${change.file}`);
   if (result.usesOverride) console.log('Existing nonempty AGENTS.override.md is the effective global file; it will receive the managed block.');
   if (result.solCoordinatorConfig) console.log('Sol coordinator registration uses ' + result.solCoordinatorConfig + '. New chats default to subscription. API verification is separate.');
+  if (result.workbuddyProjectConfig) console.log('WorkBuddy DSF project registration uses ' + result.workbuddyProjectConfig + '. Local SDK and model readiness are verified when the service is used.');
   if (result.modelCheck) console.log(`DSH ${result.modelCheck.version}: configured route verified; no paid API call performed.`);
   if (args.includes('--apply')) apply(result.plan, result.codexHome);
   else console.log('No files changed. Re-run with --apply after reviewing the plan.');

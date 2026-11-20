@@ -4,6 +4,7 @@ import { runtimeBase } from '../dsh/core.mjs';
 import { contextDirFor } from '../pool/context.mjs';
 import { loadPoolConfig, validatePoolConfig } from '../pool/service.mjs';
 import { WORKBUDDY_DSF } from '../workbuddy/dispatch.mjs';
+import { loadProjectConfig, PROJECT_CONTRACT, PROJECT_SERVER_ENTRY } from '../workbuddy/project-config.mjs';
 
 export const SERVICE = 'sol-coordinator';
 export const SAFE_KEY = /^[A-Za-z0-9_.:-]{1,100}$/;
@@ -83,6 +84,13 @@ function fields(value, names, required, label) {
 
 function loadWorkBuddy(value, reservedEnv) {
   if (value === undefined) return null;
+  const resultDefaults = { status: 'status', model: 'model', taskId: 'task_id', sessionId: 'session_id', answer: 'answer' };
+  if (value && Object.hasOwn(value, 'project_config')) {
+    object(value, ['project_config'], 'workbuddy');
+    const project = loadProjectConfig(value.project_config);
+    return { command: process.execPath, args: [PROJECT_SERVER_ENTRY, '--config', project.configPath],
+      cwd: path.dirname(PROJECT_SERVER_ENTRY), envVars: [], projectContract: PROJECT_CONTRACT, resultFields: resultDefaults };
+  }
   const wb = object(value, ['command', 'args', 'cwd', 'env', 'env_vars', 'arguments', 'profiles', 'status_fields', 'result_fields'], 'workbuddy');
   const command = existing(wb.command, 'workbuddy.command', 'file');
   if (process.platform === 'win32' && !/\.exe$/i.test(command)) throw Error('workbuddy.command must be a Windows executable, with no shell wrapper.');
@@ -110,7 +118,7 @@ function loadWorkBuddy(value, reservedEnv) {
     command, cwd, args: wb.args, envVars, profiles,
     arguments: fields(wb.arguments, ['task', 'cwd', 'profile', 'session', 'timeoutMs'], ['task', 'cwd', 'profile'], 'workbuddy.arguments'),
     statusFields: fields(wb.status_fields ?? { ready: 'ready', model: 'model' }, ['ready', 'model'], ['ready', 'model'], 'workbuddy.status_fields'),
-    resultFields: fields(wb.result_fields ?? { status: 'status', model: 'model', taskId: 'task_id', sessionId: 'session_id', answer: 'answer' },
+    resultFields: fields(wb.result_fields ?? resultDefaults,
       ['status', 'model', 'taskId', 'sessionId', 'answer'], ['status', 'taskId', 'sessionId', 'answer'], 'workbuddy.result_fields')
   };
 }

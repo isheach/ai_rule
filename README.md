@@ -14,11 +14,11 @@
 | 安装预览、合并、备份、冲突检测、回滚 | 已实现；不覆盖原有全局配置 |
 | DSH 原生 headless stdio MCP | 已实现；同步/异步提交、等待、取消、回执、幂等、独占锁 |
 | 同机 DSH 多实例 | 已实现；默认服务加命名服务，各自独立 runtime、锁、回执、幂等域和会话所有权；不自动按聊天身份注入路由 |
-| WorkBuddy 两个入口 | 原样保留；可注册用户已准备好的完整桥接器；电脑 B 暂不部署 |
+| WorkBuddy DSF 项目入口 | 可选迁移到同名 `deepseek-v4-flash-workbuddy`；固定 WorkBuddy `deepseek-v4-flash`，已批准项目内换论文、脚本和数据可直接派单；真实 WorkBuddy 验收在本机进行 |
+| 已有 WorkBuddy 定制入口 | 默认保留 DSF 和 HY4 注册；可注册用户已准备好的完整桥接器；电脑 B 暂不部署 |
 | DSH→HY4 预准入回退 | **已接入临时验证**：`bridges/dsh/routing.mjs` + opt-in endpoint；Windows 临时标准 stdio 中隔离 DSH 预准入拒绝后真实 HY4 native 文件任务已完成；每机注册/宿主加载仍需各自验收 |
 | CodeBuddy ACP Hy4 适配器 | **可选实现并已临时验证**：`bridges/hy4/`，固定 `hy4free`；显式 `text-only`/`workspace-read`/`workspace-write`；写任务支持 canonical cwd、`writeScopes` 和可选精确 `writes`；每次 handshake/prompt 前要求 catalog 明示 `x0.00 credits`，缺失/非零 fail closed；目录价不是账单证明；未声明每机已注册 |
 | Root chat DSH pool | **已实现并临时验证**：`bridges/pool/server.mjs` opt-in stdio MCP + 严格 handle/operation、按根 TaskManager/Hy4/Routing、host 父链与短期 context、running cap 3；Windows 临时标准 stdio 验证真实单根两任务和两个命名实例；未声明每机已注册/宿主已加载 |
-| 现有 WorkBuddy 自定义源码迁移 | **未做**：当前不能读取用户本机完整源码，不能重建授权模块 |
 | 原生 Sol/Luna 的模型 ID 和子代理配置 | 复用本机已有配置，不按角色名猜造 ID |
 | 本机 DSH + Go 与 Codex 端到端验收 | 用户反馈两台电脑均通过文本/原生只读工具调用；未独立读取本机回执，不代表写入、长期监守或实际服务端型号已验收 |
 
@@ -52,7 +52,7 @@ Astra 在订阅路径用原生 wait 等真实 Sol agent ID，在 API 路径等�
 
 ## 电脑 A：已有 DSH 成功配置，直接安装
 
-使用当前能运行 `dsh --profile headless` 的同一 Windows 用户。需要 Git、Node；本仓库无第三方 npm 依赖，不必 `npm install`。
+使用当前能运行 `dsh --profile headless` 的同一 Windows 用户。DSH 安装需要 Git 和 Node。WorkBuddy 项目入口的可选 SDK 单独安装。
 Node 最低 22 是本仓库要求；DSH 自身可能要求更高版本，使用已经成功运行 DSH 的那套 Node。
 
 ```powershell
@@ -117,6 +117,10 @@ node .\scripts\manage.mjs --verify
 
 安装器可根据已有 DSH 设置生成本机配置，或沿用一个符合工作区和权限限制的现有根池。可选择显式本机 JSON 配置，并加入已授权的 WorkBuddy DSF 连接。安装预览、应用和结构验证均不调用模型，独立 API 访问在目标机器上显式验证。安装、回滚、变量名和例句见 [Sol 协调来源](docs/sol-coordinator.md)。
 
+### 可选 WorkBuddy DSF 项目入口
+
+用已安装的 WorkBuddy 和已批准的项目目录，一次配置 `deepseek-v4-flash-workbuddy`。此后 Sol 用同一个入口接收项目内的新论文、脚本、数据和其它任务，沿用已有读写及命令权限。模式 2 的实际峰时派发和显式 WorkBuddy DSF 共用该入口。是否使用 API Sol 由当前会话另行选择。 [本机迁移与验收](docs/workbuddy-project-entry.md)
+
 ### 第一次端到端验收
 
 在 Codex 新会话输入：
@@ -179,11 +183,11 @@ DSH 负责实际执行、测试、修复及必要监守；Sol 不代执行，不
 先安装规则：`.\scripts\install.ps1 -Apply`。
 待电脑 B 自己的 DSH、Go 凭据、headless 路由和会话插件准备好并测试通过，再运行 `-Apply -EnableDsh`；需要同一套命名实例时按 [docs/multisession.md](docs/multisession.md) 的同步命令执行。参考 `config/headless.patch.example.yml`，不要覆盖现有 profile。
 按用户当前选择，电脑 B **暂不部署 WorkBuddy**；两个 `workbuddy_*_registered: false` 不影响已注册的 DSH。不自动安装 WorkBuddy，也不因缺少它们改变默认 A 或 DSH 会话选择。
-今后用户明确需要时，才准备 WorkBuddy CLI 和完整定制桥接器；见 `bridges/workbuddy/README.md`。本仓库不会把 A 的私有凭据或绝对路径复制到 B。
+今后用户明确需要时，可在 B 用本机 WorkBuddy 和已批准的目录部署项目入口，或用已准备的完整定制桥接器。私有凭据及绝对路径在各机器保留。 [WorkBuddy 桥接器](bridges/workbuddy/README.md)
 
 ## 更新、回滚与测试
 
-### 仅同步规则和 Skill（适用于本次等待策略修订）
+### 仅同步规则和 Skill
 
 在需要更新的每台电脑执行：
 
@@ -199,7 +203,7 @@ if ($LASTEXITCODE -ne 0) { throw "规则安装失败。" }
 node .\scripts\manage.mjs --verify
 ```
 
-运行无选项的预览、应用命令时，仅更新规则和 Skill。已有 MCP、权限配置和 DSH profile 继续使用原注册。可选的 Sol MCP 安装使用 [单独的注册命令](docs/sol-coordinator.md)。同步前确认远端没有超出预期范围的额外代码变更；意外改动 bridges/scripts 时停止并评估活动任务。
+运行无选项的预览、应用命令时，仅更新规则和 Skill。已有 MCP、权限配置和 DSH profile 继续使用原注册。WorkBuddy 项目入口与 Sol MCP 使用各自的注册选项。同步前确认远端没有超出预期范围的额外代码变更；意外改动 bridges/scripts 时停止并评估活动任务。 [WorkBuddy 项目入口](docs/workbuddy-project-entry.md) · [Sol 配置](docs/sol-coordinator.md)
 
 **有活动任务时不要立即重启 Codex。** 在旧会话明确要求 Astra 与 Sol 分别读取更新后的有效 AGENTS 和 Skill；保留原 MCP 生命周期，按 Skill 交接现有任务，不重复提交。没有活动任务后，再重启或新建会话检查启动加载。远端提交和本地安装都不会自动重写已有会话上下文。
 

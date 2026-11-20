@@ -1,0 +1,15 @@
+{
+  "schema": 1,
+  "workbuddy_cli": "D:\\WorkBuddy\\resources\\app.asar.unpacked\\cli\\dist\\codebuddy-lite-wb.mjs",
+  "cli_sha256": "0000000000000000000000000000000000000000000000000000000000000000",
+  "workbuddy_config_dir": "D:\\ExistingWorkBuddyAccount",
+  "runtime_dir": "D:\\ai-rule-state\\workbuddy-runtime",
+  "projects": [
+    {
+      "id": "research",
+      "root": "D:\\Projects\\research",
+      "allow_write": false,
+      "allow_commands": false
+    }
+  ]
+}
