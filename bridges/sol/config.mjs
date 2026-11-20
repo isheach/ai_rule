@@ -5,8 +5,13 @@ import { contextDirFor } from '../pool/context.mjs';
 import { loadPoolConfig, validatePoolConfig } from '../pool/service.mjs';
 import { WORKBUDDY_DSF } from '../workbuddy/dispatch.mjs';
 import { loadProjectConfig, PROJECT_CONTRACT, PROJECT_SERVER_ENTRY } from '../workbuddy/project-config.mjs';
+import { DSH_TIMEOUT_MS } from '../task-lifecycle.mjs';
 
 export const SERVICE = 'sol-coordinator';
+export const CoordinatorMode = Object.freeze({ SUBSCRIPTION: 'subscription', API: 'api' });
+export const COORDINATOR_MODES = Object.freeze(Object.values(CoordinatorMode));
+export const EXECUTION_BACKENDS = Object.freeze(['DSH', 'WorkBuddy DSF', 'HY4', 'A']);
+export const EXECUTION_PERMISSIONS = Object.freeze(['read-only', 'workspace-write']);
 export const SAFE_KEY = /^[A-Za-z0-9_.:-]{1,100}$/;
 export const SAFE_ID = /^[A-Za-z0-9_.:@/-]{1,160}$/;
 const ENV = /^[A-Z][A-Z0-9_]{1,99}$/;
@@ -16,7 +21,8 @@ const OPENAI_ENV = /^(?:(?:.*_)?OPENAI_|CODEX_API_KEY$)/i;
 const LIMITS = {
   max_responses: [8, 2, 20], max_delegations: [3, 1, 8], max_output_tokens: [16000, 256, 64000],
   max_total_tokens: [60000, 1000, 500000], max_input_bytes: [192000, 16000, 768000],
-  api_timeout_ms: [180000, 1000, 900000], task_timeout_ms: [900000, 1000, 3600000]
+  api_timeout_ms: [180000, 1000, 900000],
+  task_timeout_ms: [DSH_TIMEOUT_MS.default, DSH_TIMEOUT_MS.minimum, DSH_TIMEOUT_MS.maximum]
 };
 
 export function object(value, keys, label) {

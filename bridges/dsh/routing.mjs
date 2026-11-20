@@ -1,9 +1,8 @@
 // DSH-first routing policy with a narrowly authorized, pre-admission-only HY4 fallback.
 //
 // This module is intentionally independent of the MCP server and of any live
-// WorkBuddy bridge. It is a reviewable candidate policy: the default HY4
-// adapter is fail-closed because no verified local HY4 route exists. Tests use
-// an injected mock adapter; a mock success is not evidence of real HY4 access.
+// WorkBuddy bridge. The default HY4 adapter is fail-closed. A deployment can
+// supply an explicitly configured ACP adapter and local fallback authorization.
 //
 // Invariants:
 //   * DSH remains the default backend and an explicit DSH session stays explicit.
@@ -17,8 +16,12 @@ import fs from 'node:fs';
 import path from 'node:path';
 import crypto from 'node:crypto';
 import { normalizeTaskAuthorization, safeWriteMetadata } from '../hy4/policy.mjs';
+import { DSH_TIMEOUT_MS } from '../task-lifecycle.mjs';
 
 export const ROUTING_POLICY_VERSION = '2026-11-13.hy4-preadmission-r1';
+
+export const DSH_SCOPE_DESCRIPTION =
+  'For DSH execution, structured file and command scopes become task instructions under the native DSH workspace permission mode.';
 
 // Closed vocabulary. New codes require a policy review; callers must never
 // infer a code by matching a generic error message.
@@ -211,9 +214,10 @@ function basicTask(value) {
   if (!['read-only', 'workspace-write'].includes(permissionMode)) {
     throw new PreAdmissionRejection(AdmissionCode.INVALID_PARAMS, 'Only read-only and workspace-write are supported.');
   }
-  const timeoutMs = value.timeoutMs ?? 900000;
-  if (!Number.isInteger(timeoutMs) || timeoutMs < 1000 || timeoutMs > 3600000) {
-    throw new PreAdmissionRejection(AdmissionCode.INVALID_PARAMS, 'timeoutMs must be an integer between 1000 and 3600000.');
+  const timeoutMs = value.timeoutMs ?? DSH_TIMEOUT_MS.default;
+  if (!Number.isInteger(timeoutMs) || timeoutMs < DSH_TIMEOUT_MS.minimum || timeoutMs > DSH_TIMEOUT_MS.maximum) {
+    throw new PreAdmissionRejection(AdmissionCode.INVALID_PARAMS,
+      `timeoutMs must be an integer between ${DSH_TIMEOUT_MS.minimum} and ${DSH_TIMEOUT_MS.maximum}.`);
   }
   if (value.authorizationNote !== undefined && (typeof value.authorizationNote !== 'string' || Buffer.byteLength(value.authorizationNote) > 2000)) {
     throw new PreAdmissionRejection(AdmissionCode.INVALID_PARAMS, 'authorizationNote must be a string up to 2000 UTF-8 bytes.');
@@ -261,15 +265,6 @@ function fingerprint(task, { sessionMode, requestedBackend, continuationOfTaskId
 
 function taskIdOf(record) {
   return safeTaskId(record?.task_id);
-}
-
-function withoutCapability(task) {
-  const copy = { ...task };
-  delete copy.capability;
-  delete copy.writes;
-  delete copy.writeScopes;
-  delete copy.commands;
-  return copy;
 }
 
 export class RoutingCoordinator {
@@ -456,7 +451,7 @@ export class RoutingCoordinator {
     const pending = this.inflight.get(keyHash);
     if (pending) {
       if (pending.fingerprint !== fp) throw new RoutingConflictError('A concurrent request used the same idempotency key with different arguments or routing mode.');
-      return await pending.promise;
+      return { ...await pending.promise, deduplicated: true };
     }
     const prior = this.get(task.idempotencyKey);
     if (prior) {
@@ -469,7 +464,7 @@ export class RoutingCoordinator {
         throw new RoutingDecisionError('ROUTING_LEGACY_UNVERIFIABLE', 'The prior routing decision predates scope identity and cannot be replayed safely. Read it only; do not resubmit.', prior);
       }
       if (prior.request_fingerprint !== fp) throw new RoutingConflictError(`Idempotency key already used with different arguments or routing mode for request ${prior.request_id}.`);
-      if (prior.admission_state === 'accepted') return prior;
+      if (prior.admission_state === 'accepted') return { ...prior, replayed: true };
       throw new RoutingDecisionError(prior.reason_code || AdmissionCode.UNKNOWN, `Routing decision ${prior.request_id} is ${prior.admission_state}; no silent success or automatic resubmission.`, prior);
     }
     const requestId = crypto.randomUUID();
@@ -523,7 +518,8 @@ export class RoutingCoordinator {
     }
 
     let record;
-    try { record = await this.dsh.submit(withoutCapability(task)); }
+    const { capability: _capability, writes, writeScopes, commands, ...request } = task;
+    try { record = await this.dsh.submit(request, { writes, writeScopes, commands }); }
     catch (error) {
       if (error instanceof PreAdmissionRejection) {
         decision.dsh = { state: 'not_accepted', code: error.code, task_id: null };

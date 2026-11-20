@@ -1,42 +1,40 @@
-# 切换 Sol 协调来源
+# Sol 协调器
 
-Codex 仍是主会话。每个新聊天的 `coordinator_mode` 默认 `subscription`，外部任务由 Codex 原生 Sol 协调子代理负责。`api` 使用本机 `sol-coordinator` MCP 调用独立 OpenAI Responses API；API Sol 规划、实际派单、审查执行回执，必要时按原授权要求同一后端续跑修订。Codex 只交接本轮需要的目标、范围和相关记忆摘要，并等待协调结果。
-
-`coordinator_mode` 独立于 `session_mode` 和 DSH 峰谷选项。API 协调支持 DSH 和 WorkBuddy DSF。原生执行 A 和显式 HY4 由订阅路径支持；选择 API 同时要求这两种执行模式会收到可见的阻塞，原选择保留。DSH 模式 3 的已授权 HY4 预准入机制仍由根池判定。
+部署本机 `sol-coordinator` 后，可在 Codex 会话内选择原生订阅 Sol 或独立 OpenAI Responses API Sol。API 任务使用所配 DSH 根池或 WorkBuddy DSF。会话选择、派发、等待与恢复以 [调度 Skill](../skills/multi-agent-dispatch/SKILL.md) 为准。
 
 ## Windows 安装
 
-使用现有 Codex 和已配置 DSH 的 Windows 账户。Node 22 是本仓库的最低要求。进入实际的本机克隆目录，下方以 `$env:USERPROFILE\ai_rule` 为例。将工作区填为实际授权的已存在目录。
+在现有 Codex 和 DSH 所在的 Windows 用户下操作，使用 Node 22 或更新版本。把例子里的工作区替换成获准的现有目录。模型与档位使用该 API 项目实际能验证的值。
 
 ```powershell
 Set-Location "$env:USERPROFILE\ai_rule" -ErrorAction Stop
 git pull --ff-only
-if ($LASTEXITCODE -ne 0) { throw "Git 同步失败" }
+if ($LASTEXITCODE -ne 0) { throw 'Git 同步失败' }
 
-$sol = @{
+$solInstall = @{
     SolWorkspaceRoot = 'D:\Projects\approved'
     SolModel = 'gpt-6.2-sol'
     SolReasoningEffort = 'max'
 }
-.\scripts\install.ps1 @sol
-.\scripts\install.ps1 -Apply @sol
+.\scripts\install.ps1 @solInstall
+.\scripts\install.ps1 -Apply @solInstall
 .\scripts\install.ps1 -Verify
 ```
 
-如果 PowerShell 策略限制脚本，则使用对应 Node 命令。
+PowerShell 脚本受本机执行策略限制时，可使用 Node。
 
 ```powershell
 $solArgs = @('--sol-workspace-root', 'D:\Projects\approved', '--sol-model', 'gpt-6.2-sol', '--sol-reasoning-effort', 'max')
 node .\scripts\manage.mjs @solArgs
-if ($LASTEXITCODE -ne 0) { throw "安装预览失败" }
+if ($LASTEXITCODE -ne 0) { throw '安装预览失败' }
 node .\scripts\manage.mjs --apply @solArgs
-if ($LASTEXITCODE -ne 0) { throw "安装失败" }
+if ($LASTEXITCODE -ne 0) { throw '安装失败' }
 node .\scripts\manage.mjs --verify
 ```
 
-预览只读取本机配置。应用只增加托管 `sol-coordinator` 注册和缺少的本机配置，同时更新现有规则与 Skill。旧 DSH、WorkBuddy、HY4、Codex profile 和运行目录继续使用原配置。已有 `dsh-root-pool` 且工作区及只读限制相符时，API 协调器使用同一个根池配置；原来只有默认 DSH 时，安装器沿用其 JavaScript 入口、日历和只读限制，为 API 协调创建独立的根池配置。若本机未记录入口且自动检测失败，可显式传 `-DshEntry`。原先由命名 DSH 接手的任务继续使用该实例。
+预览、应用和结构验证使用本机数据。标准根池的工作区和只读设置与所需范围相符时，生成配置可引用同一个池。只有传统 DSH 时，安装器沿用可继承的 DSH JavaScript 入口、日历和只读限制，生成独立根池配置。找不到本机 JS 入口时可传 `-DshEntry`。已有传统或命名实例的活动任务由原协调者继续处理。
 
-如安装器提示自定义注册无法安全继承，可编写显式本机 JSON 并用 `-SolCoordinatorConfig` 安装。`pool_config` 指向现有兼容根池配置，或使用根池示例创建批准范围内的配置。将绝对路径与当前机器匹配，并沿用现有更严格的权限。`state_dir` 与批准工作区、根池、上下文目录及旧 DSH runtime 物理分离。使用以下命令预览、应用和验证。
+自定义入口不能安全继承时，使用 [Sol 配置模板](../config/sol-coordinator.example.json) 编写本机 JSON。`pool_config` 指向匹配当前工作区和权限的 [根池配置](root-pool.md)。`state_dir` 与获准工作区、根池、上下文以及旧 DSH runtime 分开，再用完整本机配置预览、应用和验证。
 
 ```powershell
 $solConfig = 'D:\ai-rule-state\sol-coordinator.local.json'
@@ -45,15 +43,11 @@ $solConfig = 'D:\ai-rule-state\sol-coordinator.local.json'
 .\scripts\install.ps1 -Verify
 ```
 
-显式配置模板及根池配置。 [Sol 配置示例](../config/sol-coordinator.example.json) · [根池设置](root-pool.md)
+`sol_coordinator.structure_valid: true` 表示托管注册和配置能够通过结构校验。待受影响的已有任务结束后，按宿主支持的方式加载。在可读到新注册的会话中核对 `codex mcp list` 和实际工具。完成一次本机设置后，协调来源可在会话里切换。
 
-`-Verify` 中 `sol_coordinator.structure_valid: true` 确认安装器管理的注册、变量名及本机配置文件通过结构校验。首次新增注册后，在现有任务安全结束时按宿主支持的方式加载，再在新会话确认 `codex mcp list` 中有 `sol-coordinator` 并且工具可用。切换来源发生在会话内，已加载后两种来源可随时切换。
+## API 凭据和验证
 
-## 设置 API 环境并执行一次真实验证
-
-OpenAI 官方模型目录列出 `gpt-6.2-sol` 及 `max` 推理档位。每台机器仍要用自己的 API 项目验证模型访问、响应模型和实际工具调用。项目密钥由 Windows 进程环境转发。安装器只在 `config.toml` 记录 `env_vars` 的变量名；凭据留在启动 Codex 的环境。 [OpenAI 模型目录](https://developers.openai.com/api/docs/models) · [Codex MCP 环境配置](https://learn.chatgpt.com/docs/extend/mcp?surface=cli)
-
-如需在每次启动时自动载入，在 Windows 的“编辑账户的环境变量”中添加当前用户的 `SOL_OPENAI_API_KEY`。从新环境完全重启 Codex 及其父进程，例如 VS Code。也可以在准备启动 Codex 的同一个 PowerShell 中临时输入，下方 `Read-Host` 只影响该窗口和随后从它启动的进程。使用定制 `CODEX_HOME` 时，按实际宿主配置定位文件。
+API 密钥由启动 Codex 的进程环境提供。默认变量是 `SOL_OPENAI_API_KEY`，注册仅记录变量名。可在当前 Windows 用户的环境变量中配置，或临时设置于随后启动 Codex 的 PowerShell。从已配置的新环境启动 Codex 和所需父进程。首次验证需要实际请求 API，会产生用量。 [OpenAI 模型目录](https://developers.openai.com/api/docs/models) · [Codex MCP 环境配置](https://learn.chatgpt.com/docs/extend/mcp?surface=cli)
 
 ```powershell
 $key = Read-Host 'OpenAI API key' -AsSecureString
@@ -62,22 +56,20 @@ Remove-Variable key
 
 $codexDir = if ($env:CODEX_HOME) { $env:CODEX_HOME } else { Join-Path $env:USERPROFILE '.codex' }
 $solConfig = Join-Path $codexDir 'ai-rule-sol\coordinator.local.json'
-
-# 这一步会真正调用 Responses API 一次，产生 API 用量。
 node .\bridges\sol\cli.mjs verify-api --config $solConfig
 ```
 
-如使用显式配置，替换上面的 `$solConfig`。验证成功时检查 `verified`、`returned_model`、`reasoning_effort` 和 `usage`。使用已核实的模型快照时，可在配置里明确设置 `response_model` 来匹配实际响应。项目或组织需要额外请求头时，可在 `openai` 中配置 `project_env` 或 `organization_env`，然后用同一个配置路径重新应用注册以转发新增变量名。模型不符、认证失败、限流、错误或断连会停止当前 API 协调；选择保留，后续渠道由用户明确决定。
+显式配置应替换上方的 `$solConfig`。检查 `verified`、`returned_model`、`reasoning_effort` 和 `usage`。若模型别名与经核实的返回快照不同，可在本机配置 `response_model`。需要项目或组织请求头时，在 `openai` 中配置 `project_env` 或 `organization_env`，并以同一完整配置应用注册以转发变量名称。
 
-API 协调器向 `https://api.openai.com/v1/responses` 发送任务交接、模型工具调用和本轮验收所需的执行结果，显式请求 `store: false`。交接只含批准用于该任务的内容，避免加入私有日志、凭据和完整会话历史。本机回执记录响应和工具调用标识、下游真实任务 ID、终态及返回的用量；结果或用量未知时按未知呈现。
+协调器向官方 Responses 发送获准的本轮任务和相关执行结果，设置 `store: false`。进程读取指定 OpenAI 凭据并清除下游继承。实际交接只包含可共享的任务背景与证据。回执记录 Responses 和执行任务 ID、返回模型、档位、终态及已知用量。模型不符、认证、限流或受理不明按实际状态报告，渠道选择仍保留。 [实现边界](implementation.md#权限进程与数据)
 
-符合资格的 ChatGPT 赠送 API 额度适用于已关联的 API 组织内的独立 API 请求。OpenAI 先使用赠送额度，赠额用尽时可扣减该组织的已购余额。赠额政策排除 Codex 自身的 API key 用法。`max_total_tokens` 根据已返回的用量判断是否继续下一轮，最后一轮的输入和输出可能使累计用量超过阈值。请求次数、单次输出和时间限制用于控制协调任务，最终费用和余额以 OpenAI 账单为准。 [赠额使用规则](https://help.openai.com/en/articles/20001626-api-credits-benefit-for-eligible-chatgpt-subscriptions) · [API 账单](https://platform.openai.com/account/billing/overview)
+独立 API 请求使用所配置 API 项目的额度。ChatGPT 赠送 API 额度的资格和扣减规则以 OpenAI 说明及实际 API 账单为准。协调配置的 `max_total_tokens` 根据已返回的用量决定是否继续下一轮，最后一轮可能使合计超过阈值。可配的请求数、输出和时间限制约束此协调任务。 [API 赠额](https://help.openai.com/en/articles/20001626-api-credits-benefit-for-eligible-chatgpt-subscriptions) · [API 账单](https://platform.openai.com/account/billing/overview)
 
-## 使用 WorkBuddy DSF
+## WorkBuddy DSF
 
 ### 项目入口
 
-先完成本机 WorkBuddy 项目配置。使用显式 WorkBuddy DSF 或模式 2 实际峰时派发时，`coordinator.local.json` 的 `workbuddy` 对象指向订阅入口使用的同一本机 JSON。API Sol 会使用同一实现和项目授权检查，并传递原任务的权限及更窄的范围。DSH 根池也执行自己的工作区和日程检查。 [WorkBuddy 项目入口](workbuddy-project-entry.md)
+先准备好已有授权的本机项目配置。将以下 `workbuddy` 对象写入完整的协调配置，按上方 `-SolCoordinatorConfig` 流程应用并载入。显式 WorkBuddy DSF 和模式 2 的实际峰时派发均可由这一连接执行。API 借用同一本机项目 JSON 和工具实现，本次目录与权限还受协调器工作区和只读上限约束。 [项目配置](workbuddy-project-entry.md#项目配置)
 
 ```json
 {
@@ -87,13 +79,11 @@ API 协调器向 `https://api.openai.com/v1/responses` 发送任务交接、模�
 }
 ```
 
-将该 `workbuddy` 对象写入现有协调配置，用 `-SolCoordinatorConfig` 指向完整的协调配置，预览、应用并验证。等该入口的活动任务结束后，按宿主支持的方式加载协调器配置一次。之后 API Sol 用原项目范围，即可派同一项目内新的论文、脚本或数据任务。写任务的 `authorizationNote` 可以引用既有项目授权，任务的 scope 只在该授权下收窄。
+本机项目入口已加载后，同一批准范围内换课题、论文、数据或实验脚本时，仅按任务交接输入及适用范围。协调器沿用已有项目及授权，任务范围可收窄。 [WorkBuddy 工具参数](../skills/multi-agent-dispatch/references/workbuddy.md#项目入口)
 
 ### 已有定制入口
 
-现有定制 WorkBuddy DSF 可继续使用以下配置。先确认原桥支持本机 stdio 连接和当前 profile，再将 `codex mcp get deepseek-v4-flash-workbuddy --json` 解析到变量，只使用已批准的 `transport.command`、`args`、`cwd` 和需要转发的环境变量名。保留原注册中的实际路径、参数、权限及 profile。绝对命令路径应指向 Windows 可执行程序。
-
-按原桥实际 `get_task_bridge_status`、`run_workbuddy_task` 的工具定义与回执字段填写以下映射。示例字段和 profile 必须替换为机器上已存在、经过授权的值。`env_vars` 可省略；如需转发环境变量，填写名称。适配器固定 `WB_MODEL=deepseek-v4-flash` 和 `WB_SKIP_PERMISSIONS=false`。
+按本机已核实的定制桥 stdio 入口和已批准 profile 设置。可将现有 `codex mcp get deepseek-v4-flash-workbuddy --json` 结果保存到变量，仅提取批准的 `transport.command`、`args`、`cwd` 和所需环境变量名称。将示例中的工具字段和 profile 替换成实际值。
 
 ```json
 {
@@ -111,47 +101,12 @@ API 协调器向 `https://api.openai.com/v1/responses` 发送任务交接、模�
 }
 ```
 
-默认状态字段是 `ready` 和 `model`，结果是 `status`、`model`、`task_id`、`session_id`、`answer`。需要适配字段名时使用 `status_fields` 与 `result_fields`。如原桥公开续跑能力，`arguments.session` 填实际会话参数；仅在返回同后端原会话 ID 且本轮满足准入时续跑。授权工作区可写时，可在 `profiles` 配置现有 `workspace-write` profile。对无法原样满足的权限或 profile，任务在可见的阻塞处停止。
+定制连接使用固定 `WB_MODEL=deepseek-v4-flash` 与 `WB_SKIP_PERMISSIONS=false`。状态默认字段是 `ready`、`model`，结果默认字段是 `status`、`model`、`task_id`、`session_id`、`answer`，可用 `status_fields` 和 `result_fields` 匹配原桥。可通过 `env_vars` 传递所需非 OpenAI 环境变量名称，通过 `arguments.session` 映射已验证的续跑参数。配置已有获准工作区可写能力时，使用对应的 `workspace-write` profile。该定制适配器使用默认能力及 profile，显式结构化文件或命令范围由项目入口处理。
 
-将 `workbuddy` 对象加入现有协调配置，指定同一路径重新预览、应用并验证。在活动协调结束后按宿主支持方式加载一次。首项本机验收选择批准目录和真实只读 profile，核对任务回执及 `deepseek-v4-flash`。缺少有效 WorkBuddy 配置时，模式 2 的实际峰时交接会报告不可用。谷时按原 DSH 门禁执行。 [WorkBuddy 桥接器](../bridges/workbuddy/README.md) · [DSH 峰谷模式](offpeak-schedule.md)
+用完整本机配置重新预览、应用、验证，等活动协调安全结束后载入。用一项获准任务查实际 tools/list、readiness、请求、回执和续跑能力。缺少可用 WorkBuddy 连接时，模式 2 的峰时任务报告阻塞。 [既有定制桥](../bridges/workbuddy/README.md)
 
-## 在 Codex 聊天中切换
+## 使用、恢复与回滚
 
-| 聊天表达 | 效果 |
-|---|---|
-| 本会话使用 DSH，Sol 主控切到 API。 | 新任务由 API Sol 协调，执行模式选择 DSH。 |
-| Sol 主控切回订阅。 | 后续任务使用 Codex 原生 Sol，当前执行模式继续沿用。 |
-| 仅本次由 API Sol 主控，继续采用 DSH，只读分析当前项目。 | 本次用 API 协调，会话设置继续沿用原值。 |
-| 仅本次由订阅 Sol 主控。 | 这个任务使用 Codex 原生 Sol，后续沿用会话的来源选项。 |
-| 本会话使用 WorkBuddy DSF，Sol 主控切到 API。 | 使用已配置并通过状态检查的 WorkBuddy DSF。 |
+在 Codex 中说“本会话 Sol 主控切到 API”即可设置会话来源。需要单项覆盖时说“仅本次由 API Sol 主控”。选择、派发的工具参数和已有任务的恢复见 [调度 Skill](../skills/multi-agent-dispatch/SKILL.md#openai-responses-api-sol)。发生断连、超时或受理不明时，用原任务键、ID 和当前有效根上下文查原协调记录及下游状态。
 
-已派发任务保持自己的协调器、后端、工作区和原幂等键。工作区与任务授权依次从宿主交接，API 模型只能在已有范围中派单。对启动、恢复、API 回执的验收，使用该协调任务的原 ID 和幂等键；订阅子代理则使用宿主的原生 agent ID。切换峰谷和切换来源各自独立，启用原日历可以按既有规则影响已运行的 DSH。
-
-## Codex 工具调用与恢复
-
-在会话自己的宿主 shell 中，从已注册的入口取得本地短期 `context_ref`。辅助程序读取宿主 rollout 的首行会话元数据，核验当前根会话或子代理父链。stdio 调用只收到 opaque 引用；刷新时由同一个宿主会话重新签发。
-
-```powershell
-$registration = codex mcp get sol-coordinator --json | ConvertFrom-Json
-$entry = $registration.transport
-$pos = [Array]::IndexOf($entry.args, '--config')
-if ($pos -lt 0 -or $pos + 1 -ge $entry.args.Count) { throw "找不到已注册的 --config" }
-$helper = Join-Path (Split-Path -Parent $entry.args[0]) 'cli.mjs'
-& $entry.command $helper context --config $entry.args[$pos + 1]
-```
-
-把 `context_ref` 作为 `context` 传入 MCP。`get_sol_coordinator_mode` 查询当前根的来源，`set_sol_coordinator_mode` 以 `mode: "api"` 或 `mode: "subscription"` 更新后续任务。一次性 API 覆盖在 `start_sol_coordination` 或 `run_sol_coordination` 中传 `coordinatorMode: "api"`。API 任务需要稳定 `idempotencyKey`、`backend`、`goal`、绝对 `cwd`、`permissionMode` 和 `acceptance`。写任务的 `authorizationNote` 说明适用授权，可引用已有项目授权。
-
-从默认或命名 DSH 服务切到 API 后，首项 DSH 任务开始前用 `get_sol_schedule` 核对当前根池。如果这个聊天已有可信的峰谷选择且与池中的值不同，用 `set_sol_schedule` 把该选择带入当前根池。已共用根池且模式一致时直接沿用。继续原传统 DSH 服务时，派单仍传当前会话已有 `scheduleMode`。只切换来源时，先执行来源工具，峰谷设置依据本会话已经授权的选择。
-
-工具可在受支持的超时内同步 `run_sol_coordination`，或用 `start_sol_coordination` 取得 ID 后以 `wait_sol_coordination` 等待。续等使用同一 `idempotencyKey` 和返回的 `taskId`；引用过期时重新签发后续等。`get_sol_coordination` 读原回执，`cancel_sol_coordination` 向本连接拥有的任务请求取消。断连、未知终态和未确认取消时，先检查原任务，保留原幂等键。`get_sol_schedule` 和 `set_sol_schedule` 单独查看和调整本根池的 `scheduleMode`。
-
-## 回滚
-
-安装输出本机回滚 manifest。活动任务安全结束后可回滚该次注册和文件变更。
-
-```powershell
-.\scripts\install.ps1 -RollbackManifest 'C:\...\ai-rule-backups\...\manifest.json'
-```
-
-若安装后的配置已有改动，回滚会停在哈希校验。按实际内容合并，保留已改配置和各后端运行记录。运行数据、API 密钥和 Codex 分享范围均由每台机器自行管理。
+需要回滚时，等待相关活动任务取得终态，用应用命令输出的该次本机备份 manifest 按标准流程恢复。 [回滚步骤](../README.md#更新规则与回滚)

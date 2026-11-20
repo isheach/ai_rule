@@ -1,46 +1,20 @@
 # DSH 峰谷调度
 
-用户可以说“本会话用峰谷模式 2”或指定下表中的其他模式。此选项适用于 DSH 会话，与 Sol 协调来源分开设置。新会话默认模式 1。
+在当前 DSH 会话说“本会话用峰谷模式 2”即可选用该模式。“关闭峰谷”和“开启峰谷”分别对应 1 和 3。各选项、设置工具和续跑边界见 [DSH 调度参考](../skills/multi-agent-dispatch/references/dsh.md#schedulemode-如何作用)。
 
-| 模式 | 谷时 | 峰前十分钟 | 实际峰时 |
-|---|---|---|---|
-| 1 无峰谷 | DSH | DSH | DSH |
-| 2 峰时 WorkBuddy DSF | DSH，检查谷时预算 | 门禁拒绝新任务 | 新任务使用 WorkBuddy `deepseek-v4-flash` |
-| 3 原峰谷 | 原 DSH 准入和谷时预算 | 原门禁和可选 HY4 回退 | 原门禁和可选 HY4 回退 |
+## 日历与状态
 
-“关闭峰谷”对应模式 1，“开启峰谷”或“按原峰谷”对应模式 3。旧参数 `false` 和 `true` 分别对应 1 和 3。DSH 运行中启用模式 2 或 3 都按原日历硬停，停止后的任务保持终态。曾由 DSH 或 WorkBuddy 受理的任务始终由原后端处理。
-
-## 根池
-
-协调者用当前已验证的上下文调用 `set_pool_schedule`，传 `scheduleMode: 1`、`2` 或 `3`。传 `enabled` 的旧调用仍有效。选择随本根持久化，适用于新派单和同根运行中的 DSH。用 `get_pool_status` 查看 `schedule.mode`、`phase` 和 `new_task_backend`。`accept_new_tasks` 仍表示 DSH 准入。切到模式 1 后，仍在运行的 DSH 继续运行。其他根的选项独立。
-
-API Sol 使用 `get_sol_schedule` 和 `set_sol_schedule` 访问其根池日程。与订阅 Sol 共用根池时，同根读写的是同一选择。从默认或命名 DSH 服务首次转入 API 根池时，在新派单前带入已有授权选择。 [Sol 协调来源](sol-coordinator.md)
-
-## 默认和命名 DSH 服务
-
-协调者把选择保存在当前会话，并在 `start_dsh_task` 或 `run_dsh_task` 传 `scheduleMode`。切换时用 `set_dsh_task_schedule` 和原任务 ID 更新本会话仍在运行的 DSH。派单兼容旧 `scheduleEnabled`，更新兼容旧 `enabled`。每次只传一个选项。共享服务的不同会话各自传值。`get_dsh_schedule_status` 默认查看活动任务或服务默认状态，传 `scheduleMode` 可以预览指定模式。
-
-注册参数 `--schedule-config` 指定日历，省略时用内置日历。安装器的 `--offpeak-schedule` 明确注册仓库日历，`--disable-offpeak-schedule` 移除定制注册路径。更改日历文件或服务注册后，等活动任务结束再重新加载。单个会话切换日程无需重启。
+- 默认日历为工作日 UTC+8 的 09:00–12:00、14:00–18:00。例行日历由注册或内置配置提供。启用日历时，DSH 在峰前十分钟关闭新任务准入，谷时检查任务预算及 60 秒余量。 [仓库日历](../config/offpeak.schedule.json) · [OpenCode Go](https://opencode.ai/v2/docs/console/go/)
+- 默认和命名实例可通过注册参数 `--schedule-config` 指定日历。安装器 `--offpeak-schedule` 绑定仓库日历，`--disable-offpeak-schedule` 移除这条定制注册参数。单个会话仍独立选择是否应用日历。注册或日历文件变化后，在活跃任务结束时按宿主方式加载。
+- 根池与 API 协调器各从所配池读取日历。两条来源共用池时，根会话的峰谷值也共用。用有效根上下文查看 `schedule.mode`、`phase` 和 `new_task_backend`。`accept_new_tasks` 表示 DSH 准入。
+- 已启用的模式 2 或 3 到峰时由进程所有者尽力终止其 DSH 子进程树。结果记录 `schedule_stopped` 和 `scheduled_peak`，沿用原任务终态。提前保存由实际执行者在预算内处理，宿主休眠可能推迟检查。
 
 ## 模式 2 的峰时派发
 
-下列调用步骤由订阅 Sol 执行。API Sol 在已核验的根下使用同一根池和交接规则，通过本机配置的 WorkBuddy DSF 连接领取、派单并回填原记录。项目入口一次配置已授权的项目根与能力。同一项目中的论文、脚本和数据随任务交接，沿用原项目授权及服务。 [WorkBuddy 项目入口](workbuddy-project-entry.md)
+用实际峰段的已批准新任务验收。核对 DSH 回执是否预留交接、Sol 是否使用已加载且能力相符的 WorkBuddy DSF、领取是否只有一次，以及原键下是否回填实际任务 ID、会话 ID 和终态。峰前窗口与不能在谷时预算内完成的任务应保留相应门禁。 [领取与回填步骤](../skills/multi-agent-dispatch/references/workbuddy-peak.md)
 
-1. 使用本会话的正常 DSH 派单入口和稳定的 `idempotencyKey`。经过现有参数、权限、会话、锁和日历检查后，实际峰时的新任务返回 `status: "workbuddy_pending"` 和 `workbuddy_dispatch`。此时没有模型任务 ID。谷时已受理的任务、旧 DSH `sessionId`、锁冲突、权限拒绝和未知状态都不产生交接。
-2. 由唯一的 Sol 协调者通过当前来源的 `deepseek-v4-flash-workbuddy` 核实 ready、固定模型 `deepseek-v4-flash` 以及原目录和权限能否保留。项目入口以原 `cwd` 和权限 scope 调用 `get_task_bridge_status`，记录返回的 `project_id`。已有定制入口按实际 schema 核验已授权 profile。服务缺失、忙碌、认证失败或模型、权限不匹配时，用 `finish_workbuddy_dsf_dispatch` 记录 `unavailable` 或 `refused`，报告具体阻塞。
-3. 就在调用模型前，通过原 DSH 或根池入口调用 `claim_workbuddy_dsf_dispatch`，传原 `idempotencyKey`、回执的 `dispatchId`，根池还需要本根有效 `context`。桥会复查同一峰段。只有取得 `claimed: true` 和一次性的 `claimToken` 的协调者可以执行下一步。模式已改变、峰段已结束或领取不明时，读原记录。默认或命名入口的选择由 Sol 按会话保存，切出模式 2 时把本会话未领取的交接记为 `cancelled`。
-4. 在回执的 `expires_at` 前，Sol 按已加载接口调用一次 `run_workbuddy_task`。项目入口传 `projectId`、原 `idempotencyKey`、`cwd`、`permissionMode`、任务书及更窄的权限参数。已有定制入口按其实际参数派单。使用 WorkBuddy 实际等待机制并保留同一后端。峰段在领取后、调用前已结束时，用原 token 回填 `refused`。
-5. 用 `finish_workbuddy_dsf_dispatch` 和原 `claimToken` 回填实际终态及已返回的 `backendTaskId`、`backendSessionId` 和可共享答复。断连或受理不明时回填 `unknown_after_disconnect`，项目入口可用 `get_workbuddy_task` 和原键核实原回执。只有核实原结果后才能补记终态。`get_workbuddy_dsf_dispatch` 可按原键读回交接，根池也可用 `get_pool_task` 按键查看。重放返回既有记录，重复领取不会得到 token。已领取的远程任务使用 WorkBuddy 实际支持的查询或取消，未领取的交接可回填 `cancelled`。
+已授权的工作目录、论文输入和能力随任务沿用。WorkBuddy 缺失或无法覆盖原范围时，验收回执应指出峰时阻塞。谷时任务可以按所选日历继续使用 DSH。 [WorkBuddy 本机配置](workbuddy-project-entry.md) · [API Sol 接入](sol-coordinator.md)
 
-谷时的下一项独立工作正常用 DSH。若用户在模式 2 的实际峰段明确继续 WorkBuddy，且该桥公开续跑能力，派发时使用新键和 `workBuddyContinuationKey`（本根或实例内、同一目录的已完成交接键）。读取交接返回的 WorkBuddy 会话 ID，并按实际 WorkBuddy schema 续跑。缺少原会话证据或厂商续跑能力时报告阻塞。峰时普通 DSH 续跑使用原 `sessionId` 并遵守 DSH 的峰谷限制。模式切换和峰段结束都不会迁移或自动重跑已受理工作。
+## 模式 3 的预准入策略
 
-模式 2 的交接、实际工具调用和结果回填由真实 stdio 测试连接离线 DSF fixture 验证。部署时由 Sol 核验真实 WorkBuddy 工具，缺少该服务的机器仍可执行模式 1、3 和模式 2 的谷时任务。
-
-## 默认日历
-
-- 工作日 UTC+8 **09:00–12:00、14:00–18:00** 为峰时，周末为谷时。启用后提前十分钟拒绝新任务。
-- 谷时准入检查任务的 `timeoutMs` 加 60 秒余量。运行中到达峰时，子进程所有者尽力终止本机进程树。
-- 因峰时停止的任务记录 `schedule_stopped` 和 `scheduled_peak`，不会自动恢复。提前保存提示由 DSH 自行处理。宿主休眠会推迟时间检查。
-- 预准入 HY4 回退及工作区权限分别遵循现有授权。详见 [HY4 回退](hy4-fallback.md)。
-
-日历来源见 [OpenCode Go 文档](https://opencode.ai/v2/docs/console/go/)。
+原日历按 DSH 准入与硬停执行。只有在本机显式授权且满足官方 ACP 准入时，合格的新任务可以一次尝试 HY4。 [授权与决策回执](hy4-fallback.md)

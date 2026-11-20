@@ -1,21 +1,26 @@
 import path from 'node:path';
 import { pathToFileURL } from 'node:url';
 import { redact } from '../dsh/core.mjs';
+import { DSH_SCOPE_DESCRIPTION } from '../dsh/routing.mjs';
+import { scheduleModeProperty } from '../dsh/schedule.mjs';
 import { resolveContext } from '../pool/context.mjs';
-import { loadSolConfig, object, openAIEnvironment, SERVICE } from './config.mjs';
+import { DSH_TIMEOUT_MS, WAIT_MS, preferRun, validateWaitMs, waitForExisting } from '../task-lifecycle.mjs';
+import { COORDINATOR_MODES, EXECUTION_BACKENDS, EXECUTION_PERMISSIONS, loadSolConfig, object, openAIEnvironment, SERVICE } from './config.mjs';
 import { ResponsesClient } from './responses.mjs';
 import { SolService } from './service.mjs';
 
 const PROTOCOLS = ['2025-06-18', '2025-03-26', '2024-11-05'];
 const text = { type: 'string' };
-const num = { type: 'integer' };
-const choices = (...values) => ({ type: typeof values[0] === 'number' ? 'integer' : 'string', enum: values });
-const source = choices('subscription', 'api');
+const choices = (...values) => ({ type: 'string', enum: values });
+const source = choices(...COORDINATOR_MODES);
 const task = { idempotencyKey: text, taskId: text };
 const handoff = {
-  ...task, coordinatorMode: source, backend: choices('DSH', 'WorkBuddy DSF', 'HY4', 'A'), goal: text, cwd: text,
-  permissionMode: choices('read-only', 'workspace-write'), authorizationNote: text, constraints: text, contextSummary: text,
-  acceptance: text, timeoutMs: num, capability: choices('default', 'text-only', 'workspace-read', 'workspace-write'),
+  ...task, coordinatorMode: source, backend: choices(...EXECUTION_BACKENDS), goal: text, cwd: text,
+  permissionMode: choices(...EXECUTION_PERMISSIONS), authorizationNote: text, constraints: text, contextSummary: text,
+  acceptance: text,
+  timeoutMs: { type: 'integer', minimum: DSH_TIMEOUT_MS.minimum, maximum: DSH_TIMEOUT_MS.maximum,
+    description: 'Total coordination budget. The local API Sol configuration can impose a lower maximum and defines the default.' },
+  capability: choices('default', 'text-only', 'workspace-read', 'workspace-write'),
   writeScopes: { type: 'array', items: { type: 'object' } }, writes: { type: 'array', items: { type: 'object' } },
   commands: { type: 'array', items: text }
 };
@@ -29,11 +34,11 @@ const TOOLS = [
   tool('get_sol_coordinator_mode', 'Read the selected Sol source for this verified Codex root, without an API call.', {}, [], true),
   tool('set_sol_coordinator_mode', 'Set this verified Codex root’s source for future work only, without an API call.', { mode: source }, ['mode']),
   tool('get_sol_schedule', 'Read the DSH root pool schedule and current phase.', {}, [], true),
-  tool('set_sol_schedule', 'Apply an explicitly requested root-pool schedule mode, including to active DSH workers in this root.', { scheduleMode: choices(1, 2, 3) }, ['scheduleMode']),
-  tool('start_sol_coordination', 'Start independent OpenAI API Sol planning and execution delegation. Save both returned task ID and the original idempotency key.', handoff, requireHandoff),
-  tool('run_sol_coordination', 'Start and wait for one API Sol coordination. Use the stable key to recover an interrupted call.', handoff, requireHandoff),
+  tool('set_sol_schedule', 'Apply an explicitly requested root-pool schedule mode, including to active DSH workers in this root.', { scheduleMode: scheduleModeProperty }, ['scheduleMode']),
+  tool('start_sol_coordination', `Start API Sol coordination for an early task ID or later intervention. Keep the returned task ID and the original idempotency key. ${DSH_SCOPE_DESCRIPTION}`, handoff, requireHandoff),
+  tool('run_sol_coordination', `Start and wait for one API Sol coordination. ${preferRun('start_sol_coordination', 'wait_sol_coordination')} Recover an interrupted call with the original idempotency key. ${DSH_SCOPE_DESCRIPTION}`, handoff, requireHandoff),
   tool('get_sol_coordination', 'Read the original API coordination receipt by its root-scoped idempotency key.', task, ['idempotencyKey'], true),
-  tool('wait_sol_coordination', 'Wait up to 60000 ms for existing coordination; never re-dispatch work.', { ...task, waitMs: num }, ['idempotencyKey'], true),
+  tool('wait_sol_coordination', `Wait for existing coordination in this verified root. ${waitForExisting}`, { ...task, waitMs: WAIT_MS }, ['idempotencyKey'], true),
   tool('cancel_sol_coordination', 'Request cancellation of this connection’s originally owned coordination and report the confirmed outcome.', task, ['idempotencyKey'])
 ];
 
@@ -74,8 +79,8 @@ export function startSolServer({ configPath, stdin = process.stdin, stdout = pro
     if (name === 'get_sol_coordination') return service.get(rootId, key, taskId);
     if (name === 'cancel_sol_coordination') return service.cancel(rootId, key, taskId);
     if (name === 'wait_sol_coordination') {
-      const wait = args.waitMs ?? 25000;
-      if (wait < 0 || wait > 60000) throw Error('waitMs must be 0..60000.');
+      const wait = args.waitMs ?? WAIT_MS.default;
+      validateWaitMs(wait);
       return service.wait(rootId, key, taskId, wait);
     }
     const taskArgs = { ...args };

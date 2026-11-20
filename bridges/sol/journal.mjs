@@ -1,7 +1,7 @@
 import fs from 'node:fs';
 import path from 'node:path';
 import crypto from 'node:crypto';
-import { SAFE_KEY } from './config.mjs';
+import { COORDINATOR_MODES, CoordinatorMode, SAFE_KEY } from './config.mjs';
 
 export const digest = value => crypto.createHash('sha256').update(value).digest('hex');
 export const now = () => new Date().toISOString();
@@ -52,13 +52,13 @@ export class SolJournal {
 
   mode(rootId) {
     const record = read(path.join(this.root(rootId), 'mode.json'));
-    if (!record) return { coordinator_mode: 'subscription', updated_at: null };
-    if (record.schema !== 1 || record.root_id !== rootId || !['subscription', 'api'].includes(record.coordinator_mode)) throw Error('Invalid recorded coordinator mode.');
+    if (!record) return { coordinator_mode: CoordinatorMode.SUBSCRIPTION, updated_at: null };
+    if (record.schema !== 1 || record.root_id !== rootId || !COORDINATOR_MODES.includes(record.coordinator_mode)) throw Error('Invalid recorded coordinator mode.');
     return { coordinator_mode: record.coordinator_mode, updated_at: record.updated_at };
   }
 
   setMode(rootId, mode) {
-    if (!['subscription', 'api'].includes(mode)) throw Error('Coordinator mode must be subscription or api.');
+    if (!COORDINATOR_MODES.includes(mode)) throw Error('Coordinator mode must be subscription or api.');
     const record = { schema: 1, root_id: rootId, coordinator_mode: mode, updated_at: now() };
     write(path.join(this.root(rootId), 'mode.json'), record);
     return { coordinator_mode: mode, updated_at: record.updated_at };
@@ -71,7 +71,7 @@ export class SolJournal {
 
   get(rootId, key) {
     const record = read(this.file(rootId, key));
-    if (record && (record.schema !== 1 || record.root_id !== rootId || record.idempotency_key !== key || record.coordinator_mode !== 'api')) {
+    if (record && (record.schema !== 1 || record.root_id !== rootId || record.idempotency_key !== key || record.coordinator_mode !== CoordinatorMode.API)) {
       throw Error('Coordinator receipt ownership or schema does not match the requested task.');
     }
     return record;

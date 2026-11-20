@@ -4,7 +4,7 @@ import path from 'node:path';
 import os from 'node:os';
 import crypto from 'node:crypto';
 import { fileURLToPath } from 'node:url';
-import { discoverDsh, preflight, VERSION, INSTANCE_DEFAULT, validateInstanceName, runtimeForInstance, serverNameForInstance, instanceFromServerName, pathKey } from '../bridges/dsh/core.mjs';
+import { discoverDsh, preflight, VERSION, INSTANCE_DEFAULT, INSTANCE_SERVER_PREFIX, validateInstanceName, runtimeForInstance, serverNameForInstance, instanceFromServerName, pathKey } from '../bridges/dsh/core.mjs';
 import { WORKBUDDY_DSF } from '../bridges/workbuddy/dispatch.mjs';
 import { loadProjectConfig, PROJECT_SERVER_ENTRY } from '../bridges/workbuddy/project-config.mjs';
 import {
@@ -14,8 +14,11 @@ import {
 
 const MANAGED_START = '# BEGIN isheach/ai_rule managed';
 const MANAGED_END = '# END isheach/ai_rule managed';
-const DSH_SERVER = 'dsh-opencode-go';
+const DSH_SERVER = INSTANCE_SERVER_PREFIX;
 const DSF_SERVER = WORKBUDDY_DSF.server_name;
+const SKILL_NAME = 'multi-agent-dispatch';
+const SKILL_MARKER = '<!-- ai-rule-managed:';
+const TOOL_TIMEOUT_SECONDS = 3700;
 const MCP_TABLE = String.raw`(?:mcp_servers|"mcp_servers"|'mcp_servers')`;
 const DSF_KEY = `(?:${DSF_SERVER}|"${DSF_SERVER}"|'${DSF_SERVER}')`;
 export function mergeBlock(original, content, kind) {
@@ -30,6 +33,31 @@ export function mergeBlock(original, content, kind) {
 const repo = path.resolve(path.dirname(fileURLToPath(import.meta.url)), '..');
 const read = file => fs.existsSync(file) ? fs.readFileSync(file, 'utf8').replace(/^\uFEFF/, '') : '';
 const hash = data => crypto.createHash('sha256').update(data).digest('hex');
+
+function assertSkillDirectories(directory) {
+  const skills = path.dirname(directory);
+  for (const candidate of [path.dirname(skills), skills, directory, path.join(directory, 'references')]) {
+    const stat = fs.lstatSync(candidate, { throwIfNoEntry: false });
+    if (stat && !stat.isDirectory()) throw Error(`Managed Skill path must be a directory without symbolic links: ${candidate}`);
+  }
+}
+
+function skillFilesFor(home) {
+  const source = path.join(repo, 'skills', SKILL_NAME);
+  const directory = path.resolve(home, '.agents', 'skills', SKILL_NAME);
+  assertSkillDirectories(directory);
+  const references = fs.readdirSync(path.join(source, 'references'), { withFileTypes: true })
+    .filter(entry => entry.isFile() && entry.name.endsWith('.md'))
+    .map(entry => path.join('references', entry.name))
+    .sort();
+  const files = ['SKILL.md', ...references].map(relative => {
+    const file = path.join(directory, relative);
+    const stat = fs.lstatSync(file, { throwIfNoEntry: false });
+    if (stat && !stat.isFile()) throw Error(`Managed Skill path must be a regular file: ${file}`);
+    return { file, data: read(path.join(source, relative)) };
+  });
+  return { directory, files };
+}
 function option(args, name) { const i = args.indexOf(name); if (i < 0) return undefined; if (!args[i + 1] || args[i + 1].startsWith('--')) throw Error(`Missing value for ${name}`); return args[i + 1]; }
 function optionValues(args, name) {
   const values = [];
@@ -56,7 +84,7 @@ function managedParts(original) {
 function sectionName(section) { return section.match(/^\[mcp_servers\.([^\].]+)\]/m)?.[1]; }
 function mcpSection(name, args, environmentNames = []) {
   const environment = environmentNames.length ? `env_vars = ${JSON.stringify(environmentNames)}\n` : '';
-  return `[mcp_servers.${name}]\ncommand = ${JSON.stringify(process.execPath)}\nargs = ${JSON.stringify(args)}\n${environment}cwd = ${JSON.stringify(repo)}\nstartup_timeout_sec = 30\ntool_timeout_sec = 3700\nenabled = true\n`;
+  return `[mcp_servers.${name}]\ncommand = ${JSON.stringify(process.execPath)}\nargs = ${JSON.stringify(args)}\n${environment}cwd = ${JSON.stringify(repo)}\nstartup_timeout_sec = 30\ntool_timeout_sec = ${TOOL_TIMEOUT_SECONDS}\nenabled = true\n`;
 }
 function tomlArray(section) {
   const lines = section.split(/\r?\n/);
@@ -146,11 +174,16 @@ export function buildPlan({
   if (addNames.length && !enableDsh) throw Error('--dsh-instance requires --enable-dsh so the default service and CLI preflight are handled together.');
   const override = path.join(codexHome, 'AGENTS.override.md');
   const agentsPath = read(override).trim() ? override : path.join(codexHome, 'AGENTS.md');
-  const skill = path.join(home, '.agents', 'skills', 'multi-agent-dispatch', 'SKILL.md');
-  if (read(skill).trim() && !read(skill).includes('ai-rule-managed')) throw Error(`Existing unrelated Skill would be overwritten: ${skill}`);
+  const { directory: skillDirectory, files: skillFiles } = skillFilesFor(home);
+  for (const { file, data } of skillFiles) {
+    const current = read(file);
+    if (current.trim() && current !== data && !current.includes(SKILL_MARKER)) {
+      throw Error(`Existing unrelated Skill file would be overwritten: ${file}`);
+    }
+  }
   const plan = [
     { file: agentsPath, data: mergeBlock(read(agentsPath), read(path.join(repo, 'AGENTS.md')), 'markdown') },
-    { file: skill, data: read(path.join(repo, 'skills', 'multi-agent-dispatch', 'SKILL.md')) }
+    ...skillFiles
   ];
   let modelCheck = null;
   const configFile = path.join(codexHome, 'config.toml');
@@ -220,10 +253,10 @@ export function buildPlan({
   if (workbuddyBridge) {
     const entry = fs.realpathSync(workbuddyBridge);
     if (!fs.statSync(entry).isFile() || !/\.mjs$/i.test(entry)) throw Error('WorkBuddy bridge must be an existing server.mjs; this repository does not recreate unseen custom authorization code.');
-    for (const [name, model] of [['hy4-workbuddy', 'hy4-preview'], ['deepseek-v4-flash-workbuddy', 'deepseek-v4-flash']]) {
+    for (const [name, model] of [['hy4-workbuddy', 'hy4-preview'], [DSF_SERVER, WORKBUDDY_DSF.model]]) {
       // Preserve any existing service instead of replacing it.
       if (new RegExp(`^\\s*\\[mcp_servers\\.(?:"${name}"|${name})\\]`, 'm').test(original)) continue;
-      parts.push(`[mcp_servers.${name}]`, `command = ${JSON.stringify(process.execPath)}`, `args = ${JSON.stringify([entry])}`, `cwd = ${JSON.stringify(path.dirname(entry))}`, 'tool_timeout_sec = 3700', `[mcp_servers.${name}.env]`, `WB_MODEL = ${JSON.stringify(model)}`, 'WB_SKIP_PERMISSIONS = "false"', '');
+      parts.push(`[mcp_servers.${name}]`, `command = ${JSON.stringify(process.execPath)}`, `args = ${JSON.stringify([entry])}`, `cwd = ${JSON.stringify(path.dirname(entry))}`, `tool_timeout_sec = ${TOOL_TIMEOUT_SECONDS}`, `[mcp_servers.${name}.env]`, `WB_MODEL = ${JSON.stringify(model)}`, 'WB_SKIP_PERMISSIONS = "false"', '');
     }
   }
   if (project) parts.push(mcpSection(DSF_SERVER, [PROJECT_SERVER_ENTRY, '--config', project.configPath]));
@@ -287,18 +320,20 @@ export function buildPlan({
       plan.push({ file: configFile, data });
     } else plan.push({ file: configFile, data: original });
   }
-  return { plan, codexHome, modelCheck, usesOverride: agentsPath === override, dshInstances: dshPlan, preservedServices, useSchedule,
+  return { plan, codexHome, skillDirectory, modelCheck, usesOverride: agentsPath === override, dshInstances: dshPlan, preservedServices, useSchedule,
     solCoordinatorConfig: solRegistration?.filename ?? null, workbuddyProjectConfig: project?.configPath ?? null };
 }
-function apply(plan, codexHome) {
+function apply(plan, codexHome, skillDirectory) {
+  assertSkillDirectories(skillDirectory);
   const changed = plan.filter(x => read(x.file) !== x.data);
   if (!changed.length) return console.log('No changes; installation is already up to date.');
   const backup = path.join(codexHome, 'ai-rule-backups', `${Date.now()}-${crypto.randomBytes(3).toString('hex')}`);
   fs.mkdirSync(backup, { recursive: true, mode: 0o700 });
-  const manifest = { version: VERSION, repo, files: [] };
+  const manifest = { version: VERSION, repo, skill_directory: skillDirectory, files: [] };
   for (const [i, change] of changed.entries()) {
-    if (fs.existsSync(change.file) && fs.lstatSync(change.file).isSymbolicLink()) throw Error(`Refusing to replace symlink: ${change.file}`);
-    const existed = fs.existsSync(change.file);
+    const stat = fs.lstatSync(change.file, { throwIfNoEntry: false });
+    if (stat && !stat.isFile()) throw Error(`Refusing to replace a non-regular file: ${change.file}`);
+    const existed = Boolean(stat);
     const saved = path.join(backup, `${i}.bak`);
     if (existed) { fs.copyFileSync(change.file, saved); if (process.platform !== 'win32') fs.chmodSync(saved, 0o600); }
     manifest.files.push({ file: change.file, existed, saved, installed_hash: hash(change.data) });
@@ -320,7 +355,12 @@ function apply(plan, codexHome) {
 }
 function rollback(file) {
   const manifest = JSON.parse(read(file));
-  for (const item of manifest.files) if (!fs.existsSync(item.file) || hash(read(item.file)) !== item.installed_hash) throw Error(`Changed since installation; refusing to overwrite: ${item.file}`);
+  if (manifest.skill_directory) assertSkillDirectories(manifest.skill_directory);
+  for (const item of manifest.files) {
+    if (!fs.lstatSync(item.file, { throwIfNoEntry: false })?.isFile() || hash(read(item.file)) !== item.installed_hash) {
+      throw Error(`Changed since installation; refusing to overwrite: ${item.file}`);
+    }
+  }
   for (const item of manifest.files) {
     if (item.existed) fs.copyFileSync(item.saved, item.file); else fs.rmSync(item.file);
   }
@@ -330,7 +370,8 @@ export function verifyInstallation({ home = os.homedir(), codexHome = process.en
   codexHome = path.resolve(codexHome);
   const override = path.join(codexHome, 'AGENTS.override.md');
   const agents = read(override).trim() ? override : path.join(codexHome, 'AGENTS.md');
-  const skill = path.join(home, '.agents', 'skills', 'multi-agent-dispatch', 'SKILL.md');
+  const agentsText = read(agents);
+  const { files: skillFiles } = skillFilesFor(home);
   const config = read(path.join(codexHome, 'config.toml'));
   const managed = managedParts(config);
   const instances = [];
@@ -366,8 +407,10 @@ export function verifyInstallation({ home = os.homedir(), codexHome = process.en
     if (name === DSH_SERVER || name.startsWith(`${DSH_SERVER}-`)) unmanagedDsh.push(name);
   }
   const checks = {
-    effective_agents_has_rules: read(agents).includes('BEGIN isheach/ai_rule managed'),
-    skill_installed: read(skill).includes('ai-rule-managed'),
+    effective_agents_has_rules: agentsText.includes('BEGIN isheach/ai_rule managed'),
+    skill_installed: read(skillFiles[0].file).includes(SKILL_MARKER),
+    rules_current: mergeBlock(agentsText, read(path.join(repo, 'AGENTS.md')), 'markdown') === agentsText
+      && skillFiles.every(({ file, data }) => read(file) === data),
     dsh_mcp_registered: new RegExp(`\\[mcp_servers\\.${DSH_SERVER}\\]`).test(config),
     dsh_offpeak_schedule_registered: /--schedule-config/.test(config),
     dsh_verification_scope: 'managed ai_rule block only; unmanaged or manually added services are preserved but not validated',
@@ -397,7 +440,7 @@ export function main(args) {
   if (args.includes('--verify')) {
     const checks = verifyInstallation({ home, codexHome });
     console.log(JSON.stringify(checks, null, 2));
-    if (!checks.effective_agents_has_rules || !checks.skill_installed || !checks.dsh_structure_valid
+    if (!checks.effective_agents_has_rules || !checks.skill_installed || !checks.rules_current || !checks.dsh_structure_valid
       || checks.sol_coordinator.structure_valid === false || checks.workbuddy_dsf_project?.structure_valid === false) process.exitCode = 1;
     return;
   }
@@ -416,7 +459,7 @@ export function main(args) {
   if (result.solCoordinatorConfig) console.log('Sol coordinator registration uses ' + result.solCoordinatorConfig + '. New chats default to subscription. API verification is separate.');
   if (result.workbuddyProjectConfig) console.log('WorkBuddy DSF project registration uses ' + result.workbuddyProjectConfig + '. Local SDK and model readiness are verified when the service is used.');
   if (result.modelCheck) console.log(`DSH ${result.modelCheck.version}: configured route verified; no paid API call performed.`);
-  if (args.includes('--apply')) apply(result.plan, result.codexHome);
+  if (args.includes('--apply')) apply(result.plan, result.codexHome, result.skillDirectory);
   else console.log('No files changed. Re-run with --apply after reviewing the plan.');
 }
 if (process.argv[1] && path.resolve(process.argv[1]) === fileURLToPath(import.meta.url)) {

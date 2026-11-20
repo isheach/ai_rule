@@ -234,7 +234,7 @@ test('opt-in server refuses a shared HY4/DSH runtime', async () => {
 });
 
 test('opt-in MCP endpoint serves status and an explicit HY4 run with fixtures', async () => {
-  const f = fixture('normal');
+  const f = fixture('normal', { allow_workspace_write: true });
   const runtime = temp(), dshRuntime = temp(), routingRuntime = temp();
   const p = spawn(process.execPath, [path.join(root, 'bridges', 'hy4', 'server.mjs'),
     '--hy4-manifest', f.file, '--runtime', runtime, '--dsh-runtime', dshRuntime,
@@ -268,15 +268,48 @@ test('opt-in MCP endpoint serves status and an explicit HY4 run with fixtures', 
     const parsed = JSON.parse(status.result.content[0].text);
     assert.equal(parsed.hy4.ready, true);
     assert.equal(parsed.hy4.model, 'hy4free');
-    const run = await rpc('tools/call', { name: 'run_hy4_task', arguments: textTask(f.workspace) });
-    const receipt = JSON.parse(run.result.content[0].text).receipt;
+    assert.equal(parsed.dsh.allow_workspace_write, true);
+    const { tools } = (await rpc('tools/list')).result;
+    const hy4Budget = tools.find(tool => tool.name === 'run_hy4_task').inputSchema.properties.timeoutMs;
+    const routedBudget = tools.find(tool => tool.name === 'run_routed_task').inputSchema.properties.timeoutMs;
+    assert.deepEqual(hy4Budget, { type: 'integer', minimum: 1000, maximum: 900000, default: 900000 });
+    assert.equal(routedBudget.maximum, 3600000);
+
+    const { timeoutMs, ...defaultTask } = textTask(f.workspace);
+    const call = (name, args) => rpc('tools/call', { name, arguments: args });
+    const parse = response => JSON.parse(response.result.content[0].text);
+    const first = parse(await call('run_hy4_task', defaultTask));
+    const { receipt } = first;
     assert.equal(receipt.status, 'completed');
     assert.equal(receipt.answer, 'HY4_OK');
-    const routedGet = await rpc('tools/call', { name: 'get_routed_task', arguments: { idempotencyKey: 'hy4-1' } });
-    assert.equal(JSON.parse(routedGet.result.content[0].text).receipt.status, 'completed');
+    const replay = parse(await call('run_hy4_task', { ...defaultTask, timeoutMs: hy4Budget.default }));
+    assert.equal(replay.receipt.task_id, receipt.task_id);
+    assert.equal(replay.decision.replayed, true);
+    const invalid = await call('run_hy4_task', { ...defaultTask, idempotencyKey: 'oversized', timeoutMs: 900001 });
+    assert.equal(invalid.result.structuredContent.error.code, AdmissionCode.INVALID_PARAMS);
+    assert.equal((await call('get_routed_decision', { idempotencyKey: 'oversized' })).result.isError, true);
+    const routedGet = await call('get_routed_task', { idempotencyKey: 'hy4-1' });
+    assert.equal(parse(routedGet).receipt.status, 'completed');
     const routed = await rpc('tools/call', { name: 'run_routed_task', arguments: textTask(f.workspace, 'routed', 'routed-key') });
     assert.equal(routed.result.isError, true);
     assert.equal(routed.result.structuredContent.error.code, AdmissionCode.PERMISSION_REFUSED);
+
+    fs.writeFileSync(path.join(f.config, 'mode.txt'), 'slow');
+    const slow = { ...textTask(f.workspace, 'hold while checking request ownership', 'slow-hy4'), timeoutMs: 10000 };
+    const original = parse(await call('start_hy4_task', slow));
+    const duplicate = call('run_hy4_task', slow);
+    const duplicateRequestId = seq;
+    await rpc('ping');
+    p.stdin.write(JSON.stringify({ jsonrpc: '2.0', method: 'notifications/cancelled', params: { requestId: duplicateRequestId } }) + '\n');
+    const stillRunning = parse(await call('get_hy4_task', { taskId: original.task_id }));
+    assert.equal(stillRunning.status, 'running');
+
+    const cancelled = parse(await call('cancel_hy4_task', { taskId: original.task_id }));
+    assert.equal(cancelled.status, 'cancelled');
+    const replayedRun = parse(await duplicate);
+    assert.equal(replayedRun.decision.replayed, true);
+    assert.equal(replayedRun.receipt.task_id, original.task_id);
+    assert.equal(replayedRun.status, 'cancelled');
   } finally {
     p.stdin.end();
     await new Promise(resolve => {

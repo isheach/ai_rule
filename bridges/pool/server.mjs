@@ -6,9 +6,10 @@ import { pathToFileURL } from 'node:url';
 import { loadPoolConfig, PoolService } from './service.mjs';
 import { resolveContext } from './context.mjs';
 import { loadSchedule, scheduleModeProperty, selectScheduleMode } from '../dsh/schedule.mjs';
-import { PreAdmissionRejection, RoutingConflictError } from '../dsh/routing.mjs';
+import { DSH_SCOPE_DESCRIPTION, PreAdmissionRejection, RoutingConflictError } from '../dsh/routing.mjs';
 import { redact } from '../dsh/core.mjs';
 import { workBuddyDispatchTools, WORKBUDDY_FAILURE } from '../workbuddy/dispatch.mjs';
+import { DSH_TIMEOUT_MS, WAIT_MS, preferRun, waitForExisting } from '../task-lifecycle.mjs';
 
 const FAILURE = new Set([...WORKBUDDY_FAILURE, 'schedule_stopped', 'unknown', 'not_accepted']);
 const safeText = value => redact(value).replace(/[A-Za-z]:\\[^\s"']+/g, '<local-path>');
@@ -39,7 +40,7 @@ const taskProperties = {
   prompt: { type: 'string', minLength: 1, maxLength: 60000 },
   cwd: { type: 'string' },
   idempotencyKey: { type: 'string' },
-  timeoutMs: { type: 'integer', minimum: 1000, maximum: 3600000, default: 900000 },
+  timeoutMs: DSH_TIMEOUT_MS,
   permissionMode: { type: 'string', enum: ['read-only', 'workspace-write'], description: 'Ordinary DSH work defaults to workspace-write when locally permitted. Set read-only to restrict a task.' },
   capability: { type: 'string', enum: ['default', 'text-only', 'workspace-read', 'workspace-write'], default: 'default' },
   authorizationNote: { type: 'string', maxLength: 2000 },
@@ -83,13 +84,13 @@ const tools = [
   },
   {
     name: 'start_pool_task',
-    description: 'Start a scheduled task in this root. Returns a task ID, or a pending WorkBuddy DSF handoff at peak in mode 2. Original DSH/HY4 admission otherwise applies.',
+    description: `Submit a pooled task for an early task ID or later intervention. Mode 2 can return a pending WorkBuddy DSF handoff at peak. ${DSH_SCOPE_DESCRIPTION}`,
     inputSchema: { type: 'object', additionalProperties: false, required: ['context', 'prompt', 'cwd', 'idempotencyKey'], properties: taskProperties },
     annotations: { readOnlyHint: false, openWorldHint: true }
   },
   {
     name: 'run_pool_task',
-    description: 'Start and wait internally for one bounded local task. A WorkBuddy DSF peak handoff returns immediately for the coordinator.',
+    description: `Submit a pooled task and wait internally for its receipt. ${preferRun('start_pool_task', 'wait_pool_task')} A WorkBuddy DSF peak handoff returns immediately for the coordinator. ${DSH_SCOPE_DESCRIPTION}`,
     inputSchema: { type: 'object', additionalProperties: false, required: ['context', 'prompt', 'cwd', 'idempotencyKey'], properties: taskProperties },
     annotations: { readOnlyHint: false, openWorldHint: true }
   },
@@ -101,10 +102,10 @@ const tools = [
   },
   {
     name: 'wait_pool_task',
-    description: 'Event-driven wait up to 60 seconds on an already accepted pooled task. No resubmission and no model call.',
+    description: `Wait on the existing pooled task in its verified root. ${waitForExisting}`,
     inputSchema: {
       type: 'object', additionalProperties: false, required: ['context'],
-      properties: { ...locatorProperties, waitMs: { type: 'integer', minimum: 0, maximum: 60000, default: 25000 } }
+      properties: { ...locatorProperties, waitMs: WAIT_MS }
     },
     annotations: { readOnlyHint: true }
   },
@@ -165,7 +166,7 @@ export async function startPoolServer({
     }
     if (name === 'finish_workbuddy_dsf_dispatch') return service.workBuddyFor(rootId).finish(args);
     if (name === 'get_pool_task') return service.get(rootId, { idempotencyKey: args.idempotencyKey, taskId: args.taskId });
-    if (name === 'wait_pool_task') return service.wait(rootId, { idempotencyKey: args.idempotencyKey, taskId: args.taskId }, args.waitMs ?? 25000);
+    if (name === 'wait_pool_task') return service.wait(rootId, { idempotencyKey: args.idempotencyKey, taskId: args.taskId }, args.waitMs);
     if (name === 'cancel_pool_task') return service.cancel(rootId, { idempotencyKey: args.idempotencyKey, taskId: args.taskId });
     const task = { ...args };
     delete task.context;
