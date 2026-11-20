@@ -87,7 +87,7 @@ $solConfig = Join-Path $codexDir 'ai-rule-sol\coordinator.local.json'
 node .\bridges\sol\cli.mjs broker-status --config $solConfig
 ```
 
-使用显式配置时将 `$solConfig` 替换为原路径。`ready: true` 表示本地身份、密钥状态和模型策略检查通过。它无法验证远端项目权限、模型可用性或余额。在 Codex 里选择“本会话 Sol 主控切到 API”或“本会话 Sol 主控切回订阅”，切换本身没有模型用量。正在进行的任务继续由原协调来源和执行后端负责。代理不可用时，API 任务明确报告阻塞。无法部署独立身份时，先选订阅 Sol；需要 API 的机器也可改用单独的受控 Windows 主机，将 DeepSeek 执行器隔离在外。
+使用显式配置时将 `$solConfig` 替换为原路径。`ready: true` 表示本地身份、密钥状态和模型策略检查通过。重载后还要在实际的 Codex 会话用已注册的 `get_sol_coordinator_mode` 检查 `source_configured: true` 和 `broker_status: "ready"`；普通 PowerShell 与宿主可能运行在不同的 Windows 令牌或 AppContainer 中。若宿主被拒绝，保留订阅来源，或将协调器部署到受支持的独立普通用户环境。上述检查无法验证远端项目权限、模型可用性或余额。在 Codex 里选择“本会话 Sol 主控切到 API”或“本会话 Sol 主控切回订阅”，切换本身没有模型用量。正在进行的任务继续由原协调来源和执行后端负责。代理不可用时，API 任务明确报告阻塞。无法部署独立身份时，先选订阅 Sol；需要 API 的机器也可改用单独的受控 Windows 主机，将 DeepSeek 执行器隔离在外。
 
 **真实验证会向 OpenAI 提交一个模型请求，产生计费用量。** 只有决定付费验证时才执行下面这一条命令，检查 `verified`、`returned_model`、推理档位和 `usage`。离线测试、安装、状态查询及切换不执行该命令。
 
