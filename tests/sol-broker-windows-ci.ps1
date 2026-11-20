@@ -87,31 +87,31 @@ function Assert-TestCommand($Result, [string]$Step) {
 }
 
 function New-SetupFixture($Account, [string]$Revision) {
-    $home = Join-Path $scratch "ordinary caller's profile"
-    $checkout = Join-Path $home ('reviewed checkout ' + [char]0x9879)
-    $codexHome = Join-Path $home '.codex'
-    $workspace = Join-Path $home 'approved project'
-    $configuration = Join-Path $home 'coordinator.local.json'
-    $pool = Join-Path $home 'pool.local.json'
-    $dsh = Join-Path $home 'never-run.mjs'
+    $fixtureProfileRoot = Join-Path $scratch "ordinary caller's profile"
+    $checkout = Join-Path $fixtureProfileRoot ('reviewed checkout ' + [char]0x9879)
+    $codexHome = Join-Path $fixtureProfileRoot '.codex'
+    $workspace = Join-Path $fixtureProfileRoot 'approved project'
+    $configuration = Join-Path $fixtureProfileRoot 'coordinator.local.json'
+    $pool = Join-Path $fixtureProfileRoot 'pool.local.json'
+    $dsh = Join-Path $fixtureProfileRoot 'never-run.mjs'
     $archive = Join-Path $scratch 'reviewed-checkout.zip'
-    $null = New-Item -Path $home -ItemType Directory
-    $acl = Get-Acl -LiteralPath $home
+    $null = New-Item -Path $fixtureProfileRoot -ItemType Directory
+    $acl = Get-Acl -LiteralPath $fixtureProfileRoot
     $sid = [Security.Principal.SecurityIdentifier]::new($Account.Sid)
     $acl.AddAccessRule([Security.AccessControl.FileSystemAccessRule]::new($sid, 'Modify', 'ContainerInherit, ObjectInherit', 'None', 'Allow'))
-    Set-Acl -LiteralPath $home -AclObject $acl
+    Set-Acl -LiteralPath $fixtureProfileRoot -AclObject $acl
     $null = New-Item -Path $codexHome, $workspace -ItemType Directory
     $gitRoot = '-C "{0}"' -f $checkout
-    $template = Join-Path $home 'git-template'
+    $template = Join-Path $fixtureProfileRoot 'git-template'
     $null = [IO.Directory]::CreateDirectory($template)
-    Assert-TestCommand (Invoke-TestUser $Account $git ('init --template="{0}" "{1}"' -f $template, $checkout) -FixtureProfile $home) 'Initialize checkout under ordinary SID'
+    Assert-TestCommand (Invoke-TestUser $Account $git ('init --template="{0}" "{1}"' -f $template, $checkout) -FixtureProfile $fixtureProfileRoot) 'Initialize checkout under ordinary SID'
     & $git -C $repository archive --format=zip "--output=$archive" $Revision
     if ($LASTEXITCODE -ne 0) { throw 'The source checkout fixture could not be archived.' }
     Expand-Archive -LiteralPath $archive -DestinationPath $checkout
     [IO.File]::Delete($archive)
-    Assert-TestCommand (Invoke-TestUser $Account $git "$gitRoot -c core.autocrlf=true add --all" -FixtureProfile $home) 'Stage checkout under ordinary SID'
-    Assert-TestCommand (Invoke-TestUser $Account $git "$gitRoot -c user.name=Fixture -c user.email=fixture@example.invalid -c commit.gpgsign=false commit -m fixture" -FixtureProfile $home) 'Pin fixture revision'
-    $head = Invoke-TestUser $Account $git "$gitRoot rev-parse HEAD" -FixtureProfile $home
+    Assert-TestCommand (Invoke-TestUser $Account $git "$gitRoot -c core.autocrlf=true add --all" -FixtureProfile $fixtureProfileRoot) 'Stage checkout under ordinary SID'
+    Assert-TestCommand (Invoke-TestUser $Account $git "$gitRoot -c user.name=Fixture -c user.email=fixture@example.invalid -c commit.gpgsign=false commit -m fixture" -FixtureProfile $fixtureProfileRoot) 'Pin fixture revision'
+    $head = Invoke-TestUser $Account $git "$gitRoot rev-parse HEAD" -FixtureProfile $fixtureProfileRoot
     Assert-TestCommand $head 'Read the pinned fixture revision'
     $fixedRevision = $head.Output.Trim()
     $toml = Join-Path $codexHome 'config.toml'
@@ -119,16 +119,16 @@ function New-SetupFixture($Account, [string]$Revision) {
     Set-Content -LiteralPath $toml -Value $prior -NoNewline -Encoding ASCII
     Set-Content -LiteralPath $dsh -Value "throw Error('The setup must never start DSH.');" -Encoding ASCII
     @{
-        pool_root = Join-Path $home 'pool'; workspace_root = $workspace; dsh_entry = $dsh
+        pool_root = Join-Path $fixtureProfileRoot 'pool'; workspace_root = $workspace; dsh_entry = $dsh
         schedule_config = Join-Path $checkout 'config\offpeak.schedule.json'; allow_write = $false
     } | ConvertTo-Json | Set-Content -LiteralPath $pool -Encoding UTF8
     @{
-        state_dir = Join-Path $home 'sol-state'; pool_config = $pool
+        state_dir = Join-Path $fixtureProfileRoot 'sol-state'; pool_config = $pool
         openai = @{ model = 'gpt-6.2-sol'; reasoning_effort = 'max'; api_key_env = 'OPENAI_API_KEY' }
     } | ConvertTo-Json | Set-Content -LiteralPath $configuration -Encoding UTF8
     $entry = Join-Path $checkout 'scripts\setup-sol.ps1'
     $setupArgs = '-NoLogo -NoProfile -NonInteractive -File "{0}" -CodexHome "{1}" -SolCoordinatorConfig "{2}"' -f $entry, $codexHome, $configuration
-    return [PSCustomObject]@{ Home = $home; Checkout = $checkout; CodexHome = $codexHome; Configuration = $configuration; Revision = $fixedRevision; Arguments = $setupArgs; OriginalToml = $prior }
+    return [PSCustomObject]@{ Home = $fixtureProfileRoot; Checkout = $checkout; CodexHome = $codexHome; Configuration = $configuration; Revision = $fixedRevision; Arguments = $setupArgs; OriginalToml = $prior }
 }
 
 function Test-SetupPreflight($Account, $Setup) {
