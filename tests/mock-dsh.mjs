@@ -9,9 +9,12 @@ const sessionArg = args.includes('--session-id') ? args[args.indexOf('--session-
 const sessionId = sessionArg || `session-mock-${process.pid}-${Math.random().toString(16).slice(2)}`;
 const prompt = fs.readFileSync(0, 'utf8');
 const emit = value => console.log(JSON.stringify(value));
+if (process.env.SOL_TEST_DSH_RUNS) fs.appendFileSync(process.env.SOL_TEST_DSH_RUNS,
+  JSON.stringify({ sessionId, hasOpenAIKey: Boolean(process.env.SOL_OPENAI_API_KEY || process.env.OPENAI_API_KEY) }) + '\n');
 emit({ type: 'session', sessionId, cwd: process.cwd() });
-const sleep = prompt.match(/(?:^|\n\n)sleep:(\d+)$/)?.[1];
-if (prompt === 'hang' || prompt.endsWith('\n\nhang')) { setInterval(() => {}, 1000); }
+const fixtureControl = process.env.SOL_TEST_DSH_RUNS ? prompt.match(/\nCoordinator instructions:\nfixture-(hang|sleep:\d+)\n/)?.[1] : null;
+const sleep = prompt.match(/(?:^|\n\n)sleep:(\d+)$/)?.[1] ?? fixtureControl?.match(/^sleep:(\d+)$/)?.[1];
+if (prompt === 'hang' || prompt.endsWith('\n\nhang') || fixtureControl === 'hang') { setInterval(() => {}, 1000); }
 else if (prompt === 'nofinal') { process.exit(0); }
 else if (sleep) {
   setTimeout(() => {

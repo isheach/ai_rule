@@ -59,14 +59,13 @@ function contextFile(config, reference) {
 // Issue only after a trusted host parent-chain lookup. No --root/--child
 // override exists on this production path; the child comes from the helper's
 // own host environment.
-export function issueContext({ config, env = process.env, sessionsRoot = defaultSessionsRoot(), clock = () => new Date(), ttlMs = DEFAULT_TTL_MS } = {}) {
+export function issueContext({ config, env = process.env, sessionsRoot = defaultSessionsRoot(), clock = () => new Date(), ttlMs = DEFAULT_TTL_MS, purpose = 'dsh-root-pool' } = {}) {
+  const allowRoot = purpose === 'sol-coordinator';
+  if (!allowRoot && purpose !== 'dsh-root-pool') throw Error('Unsupported local context purpose.');
   const childId = env.CODEX_THREAD_ID;
   if (!childId) throw Error('CODEX_THREAD_ID is unavailable; refusing to guess a root');
   if (!Number.isInteger(ttlMs) || ttlMs < 30_000 || ttlMs > 15 * 60 * 1000) throw Error('context ttl is out of bounds');
-  const resolved = resolveRootChain({ childId, sessionsRoot });
-  if (resolved.chain.length < 2 || !resolved.chain[0].has_parent) {
-    throw Error('child has no known subagent parent source; refusing to guess a root');
-  }
+  const resolved = resolveRootChain({ childId, sessionsRoot, allowRoot });
   const dir = ensureContextDir(config);
   const id = crypto.randomBytes(32).toString('base64url');
   const now = clock();
@@ -74,7 +73,8 @@ export function issueContext({ config, env = process.env, sessionsRoot = default
   if (!Number.isFinite(created.getTime())) throw Error('context clock returned an invalid date');
   const value = {
     schema: 1, context_id: id, root_chat_id: resolved.rootChatId, child_id: childId,
-    chain_length: resolved.chain.length, created_at: created.toISOString(), expires_at: new Date(created.getTime() + ttlMs).toISOString()
+    chain_length: resolved.chain.length, created_at: created.toISOString(), expires_at: new Date(created.getTime() + ttlMs).toISOString(),
+    ...(allowRoot ? { purpose } : {})
   };
   const file = path.join(dir, `${id}.json`);
   const temp = `${file}.${process.pid}.${crypto.randomUUID()}.tmp`;
@@ -83,7 +83,9 @@ export function issueContext({ config, env = process.env, sessionsRoot = default
   return { context_ref: id, expires_at: value.expires_at };
 }
 
-export function resolveContext({ config, reference, sessionsRoot = defaultSessionsRoot(), clock = () => new Date() } = {}) {
+export function resolveContext({ config, reference, sessionsRoot = defaultSessionsRoot(), clock = () => new Date(), purpose = 'dsh-root-pool' } = {}) {
+  const allowRoot = purpose === 'sol-coordinator';
+  if (!allowRoot && purpose !== 'dsh-root-pool') throw Error('Unsupported local context purpose.');
   const { dir, file } = contextFile(config, reference);
   const stat = fs.lstatSync(file);
   if (!stat.isFile() || stat.isSymbolicLink()) throw Error('context reference is not a regular local file');
@@ -97,6 +99,7 @@ export function resolveContext({ config, reference, sessionsRoot = defaultSessio
     || typeof value.child_id !== 'string' || typeof value.created_at !== 'string' || typeof value.expires_at !== 'string') {
     throw Error('context reference has an invalid shape');
   }
+  if ((value.purpose ?? 'dsh-root-pool') !== purpose) throw Error('context reference belongs to a different local service');
   const now = clock();
   const current = now instanceof Date ? now : new Date(now);
   const created = Date.parse(value.created_at);
@@ -108,9 +111,8 @@ export function resolveContext({ config, reference, sessionsRoot = defaultSessio
   // Resolve the host parent chain AGAIN from the file's child ID. A stale or
   // edited root_chat_id is not followed, and the UUID alone is not an identity.
   let resolved;
-  try { resolved = resolveRootChain({ childId: value.child_id, sessionsRoot }); }
+  try { resolved = resolveRootChain({ childId: value.child_id, sessionsRoot, allowRoot }); }
   catch (error) { throw Error(`context host chain cannot be re-resolved: ${error.message}`); }
-  if (resolved.chain.length < 2 || !resolved.chain[0].has_parent) throw Error('context child has no known subagent parent source');
   if (resolved.rootChatId !== value.root_chat_id) throw Error('context root does not match the current host parent chain');
   return { rootId: resolved.rootChatId, childId: value.child_id, contextId: reference, expiresAt: value.expires_at, chainLength: resolved.chain.length };
 }

@@ -1,6 +1,6 @@
 # ai_rule
 
-两台 Windows 电脑共用的 Codex 调度规则、Skill 和 DSH MCP 桥接器。桥接器和安装器版本为 **v0.3.0**，规则修订为 **2026-11-19.dsh-peak-modes-r1**。
+两台 Windows 电脑共用的 Codex 调度规则、Skill 和本机 MCP 桥接器。Sol 主控默认使用 Codex 订阅，可按会话切换为独立 OpenAI Responses API。
 
 ## 已落地与尚未验收
 
@@ -8,7 +8,8 @@
 |---|---|
 | 跨会话全局规则、调度 Skill | 已实现，可安装；保留宿主安全策略 |
 | 会话模式保持 | 已写入 AGENTS/Skill；同一会话省略模式时沿用，明确选择才切换；不是程序强制路由 |
-| Astra → 真实 Sol → 外部 MCP | 已补全实际调用者规则、证据与交接流程；不是技术工具隔离，真实链路须本机验收 |
+| Astra → 真实 Sol → 外部执行 | 订阅路径由原生 Sol 实际派单。可选 API 路径由 Responses API Sol 调用本机执行适配器，离线测试验证编排，真实链路须本机验收 |
+| Sol 协调来源 | 新会话默认 `subscription`，可单次或按会话切换 `api`。执行模式和峰谷选择独立，活动任务保留原协调器与执行后端 |
 | 低开销等待 | r3 规则优先有界同步 run，必要异步使用最长有效 wait 并减少无变化汇报；代码未改，实际节省未量化 |
 | 安装预览、合并、备份、冲突检测、回滚 | 已实现；不覆盖原有全局配置 |
 | DSH 原生 headless stdio MCP | 已实现；同步/异步提交、等待、取消、回执、幂等、独占锁 |
@@ -25,8 +26,8 @@
 指定 HY4 / WorkBuddy DeepSeek / DSH：设为当前会话模式，Sol Max **只规划、调度、验收**；指定代理负责实际执行和自身监守，**不使用 Luna**。
 后续消息不写模式时仍沿用当前选择，不会每轮恢复 A。Astra 负责总体方向。外部后端失败不得自动切回 Sol 或其他模型。唯一例外是本机显式启用、用户授权、结构化证明“未受理”的 DSH→HY4 预准入回退，最多一次；已受理/运行中/超时/断连/未知/权限/参数/busy/lock/停止均不回退。DSH 仍是默认；Windows 临时标准 stdio 已实际验证隔离 DSH 拒绝后的真实 HY4 native 文件任务，但每台机器的 MCP 注册/宿主加载仍需各自验收。详见 [docs/hy4-fallback.md](docs/hy4-fallback.md) 与 [docs/codebuddy-acp.md](docs/codebuddy-acp.md)。
 
-DSH 路径：**Astra 主代理 → 真实 Sol Max（max）子代理 → dsh-opencode-go MCP → DSH 原生 Harness → OpenCode Go 模型 API**。
-HY4 与 WorkBuddy DeepSeek 同样必须由真实 Sol 协调子代理调用；创建 Sol 却由 Astra 转发 MCP 不合格。
+订阅协调链路为 **Astra 主代理 → 真实 Sol Max（max）子代理 → DSH 或 WorkBuddy MCP → 原生执行 Harness**。HY4 与 WorkBuddy DeepSeek 同样由实际 Sol 协调子代理派单。订阅调度仍使用宿主真实 agent ID 验收。
+API 协调链路为 **Codex 主会话 → 本机 sol-coordinator MCP → 独立 OpenAI Responses API Sol → DSH 根池或已授权 WorkBuddy DSF 桥接器**。API Sol 负责规划、派单、验收和修订，DSH 仍使用 `opencode-go / deepseek-v4.1-flash / max`。Windows 安装和真实 API 验证见 [Sol 协调来源](docs/sol-coordinator.md)。
 **没有 OpenCode CLI / OpenCode Harness 这一层。** 主会话已经由宿主证实为 Sol 时不需要再套一个 Sol；Astra 不能模拟 Sol。
 当前 HY4 文件工作契约：默认只读；`workspace-write` 必须本机显式启用、任务 `cwd`/`authorizationNote` 和 `writeScopes`/`writes` 授权；目录 scope 支持 `create`/`replace`/`edit`，精确文件支持 `create`/`edit`/`write`；不要求预计算内容，可选 hash 只用于 full-content write。命令源码保留但默认关闭。详见 [docs/codebuddy-acp.md](docs/codebuddy-acp.md)。
 
@@ -34,7 +35,7 @@ HY4 与 WorkBuddy DeepSeek 同样必须由真实 Sol 协调子代理调用；创
 
 ## 等待策略：少唤醒，少重复汇报
 
-r3 保留上述实际调用链和会话模式规则，只调整现有接口的使用策略：
+r3 规范订阅 Sol 调用 DSH 工具时的等待：
 
 | 情况 | Sol 的处理 |
 |---|---|
@@ -44,7 +45,7 @@ r3 保留上述实际调用链和会话模式规则，只调整现有接口的�
 | 异步等待，宿主允许足够时长 | 显式 waitMs=60000，正常 running 直接续等，不每次重述进度 |
 | 完成、失败、超时、阻塞、审批、实质里程碑或用户询问 | 必要分析与汇报；不隐藏异常或忽视取消 |
 
-Astra 继续原生 wait 等真实 Sol agent ID，不直接查询 DSH。Sol 不因每个等待窗口到期就重新推演验收计划，也不额外 get/status 或发送催问。
+Astra 在订阅路径用原生 wait 等真实 Sol agent ID，在 API 路径等待 `sol-coordinator` 的原协调任务。Sol 使用原后端的等待接口，在执行回执有变化时统一验收。
 若宿主超时不容纳 60 秒等待，使用已核实限制内的最长值并说明一次。任务 timeoutMs 和单次 waitMs 不同；等待窗口结束不等于任务失败。
 当前桥接器 wait 上限仍是 60000 ms，默认仍是 25000 ms；不能传五分钟等待参数。run 已有的内部循环不返回给 Sol，不需要本次修改源码。
 本更新不保证零模型唤醒或固定 Token 降幅，也没有新增后台主动通知。详见 [docs/waiting-policy.md](docs/waiting-policy.md)。
@@ -110,7 +111,11 @@ node .\scripts\manage.mjs --verify
 
 ### 可选根池 MCP
 
-`dsh-root-pool` 注册并经宿主加载后，“使用 DSH”选择根池。显式指定的默认或命名服务仍按原入口使用。Sol 通过已注册服务旁的 `cli.mjs context` 取得当前根上下文，用它派单、查询、等待、取消和设置日程。同一 Sol 可在同一个根同时运行多个独立 DSH，机器级容量默认 3。普通任务默认工作区可写，新根默认关闭峰谷。已部署实例的 runtime、会话和旧回执保留。注册、权限和生命周期见 [docs/root-pool.md](docs/root-pool.md)。
+订阅路径下，`dsh-root-pool` 注册并经宿主加载后，“使用 DSH”选择根池。显式指定的默认或命名服务仍按原入口使用。Sol 通过已注册服务旁的 `cli.mjs context` 取得当前根上下文，用它派单、查询、等待、取消和设置日程。同一 Sol 可在同一个根同时运行多个独立 DSH，机器级容量默认 3。普通任务默认工作区可写，新根默认关闭峰谷。注册、权限和生命周期见 [docs/root-pool.md](docs/root-pool.md)。
+
+### 可选 API Sol 协调器
+
+安装器可根据已有 DSH 设置生成本机配置，或沿用一个符合工作区和权限限制的现有根池。可选择显式本机 JSON 配置，并加入已授权的 WorkBuddy DSF 连接。安装预览、应用和结构验证均不调用模型，独立 API 访问在目标机器上显式验证。安装、回滚、变量名和例句见 [Sol 协调来源](docs/sol-coordinator.md)。
 
 ### 第一次端到端验收
 
@@ -153,12 +158,15 @@ DSH 负责实际执行、测试、修复及必要监守；Sol 不代执行，不
 |---|---|
 | 全新会话直接布置任务，未选择模式 | 默认 A，由 Sol Max 执行 |
 | “使用 DSH，分析……” | 将 DSH 设为会话模式，后续省略模式仍保持 |
+| “Sol 主控切到 API” | 后续任务由 API Sol 协调，执行模式和峰谷选择继续沿用 |
+| “Sol 主控切回订阅” | 后续任务由订阅 Sol 协调，已有任务由原协调器处理 |
+| “仅本次由 API Sol 主控” | 仅当前任务切换来源，后续沿用原会话设置 |
 | “切换为原生方案 A” | 后续使用 A |
 | “仅本次用 HY4” | 仅该任务例外，结束后回到原模式；后端须已部署且可用 |
 | “HY4 比 DSH 好吗？” | 只是讨论，不切换 |
 | 已选 DSH，但 DSH 报错或不可用 | 默认报告阻塞、保留选择；仅“未受理”的日程/受支持预准入探测且本机显式授权、HY4 已验证时，可按策略转一次 |
 
-全新会话未指定时仍为 A，不自动继承另一会话或另一台电脑的模式。恢复原会话时保留有证据的原选择。
+全新会话未指定时采用 A / `subscription`。恢复原会话时保留有证据的原执行模式和协调来源。
 详细规则、旧任务交接与手工验收场景见 [docs/session-modes.md](docs/session-modes.md)；r3 等待补充见 [docs/waiting-policy.md](docs/waiting-policy.md)。CodeBuddy ACP 适配器见 [docs/codebuddy-acp.md](docs/codebuddy-acp.md)；可选的根池 MCP 见 [docs/root-pool.md](docs/root-pool.md)。
 
 规则安装到有效的全局 AGENTS 文件，Skill 安装到 `~/.agents/skills/multi-agent-dispatch`。若存在非空 `AGENTS.override.md`，合并到这个实际生效的文件，不另写一份被忽略的 AGENTS。
@@ -191,7 +199,7 @@ if ($LASTEXITCODE -ne 0) { throw "规则安装失败。" }
 node .\scripts\manage.mjs --verify
 ```
 
-不带 `--enable-dsh` 或 `--workbuddy-bridge` 时，仅更新规则和 Skill；不删除已有 DSH MCP，不重写 config.toml，也不改变已有 AllowWrite 设置、凭据或 DSH Profile。安装器与桥接器版本现统一为 v0.3.0；仅更新规则时不会改动 MCP 注册。同步前确认远端没有超出预期范围的额外代码变更；意外改动 bridges/scripts 时停止并评估活动任务。
+运行无选项的预览、应用命令时，仅更新规则和 Skill。已有 MCP、权限配置和 DSH profile 继续使用原注册。可选的 Sol MCP 安装使用 [单独的注册命令](docs/sol-coordinator.md)。同步前确认远端没有超出预期范围的额外代码变更；意外改动 bridges/scripts 时停止并评估活动任务。
 
 **有活动任务时不要立即重启 Codex。** 在旧会话明确要求 Astra 与 Sol 分别读取更新后的有效 AGENTS 和 Skill；保留原 MCP 生命周期，按 Skill 交接现有任务，不重复提交。没有活动任务后，再重启或新建会话检查启动加载。远端提交和本地安装都不会自动重写已有会话上下文。
 

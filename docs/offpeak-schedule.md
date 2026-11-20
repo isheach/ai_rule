@@ -1,6 +1,6 @@
 # DSH 峰谷调度
 
-用户可以说“本会话用峰谷模式 2”或指定下表中的其他模式。选择独立于会话的执行后端，适用于 DSH 会话。新会话默认模式 1。
+用户可以说“本会话用峰谷模式 2”或指定下表中的其他模式。此选项适用于 DSH 会话，与 Sol 协调来源分开设置。新会话默认模式 1。
 
 | 模式 | 谷时 | 峰前十分钟 | 实际峰时 |
 |---|---|---|---|
@@ -14,6 +14,8 @@
 
 协调者用当前已验证的上下文调用 `set_pool_schedule`，传 `scheduleMode: 1`、`2` 或 `3`。传 `enabled` 的旧调用仍有效。选择随本根持久化，适用于新派单和同根运行中的 DSH。用 `get_pool_status` 查看 `schedule.mode`、`phase` 和 `new_task_backend`。`accept_new_tasks` 仍表示 DSH 准入。切到模式 1 后，仍在运行的 DSH 继续运行。其他根的选项独立。
 
+API Sol 使用 `get_sol_schedule` 和 `set_sol_schedule` 访问其根池日程。与订阅 Sol 共用根池时，同根读写的是同一选择。从默认或命名 DSH 服务首次转入 API 根池时，在新派单前带入已有授权选择。 [Sol 协调来源](sol-coordinator.md)
+
 ## 默认和命名 DSH 服务
 
 协调者把选择保存在当前会话，并在 `start_dsh_task` 或 `run_dsh_task` 传 `scheduleMode`。切换时用 `set_dsh_task_schedule` 和原任务 ID 更新本会话仍在运行的 DSH。派单兼容旧 `scheduleEnabled`，更新兼容旧 `enabled`。每次只传一个选项。共享服务的不同会话各自传值。`get_dsh_schedule_status` 默认查看活动任务或服务默认状态，传 `scheduleMode` 可以预览指定模式。
@@ -21,6 +23,8 @@
 注册参数 `--schedule-config` 指定日历，省略时用内置日历。安装器的 `--offpeak-schedule` 明确注册仓库日历，`--disable-offpeak-schedule` 移除定制注册路径。更改日历文件或服务注册后，等活动任务结束再重新加载。单个会话切换日程无需重启。
 
 ## 模式 2 的峰时派发
+
+下列调用步骤由订阅 Sol 执行。API Sol 在已核验的根下使用同一根池和交接规则，连接显式配置授权的 WorkBuddy DSF，按实际 schema 领取、派单并回填原记录。
 
 1. 使用本会话的正常 DSH 派单入口和稳定的 `idempotencyKey`。经过现有参数、权限、会话、锁和日历检查后，实际峰时的新任务返回 `status: "workbuddy_pending"` 和 `workbuddy_dispatch`。此时没有模型任务 ID。谷时已受理的任务、旧 DSH `sessionId`、锁冲突、权限拒绝和未知状态都不产生交接。
 2. 由唯一的 Sol 协调者核对宿主当前加载的 `deepseek-v4-flash-workbuddy`。用其实际 `get_task_bridge_status` 和工具 schema 验证 ready、固定模型 `deepseek-v4-flash`、授权 profile 及原任务所需目录和权限。如果服务缺失、忙碌、认证失败、模型或权限不匹配，调用 `finish_workbuddy_dsf_dispatch` 将待派发记录置为 `unavailable` 或 `refused`，向用户报告具体阻塞。
