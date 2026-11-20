@@ -43,6 +43,8 @@ namespace AiRule.Sol.Windows
                 try { BrokerState.Unprotect(File.ReadAllBytes(args[1])); return 1; }
                 catch (System.Security.Cryptography.CryptographicException) { return 0; }
             }
+            if (args.Length == 2 && args[0] == "ci-probe-status")
+                return ProbeStatus(new SecurityIdentifier(args[1])).GetAwaiter().GetResult();
             if (args.Length != 2 || args[0] != "unit") return 2;
             try
             {
@@ -233,5 +235,29 @@ namespace AiRule.Sol.Windows
 
         [DllImport("advapi32.dll", SetLastError = true)]
         private static extern bool GetTokenInformation(IntPtr token, int type, IntPtr info, int size, out int needed);
+
+        private static async Task<int> ProbeStatus(SecurityIdentifier expected)
+        {
+            using (var identity = WindowsIdentity.GetCurrent())
+                Console.WriteLine(expected.Equals(identity.User) ? "caller-sid-match" : "caller-sid-mismatch");
+            try
+            {
+                using (var pipe = WindowsPipe.Connect(WindowsPipe.StatusPipe))
+                using (var timer = new CancellationTokenSource(Protocol.IoTimeoutMs))
+                {
+                    Console.WriteLine("pipe-open");
+                    Console.WriteLine(WindowsPipe.OwnedBy(pipe.SafePipeHandle, WindowsPipe.ServiceSid) ? "pipe-owner-match" : "pipe-owner-mismatch");
+                    bool authentic = WindowsPipe.IsBrokerServer(pipe.SafePipeHandle);
+                    Console.WriteLine(authentic ? "scm-match" : "scm-mismatch");
+                    if (!authentic) return 1;
+                    await WindowsPipe.Write(pipe, new[] { Protocol.Hello }, timer.Token);
+                    bool grant = (await WindowsPipe.Read(pipe, 1, timer.Token))[0] == Protocol.Hello;
+                    Console.WriteLine(grant ? "pipe-granted" : "pipe-denied");
+                }
+            }
+            catch (BrokerException ex) { Console.WriteLine(ex.Code); return 1; }
+            catch (Exception) { Console.WriteLine("pipe-io-failed"); return 1; }
+            return 0;
+        }
     }
 }

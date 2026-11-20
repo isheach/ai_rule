@@ -24,6 +24,10 @@ $nodeFixture = Join-Path $scratch 'status.mjs'
 $cipherFixture = Join-Path $scratch 'encrypted-test-copy.bin'
 $accountNames = [Collections.Generic.List[string]]::new()
 $installed = $false
+$allowed = $null
+$safeCodes = @('BROKER_FORBIDDEN', 'BROKER_PROTOCOL', 'BROKER_POLICY_DENIED', 'BROKER_INPUT_LIMIT',
+    'BROKER_CREDENTIAL_MISSING', 'BROKER_RATE_LIMITED', 'BROKER_UNAVAILABLE', 'BROKER_BUSY',
+    'BROKER_OUTCOME_UNKNOWN', 'BROKER_STORAGE_UNAVAILABLE', 'UPSTREAM_UNSENT', 'UPSTREAM_UNKNOWN', 'UPSTREAM_HTTP')
 
 function New-TestAccount {
     $name = 'SolBrokerCI_' + [Guid]::NewGuid().ToString('N').Substring(0, 8)
@@ -32,6 +36,10 @@ function New-TestAccount {
     $password.MakeReadOnly()
     $account = New-LocalUser -Name $name -Password $password -PasswordNeverExpires -UserMayNotChangePassword
     $accountNames.Add($name)
+    $users = [Security.Principal.SecurityIdentifier]::new('S-1-5-32-545')
+    if (-not (Get-LocalGroupMember -SID $users | Where-Object { $_.SID -eq $account.SID })) {
+        Add-LocalGroupMember -SID $users -Member $account
+    }
     return [PSCustomObject]@{ Name = $name; Password = $password; Sid = $account.SID.Value }
 }
 
@@ -49,9 +57,15 @@ function Invoke-TestUser($Account, [string]$File, [string]$ArgumentLine, [string
     $info.RedirectStandardInput = $true
     $info.RedirectStandardOutput = $true
     $info.RedirectStandardError = $true
-    $process = [Diagnostics.Process]::Start($info)
+    $previousEncoding = [Console]::InputEncoding
     try {
-        $process.StandardInput.Write($InputText)
+        [Console]::InputEncoding = [Text.UTF8Encoding]::new($false)
+        $process = [Diagnostics.Process]::Start($info)
+    }
+    finally { [Console]::InputEncoding = $previousEncoding }
+    try {
+        $bytes = [Text.Encoding]::UTF8.GetBytes($InputText)
+        if ($bytes.Length) { $process.StandardInput.BaseStream.Write($bytes, 0, $bytes.Length) }
         $process.StandardInput.Close()
         $output = $process.StandardOutput.ReadToEndAsync()
         $errors = $process.StandardError.ReadToEndAsync()
@@ -64,12 +78,42 @@ function Invoke-TestUser($Account, [string]$File, [string]$ArgumentLine, [string
     finally { $process.Dispose() }
 }
 
-function Assert-Status($Reply, [bool]$Ready) {
-    if ($Reply.Status -ne 0 -or $Reply.Error) { throw 'The authorized Windows status client failed.' }
-    $envelope = $Reply.Output | ConvertFrom-Json
-    if (-not $envelope.ok -or $envelope.status -ne 200 -or $envelope.body.ready -ne $Ready -or
-        $envelope.body.model -ne 'gpt-6.2-sol' -or $envelope.body.reasoning_effort -ne 'max') {
-        throw 'The Windows status client returned an unexpected reply.'
+function Assert-Status([string]$Step, $Reply, [bool]$Ready) {
+    if ($Reply.Status -ne 0 -or $Reply.Error) {
+        throw "$Step failed (exit $($Reply.Status), stderr present $([bool]$Reply.Error))."
+    }
+    try { $envelope = $Reply.Output | ConvertFrom-Json }
+    catch { throw "$Step returned invalid JSON." }
+    if ($envelope.ok -ne $true) {
+        $code = if ($envelope.PSObject.Properties['code'] -and $envelope.code -cin $safeCodes) { $envelope.code } else { 'UNKNOWN' }
+        throw "$Step was declined ($code)."
+    }
+    if ($envelope.status -ne 200 -or $envelope.body.ready -ne $Ready -or $envelope.body.model -ne 'gpt-6.2-sol' -or
+        $envelope.body.reasoning_effort -ne 'max') {
+        throw "$Step returned inconsistent status (ready: $($envelope.body.ready -eq $true), expected: $Ready)."
+    }
+    Write-Output "$Step passed."
+}
+
+function Write-SafeDiagnostic {
+    $auditFile = Join-Path $root 'state\audit.jsonl'
+    if (Test-Path -LiteralPath $auditFile) {
+        $operations = @('service', 'status', 'response', 'admin', 'admin_check', 'enroll')
+        $outcomes = $safeCodes + @('started', 'stopped', 'startup_failed', 'listener_failed', 'dpapi_unavailable', 'denied', 'success', 'reserved', 'ipc_closed')
+        foreach ($line in (Get-Content -LiteralPath $auditFile -Tail 24)) {
+            $entry = $line | ConvertFrom-Json
+            if ($entry.operation -cin $operations -and $entry.outcome -cin $outcomes) {
+                Write-Output ('Service audit {0}/{1}' -f $entry.operation, $entry.outcome)
+            }
+        }
+    }
+    if ($null -ne $allowed) {
+        $probe = Invoke-TestUser $allowed $fixture ('ci-probe-status {0}' -f $allowed.Sid)
+        $probeLines = $safeCodes + @('caller-sid-match', 'caller-sid-mismatch', 'pipe-open', 'pipe-owner-match', 'pipe-owner-mismatch',
+            'scm-match', 'scm-mismatch', 'pipe-granted', 'pipe-denied', 'pipe-io-failed')
+        foreach ($line in ($probe.Output -split '\r?\n')) {
+            if ($line -cin $probeLines) { Write-Output "Status probe $line" }
+        }
     }
 }
 
@@ -97,8 +141,8 @@ try {
     & $install -ClientSid $allowed.Sid -ProjectId 'proj_ci_example' -OrganizationId 'org-ci-example'
     $installed = $true
     $statusJson = '{"op":"status"}'
-    Assert-Status (Invoke-TestUser $allowed $exe 'client' $statusJson) $false
-    Assert-Status (Invoke-TestUser $allowed $node ('"{0}"' -f $nodeFixture)) $false
+    Assert-Status 'Authorized native status before enrollment' (Invoke-TestUser $allowed $exe 'client' $statusJson) $false
+    Assert-Status 'Authorized Node status before enrollment' (Invoke-TestUser $allowed $node ('"{0}"' -f $nodeFixture)) $false
 
     $denied = Invoke-TestUser $unlisted $exe 'client' $statusJson
     $errorEnvelope = $denied.Output | ConvertFrom-Json
@@ -109,7 +153,7 @@ try {
 
     & $fixture 'ci-enroll'
     if ($LASTEXITCODE -ne 0) { throw 'Offline synthetic enrollment failed.' }
-    Assert-Status (Invoke-TestUser $allowed $exe 'client' $statusJson) $true
+    Assert-Status 'Authorized native status after enrollment' (Invoke-TestUser $allowed $exe 'client' $statusJson) $true
     if ((Invoke-TestUser $allowed $fixture 'ci-deny-state').Status -ne 0) { throw 'The API client SID could read the broker credential file.' }
     [IO.File]::WriteAllBytes($cipherFixture, [IO.File]::ReadAllBytes($credentialFile))
     if ((Invoke-TestUser $allowed $fixture ('ci-deny-decrypt "{0}"' -f $cipherFixture)).Status -ne 0) {
@@ -117,16 +161,23 @@ try {
     }
 
     Restart-Service -Name $svc
-    Assert-Status (Invoke-TestUser $allowed $node ('"{0}"' -f $nodeFixture)) $true
+    Assert-Status 'Authorized Node status after service restart' (Invoke-TestUser $allowed $node ('"{0}"' -f $nodeFixture)) $true
     $lines = Get-Content -LiteralPath (Join-Path $root 'state\audit.jsonl')
     foreach ($line in $lines) {
         $entry = $line | ConvertFrom-Json
-        if (($entry.PSObject.Properties.Name | Sort-Object) -join ',' -ne 'operation,outcome,status,time') {
+        if ((($entry.PSObject.Properties.Name | Sort-Object) -join ',') -ne 'operation,outcome,status,time') {
             throw 'An unexpected field appeared in the broker audit.'
         }
         if ($line -match 'offline-broker-synthetic-value|proj_ci_example|org-ci-example') { throw 'Broker audit contains credential or routing data.' }
     }
     'Windows service, distinct SID enforcement, Node status, restart and isolated DPAPI passed offline.'
+}
+catch {
+    if ($installed) {
+        try { Write-SafeDiagnostic }
+        catch { Write-Output 'The status probe could not complete.' }
+    }
+    throw
 }
 finally {
     try { if ($installed) { & $install -Uninstall } }
