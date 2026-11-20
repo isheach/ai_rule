@@ -6,7 +6,7 @@ import path from 'node:path';
 import { fileURLToPath } from 'node:url';
 import { spawn, spawnSync } from 'node:child_process';
 import { configuredRoute, ROUTE, validateTask, redact, dshArgs, TaskManager, preflight } from '../bridges/dsh/core.mjs';
-import { mergeBlock, buildPlan } from '../scripts/manage.mjs';
+import { mergeBlock, buildPlan, verifyInstallation } from '../scripts/manage.mjs';
 import { AdmissionCode, PreAdmissionRejection } from '../bridges/dsh/routing.mjs';
 import { validateSchedule } from '../bridges/dsh/schedule.mjs';
 const root = path.resolve(path.dirname(fileURLToPath(import.meta.url)), '..');
@@ -67,13 +67,122 @@ test('DSH registration detects existing unmanaged same-name service', () => {
 });
 test('installer preview, apply, idempotence and safe rollback', () => {
   const home = temp(), script = path.join(root, 'scripts', 'manage.mjs');
-  const run = (...a) => spawnSync(process.execPath, [script, '--home', home, ...a], { encoding: 'utf8' });
+  const run = (...a) => spawnSync(process.execPath, [script, '--home', home, '--codex-home', path.join(home, '.codex'), ...a], { encoding: 'utf8' });
   assert.equal(run().status, 0); assert.ok(!fs.existsSync(path.join(home, '.codex', 'AGENTS.md')));
   assert.equal(run('--apply').status, 0); assert.match(run('--apply').stdout, /already up to date/);
   const backups = path.join(home, '.codex', 'ai-rule-backups');
   const manifest = path.join(backups, fs.readdirSync(backups)[0], 'manifest.json');
   assert.equal(run('--rollback', manifest).status, 0);
   assert.ok(!fs.existsSync(path.join(home, '.codex', 'AGENTS.md')));
+});
+test('opt-in Sol installer provisions from legacy DSH, preserves services and active runtime, and verifies and rolls back offline', t => {
+  const home = temp(), codexHome = path.join(home, '.codex'), cwd = path.join(home, 'approved workspace');
+  t.after(() => fs.rmSync(home, { recursive: true, force: true }));
+  const legacyRuntime = path.join(home, 'legacy dsh runtime');
+  for (const directory of [codexHome, cwd, legacyRuntime]) fs.mkdirSync(directory);
+  const legacyLock = path.join(legacyRuntime, 'active.lock');
+  fs.writeFileSync(legacyLock, 'foreign active task');
+  const original = 'model = "keep"\n[profiles.project]\nmodel = "keep-project"\n'
+    + '[mcp_servers.deepseek-v4-flash-workbuddy]\ncommand = "keep-workbuddy"\n'
+    + '[mcp_servers.deepseek-v4-flash-workbuddy.env]\nLOCAL_ONLY = "dont-print-fixture"\n';
+  const calendar = path.join(root, 'config', 'offpeak.schedule.json');
+  const dshBridge = path.join(root, 'bridges', 'dsh', 'server.mjs');
+  const legacy = '[mcp_servers.dsh-opencode-go]\ncommand = ' + JSON.stringify(process.execPath)
+    + '\nargs = ' + JSON.stringify([dshBridge, '--dsh-entry', mock, '--read-only', '--runtime', legacyRuntime, '--schedule-config', calendar]);
+  const named = '[mcp_servers.dsh-opencode-go-bravo]\ncommand = "kept"\nargs = '
+    + JSON.stringify([dshBridge, '--instance', 'bravo', '--schedule-config', calendar]);
+  const originalConfig = mergeBlock(original, legacy + '\n\n' + named, 'toml');
+  const configFile = path.join(codexHome, 'config.toml');
+  fs.writeFileSync(configFile, originalConfig);
+  const run = (...args) => spawnSync(process.execPath, [path.join(root, 'scripts', 'manage.mjs'), '--home', home, '--codex-home', codexHome, ...args], {
+    encoding: 'utf8', env: { ...process.env, SOL_OPENAI_API_KEY: 'fixture-key-do-not-print' }
+  });
+  const options = ['--sol-workspace-root', cwd, '--sol-model', 'gpt-6.2-sol', '--sol-reasoning-effort', 'max'];
+  const preview = run(...options);
+  assert.equal(preview.status, 0, preview.stderr);
+  assert.match(preview.stdout, /PLAN ONLY/);
+  assert.doesNotMatch(preview.stdout, /dont-print-fixture|fixture-key-do-not-print/);
+  const solDir = path.join(codexHome, 'ai-rule-sol');
+  assert.equal(fs.existsSync(solDir), false);
+  assert.equal(fs.readFileSync(configFile, 'utf8'), originalConfig);
+  const applied = run('--apply', ...options);
+  assert.equal(applied.status, 0, applied.stderr);
+  const installed = fs.readFileSync(configFile, 'utf8');
+  assert.ok(installed.startsWith(original));
+  assert.ok(installed.includes(legacy));
+  assert.ok(installed.includes(named));
+  assert.match(installed, /env_vars = \["CODEX_HOME","SOL_OPENAI_API_KEY"\]/);
+  assert.doesNotMatch(installed, /fixture-key-do-not-print/);
+  const localPool = JSON.parse(fs.readFileSync(path.join(solDir, 'pool.local.json'), 'utf8'));
+  assert.equal(localPool.allow_write, false);
+  assert.equal(localPool.schedule_config, calendar);
+  assert.equal(localPool.dsh_entry, mock);
+  assert.notEqual(localPool.pool_root, legacyRuntime);
+  assert.match(run('--apply', ...options).stdout, /already up to date/);
+  const verify = run('--verify');
+  assert.equal(verify.status, 0, verify.stderr || verify.stdout);
+  const checks = JSON.parse(verify.stdout);
+  assert.deepEqual(checks.sol_coordinator, { registered: true, managed: true, structure_valid: true });
+  assert.equal(checks.live_model_call_performed, false);
+  const invalid = installed.replace(/(\[mcp_servers\.sol-coordinator\]\n)command = .+/, '$1command = "wrong-command"');
+  fs.writeFileSync(configFile, invalid);
+  assert.equal(verifyInstallation({ home, codexHome }).sol_coordinator.structure_valid, false);
+  const backups = path.join(codexHome, 'ai-rule-backups');
+  const manifest = path.join(backups, fs.readdirSync(backups)[0], 'manifest.json');
+  assert.equal(run('--rollback', manifest).status, 1);
+  fs.writeFileSync(configFile, installed);
+  assert.equal(run('--rollback', manifest).status, 0);
+  assert.equal(fs.readFileSync(configFile, 'utf8'), originalConfig);
+  assert.equal(fs.readFileSync(legacyLock, 'utf8'), 'foreign active task');
+  assert.equal(fs.existsSync(path.join(solDir, 'coordinator.local.json')), false);
+  assert.equal(fs.existsSync(path.join(solDir, 'pool.local.json')), false);
+});
+
+test('Sol setup reuses an existing approved root-pool and leaves manual coordinator registration alone', t => {
+  const home = temp(), codexHome = path.join(home, '.codex'), cwd = path.join(home, 'approved');
+  t.after(() => fs.rmSync(home, { recursive: true, force: true }));
+  fs.mkdirSync(codexHome);
+  fs.mkdirSync(cwd);
+  const poolFile = path.join(home, 'existing-pool.local.json');
+  const poolConfig = { workspace_root: cwd, pool_root: path.join(home, 'pool'), allow_write: false,
+    dsh_entry: mock, schedule_config: path.join(root, 'config', 'offpeak.schedule.json') };
+  fs.writeFileSync(poolFile, JSON.stringify(poolConfig));
+  const poolBridge = path.join(root, 'bridges', 'pool', 'server.mjs');
+  const toml = '["mcp_servers" . \'dsh-root-pool\' ]\ncommand = ' + JSON.stringify(process.execPath)
+    + '\nargs = [\n  ' + [poolBridge, '--config', poolFile, '--read-only'].map(value => JSON.stringify(value)).join(',\n  ') + ',\n]\n';
+  const definition = path.join(codexHome, 'config.toml');
+  fs.writeFileSync(definition, toml);
+  const planOptions = { home, codexHome, solWorkspaceRoot: cwd, solModel: 'gpt-6.2-sol', solReasoningEffort: 'max' };
+  const { plan } = buildPlan(planOptions);
+  assert.equal(plan.some(item => item.file.endsWith('pool.local.json')), false);
+  const generated = plan.find(item => item.file.endsWith('coordinator.local.json'));
+  assert.equal(JSON.parse(generated.data).pool_config, fs.realpathSync(poolFile));
+  assert.ok(plan.find(item => item.file === definition).data.startsWith(toml));
+  const explicit = path.join(home, 'explicit.local.json');
+  fs.writeFileSync(explicit, generated.data);
+  const explicitPlan = buildPlan({ home, codexHome, solCoordinatorConfig: explicit });
+  assert.equal(explicitPlan.solCoordinatorConfig, fs.realpathSync(explicit));
+  assert.equal(explicitPlan.plan.some(item => item.file === explicit), false);
+  fs.appendFileSync(definition, "\n[ mcp_servers . 'sol-coordinator' ]\ncommand = 'unchanged'\n");
+  assert.throws(() => buildPlan(planOptions), /Unmanaged MCP sol-coordinator/);
+  assert.match(fs.readFileSync(definition, 'utf8'), /unchanged/);
+});
+test('Windows PowerShell wrapper forwards Sol preview options without writes', { skip: process.platform !== 'win32' }, t => {
+  const home = temp(), codexHome = path.join(home, '.codex-test'), cwd = path.join(home, 'approved workspace');
+  t.after(() => fs.rmSync(home, { recursive: true, force: true }));
+  fs.mkdirSync(cwd);
+  const wrapper = path.join(root, 'scripts', 'install.ps1');
+  const result = spawnSync('powershell.exe', [
+    '-NoLogo', '-NoProfile', '-NonInteractive', '-File', wrapper,
+    '-CodexHome', codexHome, '-SolWorkspaceRoot', cwd, '-DshEntry', mock,
+    '-SolModel', 'gpt-6.2-sol', '-SolReasoningEffort', 'max'
+  ], { encoding: 'utf8', env: { ...process.env, USERPROFILE: home }, windowsHide: true, timeout: 30000 });
+  assert.equal(result.status, 0, result.stderr || result.stdout || result.error?.message);
+  assert.match(result.stdout, /PLAN ONLY/);
+  assert.match(result.stdout, /coordinator\.local\.json/);
+  assert.match(result.stdout, /No files changed/);
+  assert.equal(fs.existsSync(codexHome), false);
+  assert.equal(fs.existsSync(path.join(home, '.agents')), false);
 });
 test('completed receipt, tool count, no thinking/tool payload logs, idempotence', async () => {
   const cwd = temp(), runtime = temp(); const m = new TaskManager({ cli, runtime });

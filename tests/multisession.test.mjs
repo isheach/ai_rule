@@ -189,7 +189,7 @@ test('installer adds named services and preserves legacy managed and unmanaged s
   assert.ok(config.includes('[mcp_servers.unrelated]'));
   assert.equal((config.match(/\[mcp_servers\.dsh-opencode-go\]/g) || []).length, 1);
   const script = path.join(root, 'scripts', 'manage.mjs');
-  const run = spawnSync(process.execPath, [script, '--home', home, '--enable-dsh', '--dsh-instance', 'alpha', '--dsh-instance', 'bravo', '--dsh-entry', mock, '--offpeak-schedule', '--apply'], { encoding: 'utf8' });
+  const run = spawnSync(process.execPath, [script, '--home', home, '--codex-home', ch, '--enable-dsh', '--dsh-instance', 'alpha', '--dsh-instance', 'bravo', '--dsh-entry', mock, '--offpeak-schedule', '--apply'], { encoding: 'utf8' });
   assert.equal(run.status, 0, run.stderr || run.stdout);
   const checks = verifyInstallation({ home, codexHome: ch });
   assert.equal(checks.dsh_instance_count, 3);

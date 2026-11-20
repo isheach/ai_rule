@@ -1,0 +1,18 @@
+{
+  "state_dir": "C:\\Users\\YOUR_USER\\.codex\\ai-rule-sol\\state",
+  "pool_config": "C:\\Users\\YOUR_USER\\.codex\\ai-rule-sol\\pool.local.json",
+  "openai": {
+    "model": "gpt-6.2-sol",
+    "reasoning_effort": "max",
+    "api_key_env": "SOL_OPENAI_API_KEY"
+  },
+  "limits": {
+    "max_responses": 8,
+    "max_delegations": 3,
+    "max_output_tokens": 16000,
+    "max_total_tokens": 60000,
+    "max_input_bytes": 192000,
+    "api_timeout_ms": 180000,
+    "task_timeout_ms": 900000
+  }
+}

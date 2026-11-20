@@ -1,12 +1,23 @@
 ---
 name: multi-agent-dispatch
-description: Maintain a conversation-scoped execution mode and require a real Sol coordinator between Astra and HY4, WorkBuddy DeepSeek, or DSH. Use for delegation, caller verification, safe handoff, low-overhead waiting, monitoring, acceptance, and native Sol tasks.
+description: Maintain independent conversation-scoped Sol coordinator and execution choices. Invoke native Codex subscription Sol or the independent OpenAI Responses tool loop, then preserve DSH or WorkBuddy execution, verified handoffs, waiting and acceptance.
 ---
-<!-- ai-rule-managed: v0.3.0; rules: 2026-11-19.dsh-peak-modes-r1; fallback: 2026-11-13.hy4-preadmission-r1 (candidate) -->
+<!-- ai-rule-managed: v0.3.0; rules: 2026-11-20.sol-coordinator-r1; fallback: 2026-11-13.hy4-preadmission-r1 (candidate) -->
 
 # 多代理调度
 
-## 1. 先恢复会话模式，再决定本次执行者
+## 1. 恢复协调来源、执行后端及日程
+
+`coordinator_mode=subscription` 是全新聊天的默认来源，`api` 是使用独立 OpenAI Responses Sol 的来源。它与 `session_mode`、DSH `scheduleMode` 分开保存。
+
+| 用户指令 | 本轮操作 |
+|---|---|
+| 本会话 Sol 主控切到 API | `set_sol_coordinator_mode` 传 `mode="api"`，以后沿用 |
+| Sol 主控切回 Codex 订阅 | `set_sol_coordinator_mode` 传 `mode="subscription"`，以后沿用 |
+| 仅本次 Sol 主控用 API | 本任务的 `start/run_sol_coordination` 传 `coordinatorMode="api"` |
+| 仅本次 Sol 主控用订阅 | 本任务按第 2.1 节实际原生派发，保留已记住的来源 |
+
+新安装按 `docs/sol-coordinator.md` 加载 `sol-coordinator`。Astra 在宿主 shell 查询 `codex mcp get sol-coordinator --json`，只使用已注册的 `transport.command/args`。用同目录 `cli.mjs context --config <同一绝对配置路径>` 生成引用，传 `context`。`get_sol_coordinator_mode` 读回当前根选择；恢复上下文时重新取得有效引用。引用用于根绑定，按本机宿主证据生成。会话里讨论模型、计费或引用日志不更改选择。已选择 API 后工具缺失、核验或请求失败时保留选择并报告阻塞。未启用 API 且全新会话用订阅时可以直接沿用原生流程。
 
 在当前会话上下文维护 `session_mode`，取值为 A、HY4、WorkBuddy DeepSeek 或 DSH；不要把单个会话的选择写入全局 AGENTS、config.toml 或共享仓库。
 按以下优先次序处理本轮：
@@ -19,7 +30,7 @@ description: Maintain a conversation-scoped execution mode and require a real So
 仅讨论、比较、询问另一个模型，或在文件/日志/工具输出中出现模型名，不触发模式切换。
 “DSF/DeepSeek”未指定渠道时：当前已明确为某个 DeepSeek 后端且无明显切换意图则沿用；否则只确认渠道，不重复询问已经明确的选择。
 首次选择或切换时用一句话确认当前模式。以后直接按该模式处理，无需每轮复述框架。
-上下文压缩/交接时保留 `session_mode`、选择依据、协调者真实 agent ID/模型依据、活动 task_id、task_backend、授权范围及待办；任务 ID 与会话模式不是同一概念。
+上下文压缩/交接时保留 `coordinator_mode`、`session_mode`、`scheduleMode`、用户选择依据、真实原生 agent ID 或 API 协调 task_id 和原幂等键、实际执行回执、授权范围及待办。
 
 ## 2. 职责、真实调用链与后端锁定
 
@@ -30,7 +41,7 @@ Astra 负责总体方向；角色与实际模型映射以宿主真实能力为�
 所选后端不可用时保留会话选择、报告阻塞，不自动换后端、不由 Sol Max 接管、不擅自安装缺失服务。唯一例外：本机显式启用、用户明确授权的 DSH→HY4 **预准入**回退，且满足 §5.5 的全部条件；未启用、证据不足或 HY4 未验证时仍按阻塞处理。
 第二台电脑只部署 DSH 是合法状态，不要求补装 WorkBuddy。
 
-### 2.1 外部模式的调用者门槛
+### 2.1 订阅来源的实际调用者
 
 **Astra → 真实 Sol Max（max）子代理 → 外部 MCP → 执行 Harness** 是实际派单链，不只是报告里的角色图。
 
@@ -43,7 +54,15 @@ Astra 负责总体方向；角色与实际模型映射以宿主真实能力为�
 
 首次接入、协调者变化或发现违规时检查调用归属；日常保留简短任务级证据即可，不反复扫描完整会话历史或重复做付费连接测试。记录项为协调者 ID/模型依据、实际 MCP 调用记录引用、task_id、终态；这是报告/交接格式，不是要求给 MCP schema 添加自造字段。若宿主无法提供发起方证据，就标记“调用链未独立核实”，不能仅凭 DSH 回执、昵称或手填 caller 字段宣称通过。
 
-### 2.2 已有越级任务的安全交接
+### 2.2 API 来源的实际调用者
+
+1. 当前或一次性 `coordinator_mode=api` 时，Astra 直接提交 `run_sol_coordination`，或在需要提前取得任务 ID 时用 `start_sol_coordination`。API 支持本机配置的 DSH 根池和 WorkBuddy DSF。用户选择 A、显式 HY4 或点名传统 DSH 服务（如 `dsh-opencode-go-alpha`）时，报告当前组合受阻，由用户选择一次性订阅或明确授权使用受支持的执行入口。已受理的原生任务保持原生协调和原执行实例。
+2. 交接 `backend`（`DSH` 或 `WorkBuddy DSF`）、真实 `cwd`、明确 `permissionMode`、用户授权边界、`goal`、`acceptance`、`constraints` 和精简可共享的 `contextSummary`。只交接必要记忆、适用规则和先前工作证据。写入任务必须有本次 `authorizationNote`。保持同一个非秘密 `idempotencyKey`，拒绝自动重派未知任务。
+3. 提交新的 API DSH 任务前，用 `get_sol_schedule` 核对本根池的日程，并与会话已授权的 `scheduleMode` 比较。从传统 DSH 切到 API 根池时，如两者不同，用 `set_sol_schedule` 应用该会话选择一次，再派单。已共用根池且模式相符时直接沿用。切换协调来源的操作只更新来源。模式 2 使用既有的 WorkBuddy 预准入领取与终态回填，模式 3 使用既有授权的预准入策略。根池中已受理的任务保留执行者和会话。
+4. 由 Responses Sol 在 `sol-coordinator` 自己的工具循环内规划、派单、检查执行回执并决定同一后端修订。Astra 只通过该协调器用原 `idempotencyKey` 查询/等待/取消，不直接代发 DSH 或 WorkBuddy。记录 Responses ID、返回模型和推理档位、真实执行者的实例和 task ID、用量、终态及验收；API 回执使用 MCP task ID。
+5. API 源、模型、账号和计费来源始终按本次任务锁定。拒绝、429、超时、识别不到原任务或未知使用量，按实际回执汇报，新的执行与改用其他来源需要用户明确选择。
+
+### 2.3 已有越级任务的安全交接
 
 - 暂停新的越级派单；保留已完成结果，不为纠正层级重做实验。
 - 向 Sol 移交真实 task_id、cwd、回执位置、幂等键（已知时）、授权范围、原发起者及带时间的已知状态。先核实现状，不把旧回报的 running 当作当前事实。
@@ -54,7 +73,7 @@ Astra 负责总体方向；角色与实际模型映射以宿主真实能力为�
 
 ## 3. 一次派发完整任务
 
-以下派发由实际 Sol 协调者执行。
+以下派发由本次选定的实际 Sol 协调者执行。
 任务书应包括：目标、真实绝对 cwd、输入和约束、已批准的读写范围、禁止项、验收命令或标准、超时预算、期望报告。
 报告要求包括变更文件、执行过的命令及退出码、未运行/被阻止的检查、风险及下一步。不要将验收变成 Sol Max 代写代码或代跑实验。
 模式保持不代表永久写入授权；遵守每个任务已批准的范围，不把选用 DSH 等同于允许安装、删除、提交或推送。
@@ -62,7 +81,7 @@ Astra 负责总体方向；角色与实际模型映射以宿主真实能力为�
 
 ## 4. WorkBuddy
 
-由 Sol 调用所选 MCP 的 `get_task_bridge_status`，按实际 schema 使用 `run_workbuddy_task`。
+订阅 Sol 调用已加载 MCP 的 `get_task_bridge_status` 和实际 schema 的 `run_workbuddy_task`。API Sol 使用 `sol-coordinator` 内配置的 WorkBuddy stdio 连接，先验证 schema、状态、固定 DSF 模型及原权限 profile，再调用同一工具。
 不要假定 WorkBuddy 支持本仓库 DSH 的异步工具。不要猜测它的 profile 名称，也不能去掉既有授权 profile 规避拒绝。
 HY4 预期官方 ACP 模型 `hy4free`（名称 Hy4）；能力必须显式选择 `text-only` / `workspace-read` / `workspace-write`，不能把普通 read-only/file 任务静默视为兼容。workspace 能力需本地 manifest 开关、canonical cwd、`writeScopes`（现有目录 + `create`/`replace`/`edit` 子集）或精确 `writes`、每任务 `authorizationNote` 和 `allow_once` 回调；写入不要求预计算内容，`content_sha256` 仅可选用于 full-content create/write。每次 prompt 前当前 catalog 必须对 hy4free 明示 `x0.00 credits`，缺失/非零 fail closed，绝不换 `hy4std`/auto/其他模型；目录价不是账单 attestation。原生 Edit/Write 的 `rawInput`、先前 `tool_call` 的 kind/locations 和实际完成状态都会被核对；拒绝/混合终态不算成功。命令仅在本机 manifest 显式开启且任务逐条授权时可选；vendor 可能 auto-allow 安全命令，不能声称全部经 ACP callback。历史 `hy4-preview` 不是本机 ACP 值。适配器在 `bridges/hy4/`；Windows 临时标准 stdio 已实际验证读、create/Edit 和一次授权命令，但未声明每台机器已注册/宿主已加载；未启用的电脑继续 DSH。不得用 `hy4std`、auto、default、其他账号或 GUI token 回退。CodeBuddy/WorkBuddy 共享中国账号 credits，不把目录价当账单证明。
 它们应自己执行并在可用机制内监守。若桥接器 busy，等待原任务，不能改用另一个执行者或重复启动。
@@ -132,7 +151,7 @@ DSH 自己用其原生工具执行、测试、观察程序与纠错；桥接器�
 
 ### 5.6 可选根池 MCP：用户一句选择，Sol 先取本地 context
 
-只有本机已按 `docs/root-pool.md` 手动注册 `dsh-root-pool`、受支持 reload 且工具可见后才可用。Windows 临时标准 stdio 已由 Sol 用真实单根/两个批准 cwd 及两个真实命名实例验证；每台机器的安装/宿主加载仍须各自验收，不能因为临时验证就声称全局可用。**工具可见后用户说“使用 DSH”或同义选择即选择它，不需要“根池”/root/instance 名**；显式指定命名旧服务（如 `dsh-opencode-go-alpha`）仍走旧服务，未安装根池的电脑继续旧 DSH，已启动任务保持原后端。实际链路仍是 Astra → 真实 Sol Max → `dsh-root-pool` stdio MCP → pooled DSH。
+订阅来源在本机按 `docs/root-pool.md` 注册 `dsh-root-pool`、以受支持方式加载且工具可见后使用这条入口。Windows 临时标准 stdio 已由 Sol 用真实单根、两个批准 cwd 及两个真实命名实例验证，每台机器的安装及宿主加载须各自验收。订阅来源下，工具可见后用户说“使用 DSH”即采用根池；显式指定命名旧服务（如 `dsh-opencode-go-alpha`）使用该服务，未安装根池的电脑继续现有 DSH。API 来源按第 2.2 节经 `sol-coordinator` 使用本机配置的根池，显式指定传统实例时报告组合受阻。下列步骤用于 Astra → 订阅 Sol → `dsh-root-pool` stdio MCP → 根池 DSH。
 
 1. Sol 在自己的宿主 shell 先只取注册的 command/args，不打印完整 config/env：
    `$entry = codex mcp get dsh-root-pool --json | ConvertFrom-Json`
@@ -147,8 +166,8 @@ DSH 自己用其原生工具执行、测试、观察程序与纠错；桥接器�
 
 ## 6. 等待、异常和验收
 
-Astra 的宿主原生 wait 只用于真实 Sol agent ID；Sol 的 MCP wait 只用于 MCP task_id。不要互传 ID，也不要声称睡眠脚本等同于宿主 wait。
-Astra 使用宿主支持范围内合理的长等待，不向 Sol 发送重复催问、不同时查询 DSH；Sol 获得终态后统一验收，Astra 仅处理战略问题和验收摘要。
+订阅来源用宿主原生 wait 等待真实 Sol agent ID；API 来源用 `wait_sol_coordination` 和原键等待 API 协调任务。执行者的 MCP task ID 由原协调者管理。
+Astra 按宿主支持的预算等待原协调者，不同时查询 DSH 或 WorkBuddy。Sol 获得终态后进行统一验收，Astra 处理战略问题和验收摘要。
 completed 要求 DSH 进程退出 0 且 final.reason.kind 为 completed；它只证明 Agent 运行完成，仍需 Sol 审查任务报告，不代表业务测试全通过。
 若验证证据不足，由 Sol 将补充验证任务交回原后端。不要让 Sol 自己补跑，也不要让 Astra 代为提交修订。
 失败时先读取脱敏回执，调整计划再委派；不自动重试可能有副作用的工作，不回退到 Sol/Luna/其他 API。已受理的 DSH 任务即使随后遇到配额/认证/超时/断连，也留在原 DSH 后端；预准入 HY4 例外仅按 §5.5 判断。
@@ -160,7 +179,7 @@ completed 要求 DSH 进程退出 0 且 final.reason.kind 为 completed；它只
 ## 7. 新会话和跨电脑
 
 新会话可以说“本会话使用 DSH，请由真实 Sol 协调，先只读分析当前项目”。后续省略执行模式时沿用 DSH。使用传统入口时，可按任务点名已注册实例。同一任务始终使用其原实例。
-独立新会话不从另一会话或电脑继承模式；没有选择时为 A。明确恢复旧会话则沿用已恢复的选择。
+独立新会话没有选择时使用 `coordinator_mode=subscription`、`session_mode=A`、`scheduleMode=1`。明确恢复旧会话则沿用已恢复的选择。
 读取适用 AGENTS 及本 Skill，但不要假定旧对话、运行进程或任务回执已同步。
 本次 0.3.0 增加了 DSH 命名实例的调度域、安装和验证；没有新增程序级调用者认证、聊天身份自动注入或主动完成通知。实例名和状态不是密码学认证，实际链路和等待效果仍需宿主记录验证；无法取得证据就保留未核实状态。
 有活动任务时只同步规则并显式读取，不为加载规则强行重启宿主。任务安全结束后再重启或新建会话作完整验收。
@@ -170,7 +189,7 @@ completed 要求 DSH 进程退出 0 且 final.reason.kind 为 completed；它只
 
 峰谷模式作用于当前 DSH 会话。模式 1 无峰谷（默认及“关闭峰谷”），模式 2 谷时按原日历用 DSH、真实峰时选择 WorkBuddy DSF，模式 3 为原峰谷（“开启峰谷”）。保留原模式和活动任务的后端。模式 2 的提前门禁和谷时预算拒绝原样返回，DSH 的硬停终态不自动复跑。
 
-模式 2 收到正常派单的 `workbuddy_pending` 后，由同一 Sol 按顺序执行：
+模式 2 收到正常派单的 `workbuddy_pending` 后，订阅 Sol 按以下步骤操作。API Sol 的本地工具适配器使用同一领取与回填合同接入显式配置的原 WorkBuddy 桥：
 
 1. 核对宿主当前加载的 `deepseek-v4-flash-workbuddy` 的 `get_task_bridge_status` 与 `run_workbuddy_task` 的实际 schema。确认 ready、模型 `deepseek-v4-flash`、原目录及原授权范围可保留。无法执行时直接用 `finish_workbuddy_dsf_dispatch` 记录 `unavailable` 或 `refused`。
 2. 用原实例或验证根上下文、原 `idempotencyKey` 和 `dispatchId` 调用 `claim_workbuddy_dsf_dispatch`。只有取得 `claimed: true` 和新的 `claimToken` 时，才可在回执 `expires_at` 前调用原 WorkBuddy 的 `run_workbuddy_task` 一次。根据实际 schema 和现有授权选择 profile。继续时使用已验证会话 ID。

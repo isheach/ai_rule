@@ -1,12 +1,12 @@
 # 低开销等待策略
 
-规则修订：2026-11-10.low-overhead-wait-r3；0.3.0 多实例沿用本策略，不改变会话保持、真实 Sol 调度链、wait 参数上限或操作授权。
+规则修订为 2026-11-10.low-overhead-wait-r3，以下描述订阅 Sol 等待 DSH 的策略。API Sol 的主会话等待使用 `run_sol_coordination` 或 `start_sol_coordination` 加 `wait_sol_coordination`，内部负责等待下游并处理真实终态。 [Sol 协调来源](sol-coordinator.md)
 
 ## 为什么调整
 
 用户观察到 Sol 多次调用 wait_dsh_task，每次返回后又重述计划和“任务仍在运行”。现有桥接器没有因此重复启动 DSH，但工具返回可能让上层模型重新参与推理。问题不仅是状态检查频率，也包括没有新信息的重复分析与输出。
 
-本次只更新 AGENTS.md、调度 Skill、README 和本说明。桥接器、安装器、MCP 注册、凭据、权限和运行中任务均不修改。0.3.0 的 DSH 多实例改动见 `docs/multisession.md`，不改变本策略的等待语义。
+r3 发布时调整了全局规则、调度 Skill、README 和本说明。0.3.0 的 DSH 多实例沿用同一等待语义。 [多实例说明](multisession.md)
 
 ## 三个不同的等待层
 

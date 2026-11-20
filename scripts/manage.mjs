@@ -5,6 +5,7 @@ import os from 'node:os';
 import crypto from 'node:crypto';
 import { fileURLToPath } from 'node:url';
 import { discoverDsh, preflight, VERSION, INSTANCE_DEFAULT, validateInstanceName, runtimeForInstance, serverNameForInstance, instanceFromServerName, pathKey } from '../bridges/dsh/core.mjs';
+import { buildSolRegistration, findMcpRegistration, solEnvironmentNames, solRegistrationStatus, tomlStringArray, SOL_SERVER } from './sol-install.mjs';
 
 const MANAGED_START = '# BEGIN isheach/ai_rule managed';
 const MANAGED_END = '# END isheach/ai_rule managed';
@@ -45,8 +46,9 @@ function managedParts(original) {
   return { block, sections, outside: block ? original.replace(block, '') : original };
 }
 function sectionName(section) { return section.match(/^\[mcp_servers\.([^\].]+)\]/m)?.[1]; }
-function mcpSection(name, args) {
-  return `[mcp_servers.${name}]\ncommand = ${JSON.stringify(process.execPath)}\nargs = ${JSON.stringify(args)}\ncwd = ${JSON.stringify(repo)}\nstartup_timeout_sec = 30\ntool_timeout_sec = 3700\nenabled = true\n`;
+function mcpSection(name, args, environmentNames = []) {
+  const environment = environmentNames.length ? `env_vars = ${JSON.stringify(environmentNames)}\n` : '';
+  return `[mcp_servers.${name}]\ncommand = ${JSON.stringify(process.execPath)}\nargs = ${JSON.stringify(args)}\n${environment}cwd = ${JSON.stringify(repo)}\nstartup_timeout_sec = 30\ntool_timeout_sec = 3700\nenabled = true\n`;
 }
 function tomlArray(section) {
   const lines = section.split(/\r?\n/);
@@ -62,8 +64,14 @@ function argValue(args, name) {
   return args[i + 1];
 }
 
+const solBridge = path.join(repo, 'bridges', 'sol', 'server.mjs');
 
-export function buildPlan({ home = os.homedir(), codexHome = process.env.CODEX_HOME || path.join(home, '.codex'), enableDsh = false, dshEntry, allowWrite = false, readOnly = false, workbuddyBridge, offpeakSchedule = false, disableOffpeakSchedule = false, dshInstances = [], removeDshInstances = [] } = {}) {
+export function buildPlan({
+  home = os.homedir(), codexHome = process.env.CODEX_HOME || path.join(home, '.codex'),
+  enableDsh = false, dshEntry, allowWrite = false, readOnly = false, workbuddyBridge,
+  offpeakSchedule = false, disableOffpeakSchedule = false, dshInstances = [], removeDshInstances = [],
+  solCoordinatorConfig, solWorkspaceRoot, solModel, solReasoningEffort
+} = {}) {
   codexHome = path.resolve(codexHome);
   if (allowWrite && readOnly) throw Error('Cannot combine --allow-write and --read-only.');
   if ((allowWrite || readOnly) && !enableDsh) throw Error('DSH permission options require --enable-dsh.');
@@ -148,7 +156,26 @@ export function buildPlan({ home = os.homedir(), codexHome = process.env.CODEX_H
       parts.push(`[mcp_servers.${name}]`, `command = ${JSON.stringify(process.execPath)}`, `args = ${JSON.stringify([entry])}`, `cwd = ${JSON.stringify(path.dirname(entry))}`, 'tool_timeout_sec = 3700', `[mcp_servers.${name}.env]`, `WB_MODEL = ${JSON.stringify(model)}`, 'WB_SKIP_PERMISSIONS = "false"', '');
     }
   }
-  const configTouched = enableDsh || Boolean(workbuddyBridge) || removeNames.length > 0;
+  let solRegistration = null;
+  if (solCoordinatorConfig || solWorkspaceRoot || solModel || solReasoningEffort) {
+    if (findMcpRegistration(existing.outside, SOL_SERVER) !== null) {
+      throw Error('Unmanaged MCP sol-coordinator already exists. Review that registration locally.');
+    }
+    solRegistration = buildSolRegistration({
+      toml: original, plannedDsh: parts.find(section => sectionName(section) === DSH_SERVER),
+      codexHome, repo, explicit: solCoordinatorConfig, workspace: solWorkspaceRoot,
+      model: solModel, effort: solReasoningEffort, dshEntry
+    });
+    const prior = existing.sections.find(section => sectionName(section) === SOL_SERVER);
+    const priorArgs = prior && tomlStringArray(prior, 'args');
+    if (prior && (priorArgs?.length !== 3 || priorArgs[1] !== '--config'
+      || !path.isAbsolute(priorArgs[2]) || pathKey(priorArgs[2]) !== pathKey(solRegistration.filename))) {
+      throw Error('Managed sol-coordinator already uses a different config. Review that registration locally.');
+    }
+    plan.push(...solRegistration.files);
+    parts.push(mcpSection(SOL_SERVER, [solBridge, '--config', solRegistration.filename], solEnvironmentNames(solRegistration.config)));
+  }
+  const configTouched = enableDsh || Boolean(workbuddyBridge) || removeNames.length > 0 || Boolean(solRegistration);
   if (configTouched) {
     const old = existing;
     const oldSections = old.sections;
@@ -173,12 +200,14 @@ export function buildPlan({ home = os.homedir(), codexHome = process.env.CODEX_H
         if (hasSchedule !== useSchedule) throw Error(`Existing DSH service ${name} has a different schedule setting than this install would apply. List its instance name with --dsh-instance to regenerate it, or remove it explicitly; refusing to leave a schedule-policy bypass.`);
       }
     }
-    let block = parts.join('\n');
+    let block = parts.join('\n').trimEnd();
     for (const section of oldSections) {
       const name = sectionName(section);
       if (!name) throw Error('Unknown content in managed TOML block.');
       if (removeServers.has(name)) continue;
-      if (!block.includes(`[mcp_servers.${name}]`)) block += '\n' + section;
+      if (!block.includes(`[mcp_servers.${name}]`)) {
+        block = [block, section.trimEnd()].filter(Boolean).join('\n\n');
+      }
     }
     if (block.trim()) plan.push({ file: configFile, data: mergeBlock(original, block, 'toml') });
     else if (old.block) {
@@ -187,7 +216,8 @@ export function buildPlan({ home = os.homedir(), codexHome = process.env.CODEX_H
       plan.push({ file: configFile, data });
     } else plan.push({ file: configFile, data: original });
   }
-  return { plan, codexHome, modelCheck, usesOverride: agentsPath === override, dshInstances: dshPlan, preservedServices, useSchedule };
+  return { plan, codexHome, modelCheck, usesOverride: agentsPath === override, dshInstances: dshPlan, preservedServices, useSchedule,
+    solCoordinatorConfig: solRegistration?.filename ?? null };
 }
 function apply(plan, codexHome) {
   const changed = plan.filter(x => read(x.file) !== x.data);
@@ -280,6 +310,9 @@ export function verifyInstallation({ home = os.homedir(), codexHome = process.en
     dsh_schedule_config_valid: instances.every(x => !x.schedule_enabled || x.schedule_config_exists),
     workbuddy_hy4_registered: /\[mcp_servers\.hy4-workbuddy\]/.test(config),
     workbuddy_deepseek_registered: /\[mcp_servers\.deepseek-v4-flash-workbuddy\]/.test(config),
+    sol_coordinator: solRegistrationStatus({
+      managedSection: managed.sections.find(section => sectionName(section) === SOL_SERVER), outside: managed.outside, bridgeEntry: solBridge
+    }),
     live_model_call_performed: false
   };
   checks.dsh_structure_valid = checks.dsh_instances_unique && checks.dsh_runtimes_unique && checks.dsh_instance_identity_valid && checks.dsh_schedule_consistent && checks.dsh_schedule_config_valid;
@@ -292,17 +325,21 @@ export function main(args) {
   if (args.includes('--verify')) {
     const checks = verifyInstallation({ home, codexHome });
     console.log(JSON.stringify(checks, null, 2));
-    if (!checks.effective_agents_has_rules || !checks.skill_installed || !checks.dsh_structure_valid) process.exitCode = 1;
+    if (!checks.effective_agents_has_rules || !checks.skill_installed || !checks.dsh_structure_valid
+      || checks.sol_coordinator.structure_valid === false) process.exitCode = 1;
     return;
   }
   const result = buildPlan({ home, codexHome, enableDsh: args.includes('--enable-dsh'), dshEntry: option(args, '--dsh-entry'), allowWrite: args.includes('--allow-write'), readOnly: args.includes('--read-only'),
     workbuddyBridge: option(args, '--workbuddy-bridge'), offpeakSchedule: args.includes('--offpeak-schedule'), disableOffpeakSchedule: args.includes('--disable-offpeak-schedule'),
-    dshInstances: optionValues(args, '--dsh-instance'), removeDshInstances: optionValues(args, '--remove-dsh-instance') });
+    dshInstances: optionValues(args, '--dsh-instance'), removeDshInstances: optionValues(args, '--remove-dsh-instance'),
+    solCoordinatorConfig: option(args, '--sol-coordinator-config'), solWorkspaceRoot: option(args, '--sol-workspace-root'),
+    solModel: option(args, '--sol-model'), solReasoningEffort: option(args, '--sol-reasoning-effort') });
   console.log(`ai_rule ${VERSION}: ${args.includes('--apply') ? 'APPLY' : 'PLAN ONLY'}`);
   for (const item of result.dshInstances) console.log(`DSH instance ${item.server} (${item.instance})${item.preserved ? ' [preserved]' : ''}: ${item.runtime}`);
   for (const item of result.preservedServices) console.log(`Preserved ${item.name}: ${item.reason}; not rewritten or validated as an ai_rule managed service.`);
   for (const change of result.plan) console.log(`${read(change.file) === change.data ? 'UNCHANGED' : 'MERGE/INSTALL'} ${change.file}`);
   if (result.usesOverride) console.log('Existing nonempty AGENTS.override.md is the effective global file; it will receive the managed block.');
+  if (result.solCoordinatorConfig) console.log('Sol coordinator registration uses ' + result.solCoordinatorConfig + '. New chats default to subscription. API verification is separate.');
   if (result.modelCheck) console.log(`DSH ${result.modelCheck.version}: configured route verified; no paid API call performed.`);
   if (args.includes('--apply')) apply(result.plan, result.codexHome);
   else console.log('No files changed. Re-run with --apply after reviewing the plan.');

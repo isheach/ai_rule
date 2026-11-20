@@ -70,7 +70,7 @@ function knownRootSource(payload) {
   return false;
 }
 
-export function resolveRootChain({ sessionsRoot = defaultSessionsRoot(), childId, maxDepth = MAX_DEPTH } = {}) {
+export function resolveRootChain({ sessionsRoot = defaultSessionsRoot(), childId, maxDepth = MAX_DEPTH, allowRoot = false } = {}) {
   if (!UUID.test(childId || '')) throw Error('child thread ID must be a UUID');
   let root;
   try { root = (fs.realpathSync.native || fs.realpathSync)(sessionsRoot); } catch { throw Error('Codex sessions root is missing or unreadable'); }
@@ -103,7 +103,7 @@ export function resolveRootChain({ sessionsRoot = defaultSessionsRoot(), childId
     }
     chain.push({ id: current, file, has_parent: parent !== undefined && parent !== null && parent !== '' });
     if (parent === undefined || parent === null || parent === '') {
-      if (chain.length < 2) throw Error('child has no known subagent source/parent metadata');
+      if (chain.length < 2 && !allowRoot) throw Error('child has no known subagent source/parent metadata');
       if (!knownRootSource(payload)) throw Error('root session source is missing or not recognized');
       return { childId, rootChatId: current, chain };
     }
