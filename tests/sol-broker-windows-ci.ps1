@@ -55,7 +55,21 @@ function Invoke-TestUser($Account, [string]$File, [string]$ArgumentLine, [string
     $info.UserName = $Account.Name
     $info.Password = $Account.Password
     $info.LoadUserProfile = $true
-    if ($FixtureProfile) { $info.EnvironmentVariables['USERPROFILE'] = $FixtureProfile }
+    if ($FixtureProfile) {
+        $fixtureLocalData = Join-Path $FixtureProfile 'AppData\Local'
+        $fixtureTemp = Join-Path $fixtureLocalData 'Temp'
+        $profilePaths = @{
+            USERPROFILE = $FixtureProfile
+            APPDATA = Join-Path $FixtureProfile 'AppData\Roaming'
+            LOCALAPPDATA = $fixtureLocalData
+            TEMP = $fixtureTemp
+            TMP = $fixtureTemp
+        }
+        foreach ($entry in $profilePaths.GetEnumerator()) {
+            $null = [IO.Directory]::CreateDirectory($entry.Value)
+            $info.EnvironmentVariables[$entry.Key] = $entry.Value
+        }
+    }
     $info.UseShellExecute = $false
     $info.CreateNoWindow = $true
     $info.RedirectStandardInput = $true
@@ -151,6 +165,7 @@ function Test-SetupPreflight($Account, $Setup) {
         }
     }
     finally { [IO.File]::WriteAllBytes($tracked, $source) }
+    Write-Output 'Ordinary-user preflight from System32 passed revision, dirty-source, CRLF, and read-only scope checks.'
 }
 
 function Test-SetupApply($Account, $Setup) {
@@ -168,6 +183,7 @@ function Test-SetupApply($Account, $Setup) {
     $second = Invoke-TestUser $Account $powershell $command -FixtureProfile $Setup.Home -WorkingDirectory $system
     Assert-TestCommand $second 'Reapply setup with an existing broker and config'
     if ($second.Output -notmatch 'No changes; installation is already up to date\.') { throw 'The second setup was not idempotent.' }
+    Write-Output 'Ordinary-user migration, registration verification, and repeat apply passed.'
 }
 
 function Invoke-ReviewedElevation([string]$Encoded) {
@@ -252,10 +268,12 @@ try {
     if ($deniedBundle.Status -eq 0 -or $deniedBundle.Output -notmatch 'changed after revision verification' -or (Test-Path -LiteralPath $root)) {
         throw "The protected bootstrap did not reject a changed bundle: $($deniedBundle.Output)"
     }
+    Write-Output 'Elevated bootstrap rejected the changed source bundle.'
     [IO.File]::WriteAllBytes($bundle, $checkedBundle)
     $installResult = Invoke-ReviewedElevation $encoded
     if ($installResult.Status -ne 0) { throw "The protected broker install failed: $($installResult.Output)" }
     $installed = $true
+    Write-Output 'Broker installation from protected staged source passed.'
     $statusJson = '{"op":"status"}'
     Assert-Status 'Authorized native status before enrollment' (Invoke-TestUser $allowed $exe 'client' $statusJson) $false
     Assert-Status 'Authorized Node status before enrollment' (Invoke-TestUser $allowed $node ('"{0}"' -f $nodeFixture)) $false
