@@ -39,7 +39,9 @@ description: Coordinate agent selection and actual dispatch for coding or resear
 }
 ```
 
-使用同一注册的 `transport.command` 和 `args` 取得辅助程序及配置。把其 `context_ref` 作为工具的 `context`，过期后从同一宿主上下文刷新。辅助程序核实宿主线程及父链，保护上下文文件和完整注册内容。使用宿主实际线程证据，不手填根、子会话、lease，也不依赖 stdio MCP 获得线程变量。
+使用同一注册的 `transport.command` 和 `args` 取得辅助程序及配置。把其 `context_ref` 作为工具的 `context`，过期后从同一宿主刷新。辅助程序按宿主提供的 `CODEX_THREAD_ID` 在该宿主的 `CODEX_HOME/sessions`（默认 `~/.codex/sessions`）匹配 rollout，并在调用时重新核实根及父链。
+
+保护上下文文件和完整注册内容。使用宿主实际线程证据，不手填根、子会话、lease，也不依赖 stdio MCP 获得线程变量。若当前会话报告 `unknown MCP server`，检查其已加载工具及本机注册。若辅助程序报告 `exact rollout metadata not found`，在能保存自身 rollout 并加载该注册的本机 Codex 会话中重新获取引用。普通 PowerShell 的 `broker-status` 只验证该进程的 Windows 令牌，实际宿主仍须用自己的引用调用 `get_sol_coordinator_mode`。
 
 ## 2. 交接一份完整任务
 
