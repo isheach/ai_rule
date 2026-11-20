@@ -22,8 +22,8 @@ export function selectScheduleMode(mode, enabled, fallback = ScheduleMode.UNREST
 }
 
 export const scheduleModeProperty = {
-  type: 'integer', enum: [1, 2, 3],
-  description: '1: unrestricted DSH; 2: scheduled DSH with WorkBuddy DSF only at peak; 3: original scheduled DSH.'
+  type: 'integer', enum: Object.values(ScheduleMode),
+  description: 'Mode 1 uses DSH without a calendar. Mode 2 uses DSH in the valley and offers new WorkBuddy DSF work during actual peaks. Mode 3 applies the DSH calendar and permits an explicitly authorized pre-admission HY4 route where configured.'
 };
 
 export function schedulePolicySnapshot(calendar, mode, date) {

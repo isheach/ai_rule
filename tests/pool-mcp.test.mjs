@@ -651,6 +651,35 @@ test('actual stdio MCP: normalized writeScopes reach the pooled HY4 fallback and
   } finally { await stop(server); }
 });
 
+test('actual stdio MCP: DSH receives approved structured scopes as task instructions in the valley', async t => {
+  const f = fixture({ clock: OFFPEAK, allowWrite: true });
+  const context = await issueContext(f);
+  const server = await startServer(f, OFFPEAK, ['--allow-write']);
+  t.after(() => stop(server));
+  await server.client.call('set_pool_schedule', { context, scheduleMode: 2 });
+  const authorization = {
+    writes: [{ path: path.join(f.workspace, 'review.txt'), mode: 'create' }],
+    writeScopes: [{ path: f.workspace, operations: ['edit'] }],
+    commands: ['node --version']
+  };
+  const args = { context, cwd: f.workspace, prompt: 'Review the workspace',
+    idempotencyKey: 'dsh-approved-scope', permissionMode: 'workspace-write', capability: 'workspace-write',
+    authorizationNote: 'fixture project approval', timeoutMs: 6000, ...authorization };
+  const { parsed: first } = await server.client.call('run_pool_task', args);
+  assert.equal(first.backend, 'dsh');
+  assert.equal(first.status, 'completed');
+  assert.equal(first.receipt.scope_handling, 'task_instructions');
+  assert.ok(first.receipt.answer.includes(JSON.stringify({
+    ...authorization, writes: [{ ...authorization.writes[0], content_sha256: null }]
+  })));
+  assert.ok(first.receipt.answer.endsWith(args.prompt));
+
+  const { parsed: replay } = await server.client.call('run_pool_task', args);
+  assert.equal(replay.task_id, first.task_id);
+  assert.equal(replay.replayed, true);
+  assert.equal(taskDirs(f, 'dsh').length, 1);
+});
+
 test('actual stdio MCP: exact command rules reach the pooled HY4 fallback only with local enablement', { skip: !COMMANDS_TEST }, async () => {
   const f = fixture({ clock: PEAK, hy4: true, allowWrite: true, allowCommands: true, acpMode: 'command-allow' });
   const context = await issueContext(f);

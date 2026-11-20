@@ -11,6 +11,7 @@ import {
   pathKey, safeWriteMetadata, scopeAllows, sha256, taskFingerprint, writeOperation
 } from './policy.mjs';
 import { Hy4UnavailableError } from '../dsh/routing.mjs';
+import { HY4_ACP_TIMEOUT_MS, WAIT_MS, validateWaitMs } from '../task-lifecycle.mjs';
 
 const MAX_STDOUT = 4 * 1024 * 1024;
 const MAX_ANSWER = 60000;
@@ -235,7 +236,7 @@ class AcpProcess {
 }
 
 export class Hy4AcpManager {
-  constructor({ manifest, runtime, clock = () => new Date(), maxTimeoutMs = 900000 } = {}) {
+  constructor({ manifest, runtime, clock = () => new Date(), maxTimeoutMs = HY4_ACP_TIMEOUT_MS.maximum } = {}) {
     this.manifest = manifest?.schema === 1 ? manifest : loadManifest(manifest);
     this.runtime = path.resolve(runtime ?? path.join(process.env.LOCALAPPDATA || path.join(os.homedir(), '.local', 'state'), 'ai_rule', 'hy4'));
     this.clock = clock;
@@ -394,8 +395,10 @@ export class Hy4AcpManager {
       throw new Hy4UnavailableError('authorizationNote must be a string up to 2000 UTF-8 bytes.');
     }
     const cwd = canonicalWithin(this.manifest.workspace_root, input.cwd);
-    const timeoutMs = input.timeoutMs ?? 600000;
-    if (!Number.isInteger(timeoutMs) || timeoutMs < 1000 || timeoutMs > this.maxTimeoutMs) throw new Hy4UnavailableError('Invalid HY4 timeoutMs.');
+    const timeoutMs = input.timeoutMs ?? HY4_ACP_TIMEOUT_MS.default;
+    if (!Number.isInteger(timeoutMs) || timeoutMs < HY4_ACP_TIMEOUT_MS.minimum || timeoutMs > this.maxTimeoutMs) {
+      throw new Hy4UnavailableError('Invalid HY4 timeoutMs.');
+    }
     let authorization;
     try {
       authorization = normalizeTaskAuthorization({
@@ -1064,8 +1067,8 @@ export class Hy4AcpManager {
     throw Error(`HY4 task ${taskId} not found.`);
   }
 
-  async wait(taskId, waitMs = 25000) {
-    if (!Number.isInteger(waitMs) || waitMs < 0 || waitMs > 60000) throw Error('waitMs must be 0..60000.');
+  async wait(taskId, waitMs = WAIT_MS.default) {
+    validateWaitMs(waitMs);
     const active = [...this.active.values()].find(x => x.record.task_id === taskId);
     if (active) {
       let timer;

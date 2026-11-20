@@ -6,6 +6,7 @@ import { spawn, spawnSync } from 'node:child_process';
 import { normalizeScheduleMode, ScheduleMode, schedulePolicySnapshot, scheduleTaskPreamble, selectScheduleMode } from './schedule.mjs';
 import { AdmissionCode, PreAdmissionRejection } from './routing.mjs';
 import { validateWorkBuddyContinuation, WorkBuddyDispatch, WORKBUDDY_DSF } from '../workbuddy/dispatch.mjs';
+import { DSH_TIMEOUT_MS, WAIT_MS, validateWaitMs } from '../task-lifecycle.mjs';
 
 export const ROUTE = Object.freeze({ provider: 'opencode-go', model: 'deepseek-v4.1-flash', reasoningEffort: 'max' });
 export const VERSION = '0.3.0';
@@ -150,8 +151,10 @@ export function validateTask(input, allowWrite = true) {
   }
   selectScheduleMode(input.scheduleMode, input.scheduleEnabled);
   validateWorkBuddyContinuation(input);
-  const timeoutMs = input.timeoutMs ?? 900000;
-  if (!Number.isInteger(timeoutMs) || timeoutMs < 1000 || timeoutMs > 3600000) throw Error('timeoutMs must be an integer between 1000 and 3600000.');
+  const timeoutMs = input.timeoutMs ?? DSH_TIMEOUT_MS.default;
+  if (!Number.isInteger(timeoutMs) || timeoutMs < DSH_TIMEOUT_MS.minimum || timeoutMs > DSH_TIMEOUT_MS.maximum) {
+    throw Error(`timeoutMs must be an integer between ${DSH_TIMEOUT_MS.minimum} and ${DSH_TIMEOUT_MS.maximum}.`);
+  }
   if (input.sessionId !== undefined && (typeof input.sessionId !== 'string' || !/^[A-Za-z0-9_.:-]{1,160}$/.test(input.sessionId))) throw Error('Invalid sessionId.');
   return { ...input, cwd, permissionMode, timeoutMs };
 }
@@ -395,20 +398,25 @@ export class TaskManager {
       // Leave an unreadable or foreign lock in place for human inspection.
     }
   }
-  async start(input) {
+  async start(input, { writes = [], writeScopes = [], commands = [] } = {}) {
     let task;
     try { task = validateTask(input, this.allowWrite); }
     catch (error) {
       if (error instanceof PreAdmissionRejection) throw error;
       throw new PreAdmissionRejection(AdmissionCode.INVALID_PARAMS, error.message, { details: { stage: 'validate' } });
     }
+    // Only the router supplies the normalized scope here. Leave the task's
+    // public schema and legacy fingerprints unchanged for unscoped requests.
+    const scope = writes.length || writeScopes.length || commands.length
+      ? '[Approved operations for this task. Observe the working directory, permission mode, and applicable file and command approvals below.]\n'
+        + JSON.stringify({ writes, writeScopes, commands }) + '\n\n' : '';
     const requestFile = path.join(this.runtime, 'requests', `${digest(task.idempotencyKey)}.json`);
     const mode = selectScheduleMode(task.scheduleMode, task.scheduleEnabled, this.scheduleDefaultMode);
     const { scheduleMode: explicitMode, scheduleEnabled, ...legacyShape } = task;
     const legacyBoolean = { ...legacyShape, scheduleEnabled: mode === ScheduleMode.OFFPEAK_ONLY };
     const shapes = explicitMode === undefined || explicitMode === ScheduleMode.WORKBUDDY_AT_PEAK ? [task] : [legacyBoolean];
     if (mode !== ScheduleMode.WORKBUDDY_AT_PEAK && mode === this.scheduleDefaultMode) shapes.push(legacyShape, legacyBoolean);
-    const fingerprints = shapes.map(shape => digest(JSON.stringify(shape, Object.keys(shape).sort())));
+    const fingerprints = shapes.map(shape => digest(JSON.stringify(shape, Object.keys(shape).sort()) + scope));
     const fingerprint = fingerprints[0];
     const replay = () => {
       const workBuddy = this.workBuddy?.replay(task.idempotencyKey, fingerprint);
@@ -416,7 +424,7 @@ export class TaskManager {
       if (!fs.existsSync(requestFile)) return null;
       const old = readJSON(requestFile);
       let matches = fingerprints.includes(old.fingerprint);
-      if (old.schema === undefined && !matches) {
+      if (old.schema === undefined && !scope && !matches) {
         matches = shapes.some(shape => old.fingerprint === digest(JSON.stringify(shape))
           || (input.permissionMode === undefined && old.fingerprint === digest(JSON.stringify({ ...shape, permissionMode: 'read-only' }))));
       }
@@ -482,13 +490,13 @@ export class TaskManager {
       if (!window.accept_new_tasks) {
         throw new PreAdmissionRejection(AdmissionCode.SCHEDULE_GATE,
           `DSH instance "${this.instance}" is blocked by the offpeak schedule (${window.phase}); next offpeak at ${window.next_offpeak_at || 'see schedule status'}.`,
-          { allowFallback: window.mode !== ScheduleMode.WORKBUDDY_AT_PEAK,
+          { allowFallback: window.mode === ScheduleMode.OFFPEAK_ONLY,
             details: { phase: window.phase, next_offpeak_at: window.next_offpeak_at, hard_stop_at: window.hard_stop_at } });
       }
       if (window.enabled && window.reject_if_budget_exceeds_window && this.clock().getTime() + task.timeoutMs + 60000 >= Date.parse(window.hard_stop_at)) {
         throw new PreAdmissionRejection(AdmissionCode.SCHEDULE_GATE,
           'Task timeout budget exceeds the remaining offpeak window (plus 60s margin). Shorten the budget or use the next offpeak window.',
-          { allowFallback: window.mode !== ScheduleMode.WORKBUDDY_AT_PEAK,
+          { allowFallback: window.mode === ScheduleMode.OFFPEAK_ONLY,
             details: { phase: window.phase, gate: 'budget_exceeds_window', next_offpeak_at: window.next_offpeak_at, hard_stop_at: window.hard_stop_at } });
       }
       let verified;
@@ -505,6 +513,7 @@ export class TaskManager {
         schedule_at_start: window.enabled ? { mode: window.mode, hard_stop_at: window.hard_stop_at, stop_new_at: window.stop_new_at, timezone: window.timezone, resume_automatically: false } : null,
         session_id: task.sessionId || null, session_resume: Boolean(task.sessionId), session_owner_task_id: sessionOwner?.owner_task_id || null,
         cwd: task.cwd, permission_mode: task.permissionMode, approval_policy: 'never', user_authorization_note: redact(task.authorizationNote || ''),
+        ...(scope ? { scope_handling: 'task_instructions' } : {}),
         prompt_sha256: digest(task.prompt), status: 'starting', started_at: now(), finished_at: null, pid: null, exit_code: null, timed_out: false,
         native_tool_calls: 0, final_reason: null, answer: '', diagnostics: [], receipt_path: this.receiptPath(id), files_changed: null, verification: 'not_yet_reviewed' };
       writeJSON(record.receipt_path, record);
@@ -594,7 +603,7 @@ export class TaskManager {
           this.pending.delete(id);
         }
       });
-      child.stdin.end(scheduleTaskPreamble(window) + task.prompt);
+      child.stdin.end(scheduleTaskPreamble(window) + scope + task.prompt);
       this.refreshSchedule();
       return { ...record };
     } catch (error) {
@@ -618,8 +627,8 @@ export class TaskManager {
     killTree(this.active.child);
     return { ...this.active.record };
   }
-  async wait(id, waitMs = 25000) {
-    if (!Number.isInteger(waitMs) || waitMs < 0 || waitMs > 60000) throw Error('waitMs must be 0..60000.');
+  async wait(id, waitMs = WAIT_MS.default) {
+    validateWaitMs(waitMs);
     const pending = this.pending.get(id);
     if (pending) {
       let timer;

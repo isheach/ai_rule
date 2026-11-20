@@ -1,10 +1,11 @@
 #!/usr/bin/env node
 // Opt-in HY4 ACP endpoint. It is additive and must not be registered by default.
 import { Hy4AcpManager, canonicalWithin } from './acp.mjs';
-import { loadManifest } from './manifest.mjs';
-import { RoutingCoordinator, PreAdmissionRejection, Hy4UnavailableError, AdmissionCode } from '../dsh/routing.mjs';
+import { HY4_MODEL, loadManifest } from './manifest.mjs';
+import { RoutingCoordinator, PreAdmissionRejection, Hy4UnavailableError, AdmissionCode, DSH_SCOPE_DESCRIPTION } from '../dsh/routing.mjs';
 import { TaskManager, discoverDsh, redact } from '../dsh/core.mjs';
 import { loadSchedule } from '../dsh/schedule.mjs';
+import { DSH_TIMEOUT_MS, HY4_ACP_TIMEOUT_MS, WAIT_MS, preferRun, waitForExisting } from '../task-lifecycle.mjs';
 import fs from 'node:fs';
 import path from 'node:path';
 
@@ -35,7 +36,7 @@ try {
   } : null;
   routing = new RoutingCoordinator({
     runtime: option('--routing-runtime') ?? `${manager.runtime}-routing`,
-    dsh: { submit: task => dsh.start(task) },
+    dsh: { submit: (task, authorization) => dsh.start(task, authorization) },
     hy4: manager,
     authorization,
     liveMcpDispatchWired: true
@@ -45,13 +46,17 @@ try {
   console.error(`HY4 bridge startup failed: ${redact(error.message)}`);
   process.exit(1);
 }
+const workspaceWriteEnabled = manager.manifest.allow_workspace_write === true;
 
-const taskSchema = {
+// This MCP route has historically supplied its own default through the router.
+// Keep it for compatibility with existing request fingerprints.
+const hy4TaskTimeout = { ...HY4_ACP_TIMEOUT_MS, default: HY4_ACP_TIMEOUT_MS.maximum };
+const routedTaskSchema = {
   type: 'object', additionalProperties: false, required: ['prompt', 'cwd', 'idempotencyKey'], properties: {
     prompt: { type: 'string', minLength: 1, maxLength: 60000 },
     cwd: { type: 'string' },
     idempotencyKey: { type: 'string', description: 'Stable key scoped to this opt-in HY4/routing runtime. New revision requires a new key.' },
-    timeoutMs: { type: 'integer', minimum: 1000, maximum: 900000, default: 600000 },
+    timeoutMs: { ...DSH_TIMEOUT_MS, description: `Budget for DSH. HY4 accepts a budget up to ${HY4_ACP_TIMEOUT_MS.maximum} ms if the task qualifies for fallback.` },
     permissionMode: { type: 'string', enum: ['read-only', 'workspace-write'], default: 'read-only' },
     capability: { type: 'string', enum: ['default', 'text-only', 'workspace-read', 'workspace-write'], default: 'default' },
     authorizationNote: { type: 'string', maxLength: 2000 },
@@ -75,20 +80,21 @@ const taskSchema = {
     commands: { type: 'array', maxItems: 32, uniqueItems: true, items: { type: 'string' } }
   }
 };
+const hy4TaskSchema = { ...routedTaskSchema, properties: { ...routedTaskSchema.properties, timeoutMs: hy4TaskTimeout } };
 const idSchema = { type: 'object', additionalProperties: false, required: ['taskId'], properties: { taskId: { type: 'string' } } };
 const keySchema = { type: 'object', additionalProperties: false, required: ['idempotencyKey'], properties: { idempotencyKey: { type: 'string' } } };
 const tools = [
   { name: 'get_hy4_bridge_status', description: 'ACP/CodeBuddy Hy4 readiness and route descriptor without sending a prompt. Also reports DSH-first fallback policy state. No credentials.', inputSchema: { type: 'object', additionalProperties: false, properties: {} }, annotations: { readOnlyHint: true } },
-  { name: 'start_hy4_task', description: 'Explicit HY4 task through the pinned CodeBuddy ACP hy4free model. Requires capability text-only, workspace-read or workspace-write; workspace-write needs local enablement, cwd, authorizationNote and writeScopes/writes/commands. No DSH fallback.', inputSchema: taskSchema, annotations: { readOnlyHint: false, openWorldHint: true } },
-  { name: 'run_hy4_task', description: 'Explicit HY4 ACP task; waits for its terminal receipt. Same explicit capability/scope contract; no model fallback and no automatic retry.', inputSchema: taskSchema, annotations: { readOnlyHint: false, openWorldHint: true } },
+  { name: 'start_hy4_task', description: `Submit an explicit CodeBuddy ACP ${HY4_MODEL} task for an early task ID or later intervention. Choose text-only, workspace-read or workspace-write. Writes require local enablement and the approved task scope.`, inputSchema: hy4TaskSchema, annotations: { readOnlyHint: false, openWorldHint: true } },
+  { name: 'run_hy4_task', description: `Submit an explicit CodeBuddy ACP ${HY4_MODEL} task and wait internally for its receipt. ${preferRun('start_hy4_task', 'wait_hy4_task')}`, inputSchema: hy4TaskSchema, annotations: { readOnlyHint: false, openWorldHint: true } },
   { name: 'get_hy4_task', description: 'Read an owned HY4 task receipt without resubmitting.', inputSchema: idSchema, annotations: { readOnlyHint: true } },
-  { name: 'wait_hy4_task', description: 'Wait for an HY4 task up to 60 seconds.', inputSchema: { ...idSchema, properties: { ...idSchema.properties, waitMs: { type: 'integer', minimum: 0, maximum: 60000, default: 25000 } } }, annotations: { readOnlyHint: true } },
+  { name: 'wait_hy4_task', description: `Wait on the original HY4 task ID. ${waitForExisting}`, inputSchema: { ...idSchema, properties: { ...idSchema.properties, waitMs: WAIT_MS } }, annotations: { readOnlyHint: true } },
   { name: 'cancel_hy4_task', description: 'Cancel only an HY4 task owned by this bridge process. No stale PID killing.', inputSchema: idSchema, annotations: { readOnlyHint: false, destructiveHint: true } },
-  { name: 'start_routed_task', description: 'DSH-first task with the explicitly authorized pre-admission-only HY4 fallback policy. Returns an auditable routing decision.', inputSchema: taskSchema, annotations: { readOnlyHint: false, openWorldHint: true } },
-  { name: 'run_routed_task', description: 'DSH-first task and wait; HY4 only after a qualifying pre-admission rejection and explicit authorization.', inputSchema: taskSchema, annotations: { readOnlyHint: false, openWorldHint: true } },
+  { name: 'start_routed_task', description: `Submit a DSH-first mode 3 task for an early routing decision or later intervention. HY4 requires explicit authorization and a qualifying pre-admission rejection. ${DSH_SCOPE_DESCRIPTION}`, inputSchema: routedTaskSchema, annotations: { readOnlyHint: false, openWorldHint: true } },
+  { name: 'run_routed_task', description: `Submit a DSH-first mode 3 task and wait internally for its receipt. ${preferRun('start_routed_task', 'wait_routed_task')} ${DSH_SCOPE_DESCRIPTION}`, inputSchema: routedTaskSchema, annotations: { readOnlyHint: false, openWorldHint: true } },
   { name: 'get_routed_decision', description: 'Read a routing decision by idempotency key; no model call.', inputSchema: keySchema, annotations: { readOnlyHint: true } },
   { name: 'get_routed_task', description: 'Read the accepted DSH or HY4 task receipt for a routing decision by idempotency key.', inputSchema: keySchema, annotations: { readOnlyHint: true } },
-  { name: 'wait_routed_task', description: 'Wait on the accepted DSH or HY4 task for a routing decision by idempotency key.', inputSchema: { ...keySchema, properties: { ...keySchema.properties, waitMs: { type: 'integer', minimum: 0, maximum: 60000, default: 25000 } } }, annotations: { readOnlyHint: true } },
+  { name: 'wait_routed_task', description: `Wait on the accepted DSH or HY4 task by the original idempotency key. ${waitForExisting}`, inputSchema: { ...keySchema, properties: { ...keySchema.properties, waitMs: WAIT_MS } }, annotations: { readOnlyHint: true } },
   { name: 'cancel_routed_task', description: 'Cancel the owned backend task for a routing decision; no cross-owner kill.', inputSchema: keySchema, annotations: { readOnlyHint: false, destructiveHint: true } }
 ];
 let initialized = false, input = '', shuttingDown = false;
@@ -96,16 +102,20 @@ const inFlight = new Map();
 const send = value => { if (!process.stdout.destroyed) process.stdout.write(JSON.stringify(value) + '\n'); };
 const error = (id, code, message) => send({ jsonrpc: '2.0', id: id ?? null, error: { code, message: redact(message) } });
 
-const TERMINAL = new Set(['completed', 'failed', 'unknown', 'timed_out', 'cancelled', 'refused', 'schedule_stopped', 'not_accepted']);
+const TERMINAL = new Set(['completed', 'failed', 'unknown', 'unknown_after_disconnect', 'timed_out', 'cancelled', 'refused', 'schedule_stopped', 'not_accepted']);
 
-async function waitTerminal(waitFn, taskId, timeoutMs) {
-  const deadline = Date.now() + Math.max(1000, timeoutMs);
-  let receipt;
-  do {
-    receipt = await waitFn(taskId, 60000);
-    if (TERMINAL.has(receipt.status)) return receipt;
-  } while (Date.now() < deadline);
-  return receipt;
+async function waitForDecision(decision, timeoutMs, requestId) {
+  const { selected_backend: backend, task_id: taskId } = decision;
+  const executor = backend === 'hy4' ? manager : dsh;
+  if (!decision.replayed && !decision.deduplicated) inFlight.set(requestId, { backend, taskId });
+  const deadline = Date.now() + timeoutMs + 5000;
+  try {
+    while (true) {
+      const waitMs = Math.min(WAIT_MS.maximum, Math.max(0, deadline - Date.now()));
+      const receipt = await executor.wait(taskId, waitMs);
+      if (TERMINAL.has(receipt.status) || waitMs === 0) return receipt;
+    }
+  } finally { inFlight.delete(requestId); }
 }
 
 function assertScopedCwd(args) {
@@ -122,10 +132,11 @@ async function call(name, args, requestId) {
 
   if (name === 'get_hy4_bridge_status') {
     const hy4Status = await manager.probe();
-    return { hy4: hy4Status, routing: coordinator.status(), dsh: { instance: dsh.instance, active_task_id: dsh.active?.record.task_id ?? null, allow_workspace_write: false } };
+    return { hy4: hy4Status, routing: coordinator.status(),
+      dsh: { instance: dsh.instance, active_task_id: dsh.active?.record.task_id ?? null, allow_workspace_write: workspaceWriteEnabled && dsh.allowWrite } };
   }
   if (name === 'get_hy4_task') return manager.get(args.taskId);
-  if (name === 'wait_hy4_task') return manager.wait(args.taskId, args.waitMs ?? 25000);
+  if (name === 'wait_hy4_task') return manager.wait(args.taskId, args.waitMs ?? WAIT_MS.default);
   if (name === 'cancel_hy4_task') return manager.cancel(args.taskId);
   if (name === 'get_routed_decision') {
     const decision = coordinator.get(args.idempotencyKey);
@@ -136,9 +147,10 @@ async function call(name, args, requestId) {
     const decision = coordinator.get(args.idempotencyKey);
     if (!decision) throw Error('No routing decision for this idempotency key.');
     if (decision.admission_state !== 'accepted' || !decision.task_id) return { decision, receipt: null, status: 'failed' };
+    const executor = decision.selected_backend === 'hy4' ? manager : dsh;
     const receipt = name === 'wait_routed_task'
-      ? (decision.selected_backend === 'hy4' ? await manager.wait(decision.task_id, args.waitMs ?? 25000) : await dsh.wait(decision.task_id, args.waitMs ?? 25000))
-      : (decision.selected_backend === 'hy4' ? manager.get(decision.task_id) : dsh.get(decision.task_id));
+      ? await executor.wait(decision.task_id, args.waitMs ?? WAIT_MS.default)
+      : executor.get(decision.task_id);
     return { decision, receipt, status: receipt.status };
   }
   if (name === 'cancel_routed_task') {
@@ -154,32 +166,29 @@ async function call(name, args, requestId) {
     if (!manager.supports(args.capability)) throw new PreAdmissionRejection(AdmissionCode.PERMISSION_REFUSED, 'Requested HY4 capability is not enabled by local manifest policy.');
     if (args.capability === 'workspace-write' && (typeof args.authorizationNote !== 'string' || !args.authorizationNote.trim())) throw new PreAdmissionRejection(AdmissionCode.PERMISSION_REFUSED, 'Workspace-write requires explicit per-task authorizationNote.');
     assertScopedCwd(args);
-    const decision = await coordinator.submit(args, {
+    const timeoutMs = args.timeoutMs ?? hy4TaskTimeout.default;
+    if (!Number.isInteger(timeoutMs) || timeoutMs < hy4TaskTimeout.minimum || timeoutMs > hy4TaskTimeout.maximum) {
+      throw new PreAdmissionRejection(AdmissionCode.INVALID_PARAMS,
+        `HY4 timeoutMs must be an integer ${hy4TaskTimeout.minimum}..${hy4TaskTimeout.maximum}.`);
+    }
+    const decision = await coordinator.submit({ ...args, timeoutMs }, {
       sessionMode: 'HY4', taskCapability: args.capability,
-      allowWorkspaceWrite: args.capability === 'workspace-write' && manager.manifest.allow_workspace_write === true
+      allowWorkspaceWrite: args.capability === 'workspace-write' && workspaceWriteEnabled
     });
     if (name === 'start_hy4_task') return decision;
-    inFlight.set(requestId, { backend: 'hy4', taskId: decision.task_id });
-    try {
-      const receipt = await waitTerminal((id, ms) => manager.wait(id, ms), decision.task_id, args.timeoutMs ?? 600000);
-      return { decision, receipt, status: receipt.status };
-    } finally { inFlight.delete(requestId); }
+    const receipt = await waitForDecision(decision, timeoutMs, requestId);
+    return { decision, receipt, status: receipt.status };
   }
   if (name === 'start_routed_task' || name === 'run_routed_task') {
     if (!scheduleProvided) throw new PreAdmissionRejection(AdmissionCode.PERMISSION_REFUSED, 'Routed DSH tasks require an explicit --schedule-config; refusing to bypass the peak schedule.');
     assertScopedCwd(args);
     const decision = await coordinator.submit(args, {
       sessionMode: 'DSH', taskCapability: args.capability ?? 'default',
-      allowWorkspaceWrite: args.capability === 'workspace-write' && manager.manifest.allow_workspace_write === true
+      allowWorkspaceWrite: args.capability === 'workspace-write' && workspaceWriteEnabled
     });
     if (name === 'start_routed_task') return decision;
-    inFlight.set(requestId, { backend: decision.selected_backend, taskId: decision.task_id });
-    try {
-      const receipt = decision.selected_backend === 'hy4'
-        ? await waitTerminal((id, ms) => manager.wait(id, ms), decision.task_id, args.timeoutMs ?? 600000)
-        : await waitTerminal((id, ms) => dsh.wait(id, ms), decision.task_id, args.timeoutMs ?? 600000);
-      return { decision, receipt, status: receipt.status, selected_backend: decision.selected_backend };
-    } finally { inFlight.delete(requestId); }
+    const receipt = await waitForDecision(decision, args.timeoutMs ?? DSH_TIMEOUT_MS.default, requestId);
+    return { decision, receipt, status: receipt.status, selected_backend: decision.selected_backend };
   }
   throw Error('Unsupported tool.');
 }
@@ -205,7 +214,7 @@ async function dispatch(message) {
   if (method !== 'tools/call') return error(id, -32601, 'Method not supported.');
   try {
     const result = await call(params.name, params.arguments ?? {}, id);
-    send({ jsonrpc: '2.0', id, result: { content: [{ type: 'text', text: JSON.stringify(result) }], isError: ['failed', 'unknown', 'timed_out', 'cancelled', 'refused', 'schedule_stopped', 'not_accepted'].includes(result.status) } });
+    send({ jsonrpc: '2.0', id, result: { content: [{ type: 'text', text: JSON.stringify(result) }], isError: TERMINAL.has(result.status) && result.status !== 'completed' } });
   } catch (e) {
     const result = { isError: true, content: [{ type: 'text', text: redact(e.message) }] };
     if (e instanceof PreAdmissionRejection || e instanceof Hy4UnavailableError || typeof e.code === 'string') {

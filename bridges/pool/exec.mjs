@@ -8,6 +8,7 @@ import { loadPoolConfig, PoolService } from './service.mjs';
 import { loadSchedule, selectScheduleMode } from '../dsh/schedule.mjs';
 import { resolveRootChain } from './host.mjs';
 import { discoverDsh, redact } from '../dsh/core.mjs';
+import { DSH_TIMEOUT_MS } from '../task-lifecycle.mjs';
 
 const argv = process.argv.slice(2);
 const opt = name => { const i = argv.indexOf(`--${name}`); return i >= 0 ? argv[i + 1] : undefined; };
@@ -37,7 +38,7 @@ try {
   if (input.action === 'run') {
     const task = {
       prompt: input.prompt, cwd: input.cwd, idempotencyKey: input.idempotencyKey,
-      timeoutMs: input.timeoutMs ?? 900000,
+      timeoutMs: input.timeoutMs ?? DSH_TIMEOUT_MS.default,
       ...(input.permissionMode !== undefined ? { permissionMode: input.permissionMode } : {}),
       ...(input.capability ? { capability: input.capability } : {}),
       ...(input.authorizationNote ? { authorizationNote: input.authorizationNote } : {}),
@@ -54,7 +55,7 @@ try {
   } else if (input.action === 'get') {
     result = service.get(resolved.rootChatId, locator);
   } else if (input.action === 'wait') {
-    result = await service.wait(resolved.rootChatId, locator, input.waitMs ?? 25000);
+    result = await service.wait(resolved.rootChatId, locator, input.waitMs ?? undefined);
   } else {
     result = await service.cancel(resolved.rootChatId, locator);
   }

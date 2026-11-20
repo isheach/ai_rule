@@ -4,6 +4,7 @@ import { TaskManager, discoverDsh, redact, VERSION, normalizeInstanceName, serve
 import { PreAdmissionRejection, RoutingConflictError } from './routing.mjs';
 import { loadSchedule, ScheduleMode, scheduleModeProperty, selectScheduleMode } from './schedule.mjs';
 import { workBuddyDispatchTools, WORKBUDDY_FAILURE } from '../workbuddy/dispatch.mjs';
+import { DSH_TIMEOUT_MS, WAIT_MS, preferRun, waitForExisting } from '../task-lifecycle.mjs';
 import { fileURLToPath } from 'node:url';
 
 const argv = process.argv.slice(2);
@@ -27,10 +28,10 @@ const taskSchema = {
   type: 'object', additionalProperties: false, required: ['prompt', 'cwd', 'idempotencyKey'], properties: {
     prompt: { type: 'string', minLength: 1, maxLength: 60000 }, cwd: { type: 'string' },
     idempotencyKey: { type: 'string', description: `Stable unique key for this task revision in ${scoped} Reuse only for retrying the SAME submission.` },
-    timeoutMs: { type: 'integer', minimum: 1000, maximum: 3600000, default: 900000 },
+    timeoutMs: DSH_TIMEOUT_MS,
     permissionMode: { type: 'string', enum: ['read-only', 'workspace-write'], description: 'Defaults to workspace-write unless this bridge is configured read-only.' },
     authorizationNote: { type: 'string', description: 'Optional audit reference to the user’s task authorization.' },
-    scheduleEnabled: { type: 'boolean', default: false, description: 'Apply the configured schedule to this task only.' },
+    scheduleEnabled: { type: 'boolean', description: 'Legacy task-level selector. False selects mode 1 and true selects mode 3. Supply only one schedule selector.' },
     scheduleMode: scheduleModeProperty,
     workBuddyContinuationKey: { type: 'string', description: 'Continue a recorded WorkBuddy DSF session in the same workspace, only during a peak in mode 2.' },
     sessionId: { type: 'string', description: `Resume a DSH session recorded by ${scoped} from the SAME cwd; never use an invented or foreign ID.` }
@@ -47,10 +48,10 @@ const tools = [
     annotations: { readOnlyHint: false }
   },
   { name: 'get_dsh_bridge_status', description: `Local readiness, instance identity and active task for ${scoped} Does not call a model or reveal credentials.`, inputSchema: { type: 'object', additionalProperties: false, properties: {} }, annotations: { readOnlyHint: true } },
-  { name: 'start_dsh_task', description: `Start the native DSH headless agent through the configured OpenCode Go route in ${scoped} Returns task ID. Sol Max delegates execution; DSH owns tool work and self-monitoring. Does not start OpenCode CLI.`, inputSchema: taskSchema, annotations: { readOnlyHint: false, openWorldHint: true } },
-  { name: 'run_dsh_task', description: `Run one bounded DSH task in ${scoped} and wait internally until its final receipt. Prefer for no-intervention tasks when host MCP timeout safely covers the budget; otherwise use start+wait. Peak schedule may block or stop work. No model fallback.`, inputSchema: taskSchema, annotations: { readOnlyHint: false, openWorldHint: true } },
+  { name: 'start_dsh_task', description: `Submit a native DSH task in ${scoped} for an early task ID or later intervention. DSH owns execution and monitoring. Mode 2 can return a pending WorkBuddy DSF handoff at peak.`, inputSchema: taskSchema, annotations: { readOnlyHint: false, openWorldHint: true } },
+  { name: 'run_dsh_task', description: `Submit a native DSH task in ${scoped} and wait internally for its receipt. ${preferRun('start_dsh_task', 'wait_dsh_task')} Mode 2 can return a pending WorkBuddy DSF handoff at peak. This entry has no HY4 adapter.`, inputSchema: taskSchema, annotations: { readOnlyHint: false, openWorldHint: true } },
   { name: 'get_dsh_task', description: `Read a task receipt from ${scoped} completed means agent-loop completion, NOT independent acceptance of the project result.`, inputSchema: idSchema, annotations: { readOnlyHint: true } },
-  { name: 'wait_dsh_task', description: `Event-driven wait for ${scoped} up to 60 seconds, without model polling or duplicate execution. Repeat only after timeout, or use the host native wait when available.`, inputSchema: { ...idSchema, properties: { ...idSchema.properties, waitMs: { type: 'integer', minimum: 0, maximum: 60000, default: 25000 } } }, annotations: { readOnlyHint: true } },
+  { name: 'wait_dsh_task', description: `Wait on the original MCP task ID in ${scoped} ${waitForExisting}`, inputSchema: { ...idSchema, properties: { ...idSchema.properties, waitMs: WAIT_MS } }, annotations: { readOnlyHint: true } },
   { name: 'cancel_dsh_task', description: `Cancel only a task owned by this ${scoped} process. Attempts to terminate its process tree; inspect the receipt afterwards.`, inputSchema: idSchema, annotations: { readOnlyHint: false, destructiveHint: true } },
   ...workBuddyDispatchTools
 ];
@@ -78,13 +79,13 @@ async function call(name, args, requestId) {
   }
   if (name === 'finish_workbuddy_dsf_dispatch') return manager.workBuddy.finish(args);
   if (name === 'get_dsh_task') return manager.get(args.taskId);
-  if (name === 'wait_dsh_task') return manager.wait(args.taskId, args.waitMs ?? 25000);
+  if (name === 'wait_dsh_task') return manager.wait(args.taskId, args.waitMs ?? WAIT_MS.default);
   if (name === 'cancel_dsh_task') return manager.cancel(args.taskId);
   const record = await manager.start(args);
   if (name === 'start_dsh_task' || record.workbuddy_dispatch) return record;
   if (!record.replayed) inFlight.set(requestId, record.task_id);
   try {
-    while (manager.pending.has(record.task_id)) await manager.wait(record.task_id, 60000);
+    while (manager.pending.has(record.task_id)) await manager.wait(record.task_id, WAIT_MS.maximum);
     return manager.get(record.task_id);
   } finally { inFlight.delete(requestId); }
 }

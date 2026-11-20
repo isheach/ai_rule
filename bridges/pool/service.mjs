@@ -10,6 +10,7 @@ import { validateWorkBuddyContinuation, WorkBuddyDispatch } from '../workbuddy/d
 import { Hy4AcpManager } from '../hy4/acp.mjs';
 import { loadManifest } from '../hy4/manifest.mjs';
 import { normalizeTaskAuthorization, safeWriteMetadata } from '../hy4/policy.mjs';
+import { DSH_TIMEOUT_MS, WAIT_MS, validateWaitMs } from '../task-lifecycle.mjs';
 
 const TERMINAL = new Set(['completed', 'failed', 'cancelled', 'timed_out', 'schedule_stopped', 'refused', 'not_accepted']);
 const FAILURE = new Set(['failed', 'timed_out', 'cancelled', 'schedule_stopped', 'refused', 'unknown', 'unknown_after_disconnect', 'not_accepted']);
@@ -188,7 +189,7 @@ export class PoolService {
       scheduleModeForRoot: () => this.pool.scheduleMode(rootId)
     });
     const coordinator = new RoutingCoordinator({
-      runtime, dsh: { submit: task => manager.start(task) }, hy4: root.hy4 ?? new UnavailableWorkBuddyHy4(),
+      runtime, dsh: { submit: (task, authorization) => manager.start(task, authorization) }, hy4: root.hy4 ?? new UnavailableWorkBuddyHy4(),
       authorization: this.authorization, clock: this.clock, liveMcpDispatchWired: true
     });
     const entry = { manager, hy4: root.hy4, coordinator };
@@ -241,9 +242,10 @@ export class PoolService {
     } catch (error) {
       throw new PreAdmissionRejection(AdmissionCode.INVALID_PARAMS, error.message);
     }
-    const timeoutMs = args.timeoutMs ?? 900000;
-    if (!Number.isInteger(timeoutMs) || timeoutMs < 1000 || timeoutMs > 3600000) {
-      throw new PreAdmissionRejection(AdmissionCode.INVALID_PARAMS, 'timeoutMs must be an integer 1000..3600000.');
+    const timeoutMs = args.timeoutMs ?? DSH_TIMEOUT_MS.default;
+    if (!Number.isInteger(timeoutMs) || timeoutMs < DSH_TIMEOUT_MS.minimum || timeoutMs > DSH_TIMEOUT_MS.maximum) {
+      throw new PreAdmissionRejection(AdmissionCode.INVALID_PARAMS,
+        `timeoutMs must be an integer ${DSH_TIMEOUT_MS.minimum}..${DSH_TIMEOUT_MS.maximum}.`);
     }
     if (args.sessionId !== undefined && (typeof args.sessionId !== 'string' || !/^[A-Za-z0-9_.:-]{1,160}$/.test(args.sessionId))) {
       throw new PreAdmissionRejection(AdmissionCode.INVALID_PARAMS, 'Invalid sessionId.');
@@ -603,10 +605,10 @@ export class PoolService {
     const taskId = started.task_id;
     const entry = this.owned.get(taskId)?.entry;
     if (!entry) return this.get(rootId, { taskId });
-    const deadline = Date.now() + (args.timeoutMs ?? 900000) + 5000;
+    const deadline = Date.now() + (args.timeoutMs ?? DSH_TIMEOUT_MS.default) + 5000;
     let receipt = started.receipt ?? this._receipt(entry, { selected_backend: started.backend, task_id: taskId });
     while (!TERMINAL.has(receipt.status) && !['unknown', 'unknown_after_disconnect'].includes(receipt.status) && Date.now() < deadline) {
-      receipt = await this._receipt(entry, { selected_backend: started.backend, task_id: taskId }, 60000);
+      receipt = await this._receipt(entry, { selected_backend: started.backend, task_id: taskId }, WAIT_MS.maximum);
     }
     const owned = this.owned.get(taskId);
     if (owned) {
@@ -629,8 +631,8 @@ export class PoolService {
     return this._pack(rootId, decision, this._readReceipt(rootId, decision));
   }
 
-  async wait(rootId, query, waitMs = 25000) {
-    if (!Number.isInteger(waitMs) || waitMs < 0 || waitMs > 60000) throw Error('waitMs must be an integer 0..60000.');
+  async wait(rootId, query, waitMs = WAIT_MS.default) {
+    validateWaitMs(waitMs);
     const workBuddy = this._workBuddyForQuery(rootId, query);
     if (workBuddy) return workBuddy;
     const { owner, decision } = this._resolveDecision(rootId, query);

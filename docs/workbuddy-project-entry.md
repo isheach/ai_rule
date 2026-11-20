@@ -1,12 +1,10 @@
 # WorkBuddy DSF 项目入口
 
-在已装 WorkBuddy 的机器上，一次把已批准的项目根配置给 `deepseek-v4-flash-workbuddy`。此后 Sol 按当前任务给出目标、绝对 `cwd`、论文、脚本或数据，以及可共享的相关记忆和验收标准。例如，在同一个获准研究目录内从 SYRAN 切到 Shirdel，只更新任务书和新任务键，即可沿用原项目授权及已加载的服务，无需另建 profile 或刷新服务。
+使用本机现有 WorkBuddy 及同名 MCP `deepseek-v4-flash-workbuddy`。为已批准的物理项目建立一次记录。显式 WorkBuddy DSF 与 DSH 模式 2 的实际峰时派发都可使用这项配置。订阅或 API Sol 的来源按会话单独选择。 [WorkBuddy 运行参考](../skills/multi-agent-dispatch/references/workbuddy.md) · [峰时交接](offpeak-schedule.md#模式-2-的峰时派发)
 
-显式选择 WorkBuddy DSF 时由 Sol 直接走该入口。DSH 峰谷模式 2 在谷时走 DSH，真实峰时的新任务使用同一个 WorkBuddy 入口，提前门禁、预算、原任务和单次领取规则按原日历执行。协调来源仍由当前会话单独选择。 [峰谷调度](offpeak-schedule.md) · [Sol 协调来源](sol-coordinator.md)
+## 准备已有安装
 
-## 一次迁移
-
-使用现有 WorkBuddy 和 Codex 的 Windows 用户、Node 22 或更新版本，以及本机实际的仓库副本。同步代码后，在仓库根安装项目入口所需的固定 SDK 版本。
+要求 Node 22 或更高版本。进入本机仓库目录、同步代码并安装锁定的 SDK。
 
 ```powershell
 Set-Location "$env:USERPROFILE\ai_rule" -ErrorAction Stop
@@ -16,11 +14,11 @@ npm.cmd ci --ignore-scripts --prefix bridges/workbuddy
 if ($LASTEXITCODE -ne 0) { throw 'WorkBuddy SDK 安装失败' }
 ```
 
-从本机现有 WorkBuddy 安装和已核实的旧桥启动设置确认实际执行的脚本与原账户配置目录。本机配置引用该目录，认证结果以本机验收为准。厂商的 WorkBuddy 和独立 CodeBuddy CLI 可以使用不同配置目录，以原桥实际设置为准。 [CodeBuddy 配置目录说明](https://www.codebuddy.cn/docs/cli/release-notes/v2.48.0)
+从已安装 WorkBuddy 和现有桥接启动设置核实实际 CLI 脚本、原账户配置目录。项目入口使用 `resources\app.asar.unpacked\cli\dist` 下实际生效的 `codebuddy-lite-wb.mjs` 或 `codebuddy-headless.js`。旧桥 `CODEBUDDY_FORCE_LITE_WB_BUNDLE=1` 对应已核实的 lite bundle。直接配置该文件及 SHA-256，供锁定的 `@tencent-ai/agent-sdk@0.3.305` 使用。WorkBuddy 与独立 CodeBuddy 的账户目录可能有差异，使用旧桥实际配置。 [CodeBuddy 配置目录](https://www.codebuddy.cn/docs/cli/release-notes/v2.48.0) · [Tencent Agent SDK](https://www.codebuddy.cn/docs/cli/sdk)
 
-固定本机 WorkBuddy 安装中 `resources\app.asar.unpacked\cli\dist` 下实际使用的 `codebuddy-lite-wb.mjs` 或 `codebuddy-headless.js` 的绝对路径及 SHA-256。旧桥通过 `CODEBUDDY_FORCE_LITE_WB_BUNDLE=1` 启动 lite bundle 时，选择已核实的 `codebuddy-lite-wb.mjs`。直接指定该文件，避免 SDK 重写 `bin\codebuddy` 启动器路径。桥接器使用所选脚本和锁定的 `@tencent-ai/agent-sdk@0.3.305`，兼容、模型或安全检查失败即报告阻塞。已记录的 WorkBuddy 捆绑 CLI 2.165.0 对该 SDK 的兼容性待本机验收。 [Tencent Agent SDK](https://www.codebuddy.cn/docs/cli/sdk)
+## 项目配置
 
-填写前三个路径后运行下面的 PowerShell。示例采用只读。如果既有实验授权已覆盖项目内文件写入及 MATLAB 等原生命令，在初始项目配置中把 `allow_write` 和 `allow_commands` 都设为 `$true`，沿用已获批准的范围，无需重新确认。已有合适的本机 JSON 时直接沿用其路径。 [配置模板](../config/workbuddy-project.example.json)
+模板和下面的脚本以只读项目为例。已获准项目写入时将 `allow_write` 设为 `$true`，已获准项目内原生命令时将 `allow_commands` 同时设为 `$true`。例如以前已批准的实验写入和 MATLAB 可以沿用。项目根按真实批准范围填写。已有适用 JSON 可直接复用其路径。 [项目模板](../config/workbuddy-project.example.json)
 
 ```powershell
 $wbCli = (Resolve-Path -LiteralPath 'D:\WorkBuddy\resources\app.asar.unpacked\cli\dist\codebuddy-lite-wb.mjs' -ErrorAction Stop).ProviderPath
@@ -31,7 +29,7 @@ $wbHash = (Get-FileHash -LiteralPath $wbCli -Algorithm SHA256 -ErrorAction Stop)
 $codexDir = if ($env:CODEX_HOME) { $env:CODEX_HOME } else { Join-Path $env:USERPROFILE '.codex' }
 $wbState = Join-Path $codexDir 'ai-rule-workbuddy'
 $wbConfig = Join-Path $wbState 'workbuddy-project.local.json'
-if (Test-Path -LiteralPath $wbConfig) { throw '项目配置已存在，请沿用或就地核实该文件。' }
+if (Test-Path -LiteralPath $wbConfig) { throw '项目配置已存在，请核实并沿用该文件。' }
 New-Item -ItemType Directory -Path $wbState -Force -ErrorAction Stop | Out-Null
 [ordered]@{
     schema = 1
@@ -48,9 +46,11 @@ New-Item -ItemType Directory -Path $wbState -Force -ErrorAction Stop | Out-Null
 } | ConvertTo-Json -Depth 5 | Set-Content -LiteralPath $wbConfig -Encoding utf8 -ErrorAction Stop
 ```
 
-项目、CLI 和账户配置应使用已存在的绝对物理路径。项目根互不重叠，与 WorkBuddy 安装、账户配置、本机 JSON 及运行目录物理分离。将项目 ID 稳定地绑定到获准根目录。若旧授权只覆盖较小目录，按原范围配置。原生命令需同时有写入和命令授权。凭据和本机配置留在本机。
+固定项目 ID 及已存在的绝对物理根。项目根互不重叠，与 WorkBuddy 安装、账户配置、本机 JSON 和 runtime 分离。更窄的用户任务边界随当前工作传入。通过校验的原生命令以当前 OS 账户权限运行，宿主审批照常生效。CLI 升级后核实实际脚本并更新 pin，在活动工作安全结束时按宿主支持方式加载一次。
 
-安装器用同名注册迁移现有 DSF。先预览，待旧 WorkBuddy 任务取得终态后应用并验证。首次添加缺少的同名服务时省略 `-ReplaceWorkBuddyDsf`。预览和验证检查本机配置及注册，不提交模型任务。
+## 同名安装或迁移
+
+将 `$wbConfig` 指向本机 JSON。已经注册旧 DSF 时显式传替换选项，首次添加时省略。先预览，待旧 WorkBuddy 任务结束后应用并验证。
 
 ```powershell
 $wbInstallArgs = @{ WorkBuddyProjectConfig = $wbConfig; ReplaceWorkBuddyDsf = $true }
@@ -59,7 +59,7 @@ $wbInstallArgs = @{ WorkBuddyProjectConfig = $wbConfig; ReplaceWorkBuddyDsf = $t
 .\scripts\install.ps1 -Verify
 ```
 
-PowerShell 脚本受本机执行策略限制时使用等价的 Node 命令。将配置变量设为上述本机绝对路径。
+PowerShell 执行策略限制脚本时使用 Node。
 
 ```powershell
 $wbNodeArgs = @('--workbuddy-project-config', $wbConfig, '--replace-workbuddy-dsf')
@@ -70,28 +70,10 @@ if ($LASTEXITCODE -ne 0) { throw '安装失败' }
 node .\scripts\manage.mjs --verify
 ```
 
-应用会备份原注册并输出回滚 manifest。`-Verify` 的 `workbuddy_dsf_project.structure_valid` 检查结构。保留已在运行的任务和进程。就绪后按当前宿主支持的方式加载变更的 DSF 服务一次，并由真实 Sol 确认项目工具已可见。宿主只在新会话读取注册时，在能加载该注册的会话做验收。活动任务仍从原入口收尾。Git 同步更新代码和规则，本机安装、会话记录和运行状态各自维护。
+`workbuddy_dsf_project.structure_valid` 表示安装结构可核对。按宿主支持的方式加载新 DSF 入口，随后由真实 Sol 检查实际工具和权限。API Sol 可通过 `workbuddy.project_config` 引用同一 JSON，首次设置时加载协调配置。 [API WorkBuddy 设置](sol-coordinator.md#workbuddy-dsf)
 
-API Sol 已在使用时，让 `coordinator.local.json` 中的 `workbuddy.project_config` 指向同一个本机 JSON，然后按 API 协调器的现有安装流程应用并加载该配置一次。订阅 Sol 可直接使用上面已加载的 DSF 服务。 [API Sol 的 WorkBuddy 设置](sol-coordinator.md#使用-workbuddy-dsf)
+## 使用与验收
 
-## Sol 派单
+由真实 Sol 以本次 cwd 和权限调用 `get_task_bridge_status`。检查 `project-v1`、`project_id`、ready 和 `deepseek-v4-flash`。随后在同一个已批准的项目里执行两项实际任务，例如从 SYRAN 的输入切到 Shirdel 的脚本和数据。换当前任务书与幂等键，沿用授权及已加载服务。核对实际的键、模型、终态和工具结果。已批准写入或原生命令时，可用项目中现有的可逆检查核对效果。
 
-| 工具 | 调用和验证 |
-|---|---|
-| `get_task_bridge_status` | 传当前绝对 `cwd`、`permissionMode` 和适用的任务限制。用 `ready: true`、`project_contract: "project-v1"`、`model: "deepseek-v4-flash"` 和 `project_id` 验证当前入口。 |
-| `run_workbuddy_task` | 将 `project_id` 作为 `projectId`，传 `prompt`、`cwd`、`idempotencyKey` 与 `permissionMode`。按需传 `timeoutMs`、`capability`、`authorizationNote` 及更窄的授权 scope。同步返回真实任务回执。 |
-| `get_workbuddy_task` | 传原 `idempotencyKey`，查询原任务 ID、结果及已取得的会话。断连后先读原回执，未知或仍在运行时保留原任务。 |
-
-`read-only` 用于只读任务。`workspace-write` 受项目的 `allow_write` 限制。选能涵盖本轮文件的已获批 `cwd` 作为任务边界。使用 `writes`、`writeScopes` 或 `commands` 收窄时，明确传 `capability: "workspace-write"`。`writes` 指定文件以及 `create`、`edit` 或 `write`，`writeScopes` 指定现有目录及允许的 `create`、`replace`、`edit` 操作，`commands` 指定完整命令。`authorizationNote` 可引用既有的项目授权。真实超出范围时才补充授权。原生命令使用操作系统账户权限，受桥的工具校验及厂商正常权限设置约束。是否有额外 OS 隔离取决于宿主。
-
-每项新任务用一个新的非秘密键。网络重试或恢复状态沿用原键。明确继续原 WorkBuddy 会话时，使用原任务回执中的 `session_id` 作为 `sessionId`，沿用同工作目录、项目和权限 scope，并为续跑使用新键。模式 2 还使用同目录的已完成交接记录。受理不明时保留原运行记录及锁，由原协调者核实终态。
-
-## 本机验收与回滚
-
-1. 由真实 Sol 在已批准的 `cwd` 调用状态工具。核对新契约、项目 ID、所需权限和固定模型。ready 是目录和设模检查，真实模型任务及用量由本机回执和账单核对。
-2. 用同一项目授权及已加载服务连续派两项低风险任务，各读一个已批准的非敏感文件或子目录，例如先读 SYRAN 输入再读 Shirdel 输入。每项用自己的键，比较真实 `task_id`、固定模型、终态和结果证据，并用原键查回执。配置、授权和服务在两项之间直接沿用。有写入或命令授权时，再用项目内的可逆操作核对实际工具效果。
-3. 用模式 2 时，在实际峰段从正常 DSH 派单核实一次领取和终态回填，谷时核实 DSH 路由。谷时可对步骤 2 使用“仅本次 WorkBuddy DSF”做独立 smoke，保留会话选择。 [模式 2 的验收路径](offpeak-schedule.md#模式-2-的峰时派发)
-
-模型、认证、哈希或项目能力核验失败时记录真实阻塞。CLI 更新导致哈希变化时，核实新的本机安装后再更新 pin，待活动任务结束时按宿主支持方式载入这一入口。登记的目录和任务输入可继续沿用。
-
-如需恢复旧注册，等相关任务完成后，用这次安装输出的 manifest 执行 `.\scripts\install.ps1 -RollbackManifest '<该次备份的 manifest.json>'`，然后按宿主支持方式载入恢复的 DSF 注册。配置若在安装后被其他操作改动，按安装器的哈希冲突提示保留现有改动并本机合并。备份和任务记录留在本机。
+已观察的 WorkBuddy 捆绑 CLI 2.165.0 仍需在实际机器验证与 SDK 的兼容性。认证、哈希或模型错误以实际回执为准。需要恢复旧注册时，待相关任务终态后按安装输出的 manifest 回滚，再加载原入口。 [通用回滚步骤](../README.md#更新规则与回滚)

@@ -57,23 +57,64 @@ test('installer respects active global override and does not alter native models
   fs.writeFileSync(path.join(ch, 'AGENTS.override.md'), 'Existing override\n');
   fs.writeFileSync(path.join(ch, 'config.toml'), 'model = "local-model"\n');
   const result = buildPlan({ home, codexHome: ch });
-  assert.equal(result.usesOverride, true); assert.equal(result.plan.length, 2);
+  assert.equal(result.usesOverride, true);
+  assert.equal(result.plan[0].file, path.join(ch, 'AGENTS.override.md'));
   assert.ok(result.plan[0].data.startsWith('Existing override'));
+  assert.ok(result.plan.every(item => item.file !== path.join(ch, 'config.toml')));
 });
 test('DSH registration detects existing unmanaged same-name service', () => {
   const home = temp(), ch = path.join(home, '.codex'); fs.mkdirSync(ch);
   fs.writeFileSync(path.join(ch, 'config.toml'), '[mcp_servers.dsh-opencode-go]\ncommand="old"\n');
   assert.throws(() => buildPlan({ home, codexHome: ch, enableDsh: true, dshEntry: mock }), /already exists/);
 });
-test('installer preview, apply, idempotence and safe rollback', () => {
+test('installer applies and verifies the Skill with locally resolvable references, then rolls it back', t => {
   const home = temp(), script = path.join(root, 'scripts', 'manage.mjs');
+  t.after(() => fs.rmSync(home, { recursive: true, force: true }));
   const run = (...a) => spawnSync(process.execPath, [script, '--home', home, '--codex-home', path.join(home, '.codex'), ...a], { encoding: 'utf8' });
-  assert.equal(run().status, 0); assert.ok(!fs.existsSync(path.join(home, '.codex', 'AGENTS.md')));
-  assert.equal(run('--apply').status, 0); assert.match(run('--apply').stdout, /already up to date/);
+  const skill = path.join(home, '.agents', 'skills', 'multi-agent-dispatch');
+  const agents = path.join(home, '.codex', 'AGENTS.md');
+  assert.equal(run().status, 0);
+  assert.equal(fs.existsSync(agents), false);
+  assert.equal(fs.existsSync(skill), false);
+  assert.equal(run('--apply').status, 0);
+  assert.match(run('--apply').stdout, /already up to date/);
+  const links = [...fs.readFileSync(path.join(skill, 'SKILL.md'), 'utf8').matchAll(/\]\((references\/[^)]+\.md)\)/g)]
+    .map(match => path.join(skill, match[1]));
+  assert.ok(links.length > 0);
+  for (const link of links) assert.ok(fs.statSync(link).isFile(), link);
+  const verification = run('--verify');
+  assert.equal(verification.status, 0, verification.stderr || verification.stdout);
+  assert.equal(JSON.parse(verification.stdout).rules_current, true);
+
   const backups = path.join(home, '.codex', 'ai-rule-backups');
   const manifest = path.join(backups, fs.readdirSync(backups)[0], 'manifest.json');
+  const originalReference = fs.readFileSync(links[0]);
+  fs.appendFileSync(links[0], '\nA local edit\n');
+  const changed = run('--verify');
+  assert.equal(changed.status, 1);
+  assert.equal(JSON.parse(changed.stdout).rules_current, false);
+  assert.match(run('--rollback', manifest).stderr, /Changed since installation/);
+  fs.writeFileSync(links[0], originalReference);
   assert.equal(run('--rollback', manifest).status, 0);
-  assert.ok(!fs.existsSync(path.join(home, '.codex', 'AGENTS.md')));
+  assert.equal(fs.existsSync(agents), false);
+  assert.equal(fs.existsSync(path.join(skill, 'SKILL.md')), false);
+  for (const link of links) assert.equal(fs.existsSync(link), false, link);
+});
+test('installer protects existing Skill reference files and rejects a redirected reference directory', t => {
+  const home = temp(), target = temp();
+  t.after(() => fs.rmSync(home, { recursive: true, force: true }));
+  t.after(() => fs.rmSync(target, { recursive: true, force: true }));
+  const skill = path.join(home, '.agents', 'skills', 'multi-agent-dispatch');
+  const references = path.join(skill, 'references');
+  fs.mkdirSync(references, { recursive: true });
+  const localReference = path.join(references, 'dsh.md');
+  fs.writeFileSync(localReference, 'Existing unrelated reference\n');
+  assert.throws(() => buildPlan({ home, codexHome: path.join(home, '.codex') }), /Existing unrelated Skill file/);
+  assert.equal(fs.readFileSync(localReference, 'utf8'), 'Existing unrelated reference\n');
+  fs.rmSync(references, { recursive: true });
+  fs.symlinkSync(target, references, process.platform === 'win32' ? 'junction' : 'dir');
+  assert.throws(() => buildPlan({ home, codexHome: path.join(home, '.codex') }), /directory without symbolic links/);
+  assert.deepEqual(fs.readdirSync(target), []);
 });
 test('opt-in Sol installer provisions from legacy DSH, preserves services and active runtime, and verifies and rolls back offline', t => {
   const home = temp(), codexHome = path.join(home, '.codex'), cwd = path.join(home, 'approved workspace');

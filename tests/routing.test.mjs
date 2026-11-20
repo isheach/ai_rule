@@ -237,9 +237,13 @@ test('concurrent same-key submissions share one dispatch and one request ID', as
   release();
   const [a, b] = await Promise.all([p1, p2]);
   assert.equal(a.request_id, b.request_id);
+  assert.equal(a.deduplicated, undefined);
+  assert.equal(b.deduplicated, true);
   assert.equal(d.calls, 1);
   const replay = await c.submit(t);
   assert.equal(replay.request_id, a.request_id);
+  assert.equal(replay.replayed, true);
+  assert.equal(c.get(t.idempotencyKey).replayed, undefined);
   assert.equal(d.calls, 1);
 });
 

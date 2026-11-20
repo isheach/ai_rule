@@ -2,15 +2,13 @@ import crypto from 'node:crypto';
 import { PoolService } from '../pool/service.mjs';
 import { normalizeTaskAuthorization } from '../hy4/policy.mjs';
 import { ROUTE } from '../dsh/core.mjs';
+import { DSH_TIMEOUT_MS, WAIT_MS } from '../task-lifecycle.mjs';
 import { WORKBUDDY_DSF } from '../workbuddy/dispatch.mjs';
-import { approvedCwd, boundedText, limitText, object, SAFE_ID } from './config.mjs';
+import { approvedCwd, boundedText, COORDINATOR_MODES, CoordinatorMode, EXECUTION_BACKENDS, EXECUTION_PERMISSIONS, limitText, object, SAFE_ID } from './config.mjs';
 import { digest, now, SolJournal } from './journal.mjs';
 import { ResponsesError, singleCall } from './responses.mjs';
 import { WorkBuddyConnection } from './workbuddy.mjs';
 
-const SOURCE = ['subscription', 'api'];
-const BACKENDS = ['DSH', 'WorkBuddy DSF', 'HY4', 'A'];
-const PERMISSIONS = ['read-only', 'workspace-write'];
 const ACTIVE = ['starting', 'running', 'cancelling'];
 const UNKNOWN = ['unknown', 'unknown_after_disconnect', 'workbuddy_claimed', 'workbuddy_pending', ...ACTIVE];
 const ALLOWED_INPUT = ['coordinatorMode', 'idempotencyKey', 'backend', 'goal', 'cwd', 'permissionMode', 'authorizationNote',
@@ -53,9 +51,9 @@ function recordResponse(record, evidence) {
 
 function taskRequest(input, config, sanitize) {
   object(input, ALLOWED_INPUT, 'coordination handoff');
-  if (input.coordinatorMode !== undefined && !SOURCE.includes(input.coordinatorMode)) throw Error('coordinatorMode must be subscription or api.');
-  if (!BACKENDS.includes(input.backend)) throw Error('Select the original execution backend: DSH, WorkBuddy DSF, HY4 or A.');
-  if (!PERMISSIONS.includes(input.permissionMode)) throw Error('An explicit read-only or workspace-write permissionMode is required.');
+  if (input.coordinatorMode !== undefined && !COORDINATOR_MODES.includes(input.coordinatorMode)) throw Error('coordinatorMode must be subscription or api.');
+  if (!EXECUTION_BACKENDS.includes(input.backend)) throw Error('Select the original execution backend: DSH, WorkBuddy DSF, HY4 or A.');
+  if (!EXECUTION_PERMISSIONS.includes(input.permissionMode)) throw Error('An explicit read-only or workspace-write permissionMode is required.');
   const cwd = approvedCwd(config, input.cwd);
   const permissionMode = input.permissionMode;
   if (permissionMode === 'workspace-write' && !config.pool.allow_write) throw Error('This coordinator workspace is configured read-only.');
@@ -72,7 +70,9 @@ function taskRequest(input, config, sanitize) {
   const scope = normalizeTaskAuthorization({ cwd, permissionMode, capability, writes: input.writes, writeScopes: input.writeScopes, commands: input.commands });
   if (sanitize(JSON.stringify(scope)) !== JSON.stringify(scope)) throw Error('Task scope appears to contain a credential.');
   const timeoutMs = input.timeoutMs ?? config.limits.task_timeout_ms;
-  if (!Number.isSafeInteger(timeoutMs) || timeoutMs < 1000 || timeoutMs > config.limits.task_timeout_ms) throw Error('Task timeoutMs exceeds the configured coordination budget.');
+  if (!Number.isSafeInteger(timeoutMs) || timeoutMs < DSH_TIMEOUT_MS.minimum || timeoutMs > config.limits.task_timeout_ms) {
+    throw Error('Task timeoutMs is outside the configured coordination budget.');
+  }
   const handoff = {
     backend: input.backend, goal: take('goal', 12000, true), cwd, permissionMode, capability, authorizationNote,
     constraints: take('constraints', 12000), contextSummary: take('contextSummary', 16000), acceptance: take('acceptance', 8000, true), ...scope
@@ -137,7 +137,7 @@ export class SolService {
     return this._view(record);
   }
 
-  async wait(rootId, key, taskId, waitMs = 25000) {
+  async wait(rootId, key, taskId, waitMs = WAIT_MS.default) {
     const current = this.get(rootId, key, taskId);
     const active = this.active.get(this._key(rootId, key));
     if (active) await waitUntil(active.done, waitMs);
@@ -157,12 +157,12 @@ export class SolService {
     const key = input.idempotencyKey;
     const prior = this.journal.get(rootId, key);
     const effective = input.coordinatorMode ?? this.journal.mode(rootId).coordinator_mode;
-    if (!SOURCE.includes(effective)) throw Error('coordinatorMode must be subscription or api.');
+    if (!COORDINATOR_MODES.includes(effective)) throw Error('coordinatorMode must be subscription or api.');
     const sanitize = value => this.responses.sanitize(value);
     if (sanitize(key) !== key) throw Error('Use a nonsecret idempotency key.');
     // Existing work keeps its original source, even if the user has now
     // switched the default or supplied a different one-shot source preference.
-    if (!prior && effective === 'subscription') return { status: 'not_dispatched', coordinator_mode: 'subscription' };
+    if (!prior && effective === CoordinatorMode.SUBSCRIPTION) return { status: 'not_dispatched', coordinator_mode: CoordinatorMode.SUBSCRIPTION };
     const { handoff, timeoutMs, hash } = taskRequest(input, this.config, sanitize);
     const replay = record => {
       if (record.fingerprint !== hash) throw Error('The idempotency key already belongs to a different frozen handoff.');
@@ -170,18 +170,18 @@ export class SolService {
     };
     if (prior) return replay(prior);
     if (!['DSH', 'WorkBuddy DSF'].includes(handoff.backend)) {
-      return { status: 'blocked', coordinator_mode: 'api', backend: handoff.backend, error_code: 'API_BACKEND_UNSUPPORTED',
+      return { status: 'blocked', coordinator_mode: CoordinatorMode.API, backend: handoff.backend, error_code: 'API_BACKEND_UNSUPPORTED',
         message: 'API coordination for this execution backend is unavailable. The selection is preserved.' };
     }
-    if (!this.responses.configured) return { status: 'blocked', coordinator_mode: 'api', error_code: 'OPENAI_CREDENTIALS_MISSING',
+    if (!this.responses.configured) return { status: 'blocked', coordinator_mode: CoordinatorMode.API, error_code: 'OPENAI_CREDENTIALS_MISSING',
       message: 'The configured OpenAI credential or project/organization environment reference is unavailable.' };
-    if (handoff.backend === 'WorkBuddy DSF' && !this.config.workbuddy) return { status: 'blocked', coordinator_mode: 'api',
+    if (handoff.backend === 'WorkBuddy DSF' && !this.config.workbuddy) return { status: 'blocked', coordinator_mode: CoordinatorMode.API,
       error_code: 'WORKBUDDY_NOT_CONFIGURED', message: 'The local authorized WorkBuddy DSF adapter is unavailable.' };
     if (this.active.size >= 3) throw Error('This sol-coordinator process is already coordinating three tasks.');
     const schedule = this.schedule(rootId);
     const record = {
       schema: 1, root_id: rootId, idempotency_key: key, task_id: crypto.randomUUID(), fingerprint: hash,
-      coordinator_mode: 'api', requested_backend: handoff.backend, executor_backend: null, schedule_at_start: schedule.mode,
+      coordinator_mode: CoordinatorMode.API, requested_backend: handoff.backend, executor_backend: null, schedule_at_start: schedule.mode,
       model: this.config.openai.model, reasoning_effort: this.config.openai.reasoning_effort, permission_mode: handoff.permissionMode,
       status: 'running', phase: 'planning', started_at: now(), finished_at: null, timeout_ms: timeoutMs,
       responses: [], steps: [], usage: safeUsage([]), usage_unknown: false, api_in_flight: false, token_threshold_exceeded: false
@@ -231,7 +231,8 @@ export class SolService {
       status: result.status, backend: result.backend, task_id: cleanId(result.task_id, sanitize),
       session_id: cleanId(receipt.session_id, sanitize), instance: cleanId(receipt.instance, sanitize),
       exit_code: Number.isInteger(receipt.exit_code) ? receipt.exit_code : null,
-      ...(result.backend === 'dsh' ? { requested_route: ROUTE, configured_route: receipt.configured_route ?? null, actual_route: receipt.actual_route ?? null } : {}),
+      ...(result.backend === 'dsh' ? { requested_route: ROUTE, configured_route: receipt.configured_route ?? null, actual_route: receipt.actual_route ?? null,
+        ...(receipt.scope_handling ? { scope_handling: receipt.scope_handling } : {}) } : {}),
       final_reason: cleanId(finalReason ?? receipt.reason_code, sanitize), native_tool_calls: receipt.native_tool_calls ?? receipt.tool_events ?? null,
       reason_code: cleanId(result.routing?.reason_code, sanitize), answer: limitText(sanitize(receipt.answer ?? ''), 24000)
     };
@@ -296,7 +297,7 @@ export class SolService {
       throw new ResponsesError('SOL_CONTINUATION_UNAVAILABLE', 'The original executor did not return a supported verified continuation session.');
     }
     const remaining = deadline - Date.now();
-    if (remaining < 1000 || signal.signal.aborted) throw new ResponsesError('COORDINATION_STOPPED', 'The coordination deadline cannot admit another execution.');
+    if (remaining < DSH_TIMEOUT_MS.minimum || signal.signal.aborted) throw new ResponsesError('COORDINATION_STOPPED', 'The coordination deadline cannot admit another execution.');
     const scheduleMode = handoff.backend === 'DSH' ? this.pool.scheduleStatus(rootId).mode : null;
     if (!previous && scheduleMode !== null && scheduleMode !== record.schedule_at_start) {
       throw new ResponsesError('SOL_SCHEDULE_CHANGED', 'The root schedule choice changed during planning. No executor has been dispatched.');
@@ -334,7 +335,7 @@ export class SolService {
         const query = { taskId, idempotencyKey: task.idempotencyKey };
         let result = submitted.receipt ? submitted : this.pool.get(rootId, query);
         while (ACTIVE.includes(result.status)) {
-          const observed = await interruptible(this.pool.wait(rootId, query, 60000), signal.signal);
+          const observed = await interruptible(this.pool.wait(rootId, query, WAIT_MS.maximum), signal.signal);
           if (observed) result = observed;
           else {
             result = submitted.replayed || submitted.deduplicated ? this.pool.get(rootId, query) : await this.pool.cancel(rootId, query);
