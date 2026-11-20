@@ -45,12 +45,12 @@ function callResult(sequence, call, extra = {}) {
   };
 }
 
-async function fixture(t, onResponse, { clock = offpeak, workbuddy = false, limits = {} } = {}) {
+async function fixture(t, onResponse, { clock = offpeak, workbuddy = false, limits = {}, rootSource = 'vscode' } = {}) {
   const base = fs.mkdtempSync(path.join(fs.realpathSync(os.tmpdir()), 'ai-rule-sol-'));
   const codexHome = path.join(base, 'codex');
   const sessions = path.join(codexHome, 'sessions', '2026', '11', '16');
   fs.mkdirSync(sessions, { recursive: true });
-  for (const [id, source] of [[rootOne, 'vscode'], [rootTwo, 'codex_work_desktop'], [childOne, { subagent: { thread_spawn: { parent_thread_id: rootOne } } }]]) {
+  for (const [id, source] of [[rootOne, rootSource], [rootTwo, 'codex_work_desktop'], [childOne, { subagent: { thread_spawn: { parent_thread_id: rootOne } } }]]) {
     fs.writeFileSync(path.join(sessions, `rollout-2026-11-16T00-00-00-${id}.jsonl`),
       JSON.stringify({ type: 'session_meta', payload: { id, source } }) + '\nSECRET-ROLLOUT-BODY-IGNORED\n');
   }
@@ -483,8 +483,8 @@ test('Standalone DSH version, help and route probes exclude ambient OpenAI varia
   assert.equal(run.status, 0, run.stderr);
 });
 
-test('Coordinator context accepts verified roots but legacy pool contexts remain child-only and purpose-isolated', async t => {
-  const f = await fixture(t, () => assert.fail('Context verification must not call OpenAI.'));
+test('Coordinator context accepts verified CLI roots but pool contexts remain child-only and purpose-isolated', async t => {
+  const f = await fixture(t, () => assert.fail('Context verification must not call OpenAI.'), { rootSource: 'cli' });
   const cfg = loadSolConfig(f.configPath);
   const sessionRoot = path.join(f.codexHome, 'sessions');
   assert.throws(() => issueContext({ config: cfg.pool, sessionsRoot: sessionRoot, env: { CODEX_THREAD_ID: rootOne } }), /subagent/);
@@ -492,6 +492,9 @@ test('Coordinator context accepts verified roots but legacy pool contexts remain
   const peer = await f.connect();
   await assert.rejects(mode(peer, legacy.context_ref), /different local service/);
   assert.equal((await mode(peer, f.context())).coordinator_mode, 'subscription');
+  await select(peer, f.context(), 'api');
+  assert.equal((await mode(peer, f.context(childOne))).coordinator_mode, 'api');
+  assert.equal((await mode(peer, f.context(rootTwo))).coordinator_mode, 'subscription');
   assert.equal(f.requests.length, 0);
 });
 

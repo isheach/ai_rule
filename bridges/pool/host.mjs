@@ -62,7 +62,7 @@ function readMeta(file) {
 function knownRootSource(payload) {
   if (payload?.originator === 'codex_work_desktop') return true;
   const source = payload?.source;
-  if (source === 'vscode' || source === 'codex_work_desktop') return true;
+  if (source === 'cli' || source === 'vscode' || source === 'codex_work_desktop') return true;
   if (source && typeof source === 'object' && !Array.isArray(source)) {
     return source.type === 'vscode' || source.kind === 'vscode'
       || source.originator === 'codex_work_desktop' || source.source === 'vscode';
