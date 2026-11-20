@@ -115,7 +115,17 @@ export function prepareElevation(sources, options) {
   const values = Object.entries(args).map(([name, value]) => `-${name} ${quotePowerShell(value)}`).join(' ');
   const script = sources.get(bootstrapPath).toString('utf8').replace(/^\uFEFF/, '');
   const switches = [options.action === 'Install' ? '-Install' : '', options.setKey ? '-SetKey' : ''].filter(Boolean).join(' ');
-  const command = `try { & {\n${script}\n} ${values} ${switches} } catch { [Console]::Error.WriteLine($_.Exception.Message); exit 1 }`;
+  const command = `try { & {
+${script}
+} ${values} ${switches} } catch {
+    [Console]::Error.WriteLine($_.Exception.Message)
+    if ([Environment]::UserInteractive -and -not [Console]::IsInputRedirected -and -not [Console]::IsOutputRedirected -and
+        [Environment]::GetCommandLineArgs() -notcontains '-NonInteractive') {
+        [Console]::WriteLine('Press a key to close this window.')
+        try { $null = [Console]::ReadKey($true) } catch {}
+    }
+    exit 1
+}`;
   const encodedCommand = Buffer.from(command, 'utf16le').toString('base64');
   if (encodedCommand.length > 30000) throw Error('The reviewed Windows elevation command exceeds its size limit.');
   return { bundle, encodedCommand };

@@ -188,10 +188,28 @@ function Test-SetupApply($Account, $Setup) {
 
 function Invoke-ReviewedElevation([string]$Encoded) {
     # No UAC consent UI is available to the CI runner, which is already elevated.
-    # Run the same encoded bootstrap and keep stderr for the digest assertion.
-    $ErrorActionPreference = 'Continue'
-    $output = & $powershell -NoLogo -NoProfile -NonInteractive -EncodedCommand $Encoded 2>&1
-    return [PSCustomObject]@{ Status = $LASTEXITCODE; Output = ($output | Out-String) }
+    # Read the child streams directly so PowerShell does not interpret stderr as CLI XML.
+    $info = [Diagnostics.ProcessStartInfo]::new()
+    $info.FileName = $powershell
+    $info.Arguments = '-NoLogo -NoProfile -NonInteractive -EncodedCommand ' + $Encoded
+    $info.WorkingDirectory = [Environment]::SystemDirectory
+    $info.UseShellExecute = $false
+    $info.CreateNoWindow = $true
+    $info.RedirectStandardInput = $true
+    $info.RedirectStandardOutput = $true
+    $info.RedirectStandardError = $true
+    $process = [Diagnostics.Process]::Start($info)
+    try {
+        $process.StandardInput.Close()
+        $output = $process.StandardOutput.ReadToEndAsync()
+        $errors = $process.StandardError.ReadToEndAsync()
+        if (-not $process.WaitForExit(45000)) {
+            $process.Kill()
+            throw 'The elevated broker bootstrap exceeded the test deadline.'
+        }
+        return [PSCustomObject]@{ Status = $process.ExitCode; Output = $output.GetAwaiter().GetResult() + $errors.GetAwaiter().GetResult() }
+    }
+    finally { $process.Dispose() }
 }
 
 function Assert-Status([string]$Step, $Reply, [bool]$Ready) {
