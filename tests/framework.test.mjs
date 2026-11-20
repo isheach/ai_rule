@@ -152,7 +152,8 @@ test('opt-in Sol installer provisions from legacy DSH, preserves services and ac
   assert.ok(installed.startsWith(original));
   assert.ok(installed.includes(legacy));
   assert.ok(installed.includes(named));
-  assert.match(installed, /env_vars = \["CODEX_HOME","SOL_OPENAI_API_KEY"\]/);
+  assert.match(installed, /env_vars = \["CODEX_HOME"\]/);
+  assert.doesNotMatch(installed, /SOL_OPENAI_API_KEY/);
   assert.doesNotMatch(installed, /fixture-key-do-not-print/);
   const localPool = JSON.parse(fs.readFileSync(path.join(solDir, 'pool.local.json'), 'utf8'));
   assert.equal(localPool.allow_write, false);
@@ -204,6 +205,17 @@ test('Sol setup reuses an existing approved root-pool and leaves manual coordina
   const explicitPlan = buildPlan({ home, codexHome, solCoordinatorConfig: explicit });
   assert.equal(explicitPlan.solCoordinatorConfig, fs.realpathSync(explicit));
   assert.equal(explicitPlan.plan.some(item => item.file === explicit), false);
+  const legacy = JSON.parse(generated.data);
+  delete legacy.openai.credential_source;
+  legacy.openai.api_key_env = 'PRIVATE_SOL_API_KEY';
+  fs.writeFileSync(explicit, JSON.stringify(legacy));
+  const migration = buildPlan({ home, codexHome, solCoordinatorConfig: explicit });
+  assert.deepEqual(JSON.parse(migration.plan.find(item => item.file === fs.realpathSync(explicit)).data), JSON.parse(generated.data));
+  assert.doesNotMatch(migration.plan.find(item => item.file === definition).data, /PRIVATE_SOL_API_KEY/);
+  assert.equal(JSON.parse(fs.readFileSync(explicit)).openai.api_key_env, 'PRIVATE_SOL_API_KEY');
+  legacy.openai.project_env = 'SOL_OPENAI_PROJECT_ID';
+  fs.writeFileSync(explicit, JSON.stringify(legacy));
+  assert.throws(() => buildPlan({ home, codexHome, solCoordinatorConfig: explicit }), /Preserve the existing project/);
   fs.appendFileSync(definition, "\n[ mcp_servers . 'sol-coordinator' ]\ncommand = 'unchanged'\n");
   assert.throws(() => buildPlan(planOptions), /Unmanaged MCP sol-coordinator/);
   assert.match(fs.readFileSync(definition, 'utf8'), /unchanged/);

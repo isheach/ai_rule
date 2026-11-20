@@ -1,7 +1,7 @@
 name: Offline Node tests
 on:
   push:
-    branches: [main, feature/dsh-offpeak-schedule-20261112]
+    branches: [main, feature/dsh-offpeak-schedule-20261112, security/isolated-sol-broker]
   pull_request:
 permissions:
   contents: read
@@ -20,6 +20,14 @@ jobs:
           node-version: ${{ matrix.node }}
       - name: Offline test suite
         run: npm test
+      - name: Test native credential broker offline
+        if: matrix.os == 'windows-latest'
+        shell: powershell
+        run: .\tests\sol-broker-windows.ps1
+      - name: Verify Windows broker service and cross-account access offline
+        if: matrix.os == 'windows-latest' && matrix.node == 22
+        shell: powershell
+        run: .\tests\sol-broker-windows-ci.ps1 -DisposableRunner
       - name: Install pinned WorkBuddy SDK for protocol testing
         if: matrix.os == 'windows-latest' && matrix.node == 22
         run: npm ci --ignore-scripts --prefix bridges/workbuddy

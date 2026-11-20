@@ -5,7 +5,7 @@ import os from 'node:os';
 import path from 'node:path';
 import { spawn, spawnSync } from 'node:child_process';
 import { once } from 'node:events';
-import { createServer } from 'node:http';
+import { randomBytes } from 'node:crypto';
 import { createInterface } from 'node:readline';
 import { fileURLToPath } from 'node:url';
 import { setTimeout as delay } from 'node:timers/promises';
@@ -17,7 +17,7 @@ const repo = path.resolve(path.dirname(fileURLToPath(import.meta.url)), '..');
 const rootOne = '00000000-0000-4000-8000-000000000601';
 const rootTwo = '00000000-0000-4000-8000-000000000602';
 const childOne = '00000000-0000-4000-8000-000000000603';
-const fixtureKey = 'sol-offline-fixture-value';
+const fixtureKey = 'sk-offlineSolBroker' + randomBytes(16).toString('hex');
 const model = 'gpt-6.2-sol';
 const effort = 'max';
 const peak = '2026-11-16T02:00:00.000Z';
@@ -56,6 +56,7 @@ async function fixture(t, onResponse, { clock = offpeak, workbuddy = false, limi
   }
   const workspace = path.join(base, 'workspace');
   fs.mkdirSync(workspace);
+  fs.writeFileSync(path.join(workspace, 'public-control.txt'), 'sol-offline-workspace');
   const dshRuns = path.join(base, 'dsh-runs.jsonl');
   const buddyRuns = path.join(base, 'wb-runs.jsonl');
   const poolConfig = path.join(base, 'pool.json');
@@ -66,27 +67,26 @@ async function fixture(t, onResponse, { clock = offpeak, workbuddy = false, limi
   const configPath = path.join(base, 'sol.json');
   const config = {
     state_dir: path.join(base, 'coordination'), pool_config: poolConfig,
-    openai: { model, reasoning_effort: effort, api_key_env: 'SOL_OPENAI_API_KEY', project_env: 'SOL_OPENAI_PROJECT_ID' },
+    openai: { model, reasoning_effort: effort, credential_source: 'windows-broker' },
     limits: { task_timeout_ms: 12000, api_timeout_ms: 3000, ...limits },
     ...(workbuddy ? { workbuddy: { command: process.execPath, args: [script('fake-workbuddy-dsf.mjs')], cwd: repo,
       env_vars: ['SOL_TEST_WB_RUNS'], arguments: { task: 'task', cwd: 'directory', profile: 'profile', session: 'resumeSession' },
       profiles: { 'read-only': 'fixture-read-only' } } } : {})
   };
   fs.writeFileSync(configPath, JSON.stringify(config));
-  const env = { ...process.env, CODEX_HOME: codexHome, SOL_OPENAI_API_KEY: fixtureKey, SOL_OPENAI_PROJECT_ID: 'proj-fixture',
+  const env = { ...process.env, CODEX_HOME: codexHome, SOL_OPENAI_API_KEY: 'old-sol-environment-decoy', SOL_OPENAI_PROJECT_ID: 'proj-fixture',
     OPENAI_API_KEY: 'other-offline-fixture-value', SOL_TEST_DSH_RUNS: dshRuns, SOL_TEST_WB_RUNS: buddyRuns, SOL_TEST_CLOCK: clock };
   const requests = [];
   const failures = [];
-  const server = createServer(async (req, res) => {
+  async function broker({ op, body, ...extra }) {
     try {
-      const chunks = [];
-      for await (const chunk of req) chunks.push(chunk);
-      const body = JSON.parse(Buffer.concat(chunks).toString());
+      assert.deepEqual(Object.keys(extra), []);
+      if (op === 'status') {
+        assert.equal(body, undefined);
+        return { ok: true, status: 200, body: { ready: true, model, reasoning_effort: effort } };
+      }
+      assert.equal(op, 'response');
       requests.push(body);
-      assert.equal(req.method, 'POST');
-      assert.equal(req.url, '/v1/responses');
-      assert.equal(req.headers.authorization, 'Bearer ' + fixtureKey);
-      assert.equal(req.headers['openai-project'], 'proj-fixture');
       assert.equal(body.model, model);
       assert.equal(body.reasoning.effort, effort);
       assert.equal(body.store, false);
@@ -97,23 +97,19 @@ async function fixture(t, onResponse, { clock = offpeak, workbuddy = false, limi
       assert.equal(JSON.stringify(body).includes('SECRET-ROLLOUT-BODY-IGNORED'), false);
       assert.equal(JSON.stringify(body).includes(fixtureKey), false);
       assert.ok(body.tools.every(tool => tool.strict === true && tool.parameters.additionalProperties === false));
-      const result = await onResponse(requests.length, body, res);
-      if (result === undefined) return;
-      res.writeHead(result.http ?? 200, { 'Content-Type': 'application/json', 'x-request-id': `req_fixture_${requests.length}` });
-      res.end(JSON.stringify(result.payload ?? result));
+      const result = await onResponse(requests.length, body);
+      if (result === null) return null; // Simulate losing the reply after admission.
+      const request_id = `req_fixture_${requests.length}`;
+      return result.http ? { ok: false, status: result.http, code: 'UPSTREAM_HTTP', request_id }
+        : { ok: true, status: 200, body: result, request_id };
     } catch (error) {
       failures.push(error);
-      if (!res.headersSent) res.writeHead(500);
-      res.end();
+      return null;
     }
-  });
-  await new Promise(resolve => server.listen(0, '127.0.0.1', resolve));
-  env.SOL_TEST_RESPONSES_ORIGIN = `http://127.0.0.1:${server.address().port}`;
+  }
   const peers = [];
   t.after(async () => {
     for (const peer of peers) await peer.stop();
-    server.closeAllConnections();
-    await new Promise(resolve => server.close(resolve));
     fs.rmSync(base, { recursive: true, force: true });
     if (failures.length) throw failures[0];
   });
@@ -124,15 +120,19 @@ async function fixture(t, onResponse, { clock = offpeak, workbuddy = false, limi
     return JSON.parse(issued.stdout).context_ref;
   }
   async function connect(extraEnv = {}) {
-    const peer = await mcpPeer(configPath, { ...env, ...extraEnv });
+    const peer = await mcpPeer(configPath, { ...env, ...extraEnv }, broker);
     peers.push(peer);
     return peer;
   }
   return { connect, context, configPath, config, codexHome, workspace, requests, dshRuns, buddyRuns, base };
 }
 
-async function mcpPeer(configPath, env) {
-  const child = spawn(process.execPath, [script('sol-mcp-fixture.mjs'), configPath], { env, stdio: ['pipe', 'pipe', 'pipe'] });
+async function mcpPeer(configPath, env, broker) {
+  const child = spawn(process.execPath, [script('sol-mcp-fixture.mjs'), configPath], { env, stdio: ['pipe', 'pipe', 'pipe', 'ipc'] });
+  child.on('message', async ({ id, envelope }) => {
+    const reply = await broker(envelope);
+    if (child.connected) child.send({ id, reply });
+  });
   const finished = once(child, 'close');
   const pending = new Map();
   let seq = 0;
@@ -184,6 +184,15 @@ const start = (peer, args) => peer.call('start_sol_coordination', args);
 const find = (peer, context, idempotencyKey, taskId) => peer.call('get_sol_coordination', { context, idempotencyKey, ...(taskId ? { taskId } : {}) });
 const wait = (peer, context, idempotencyKey, taskId) => peer.call('wait_sol_coordination', { context, idempotencyKey, taskId, waitMs: 10000 });
 const cancel = (peer, context, idempotencyKey, taskId) => peer.call('cancel_sol_coordination', { context, idempotencyKey, taskId });
+
+function checkIsolation(filename) {
+  const runs = countRuns(filename);
+  assert.equal(runs.length, 2);
+  for (const run of runs) {
+    assert.equal(run.readWorkspace, true);
+    for (const field of ['hasOpenAIKey', 'environmentLeak', 'workspaceLeak', 'taskLeak']) assert.equal(run[field], false, field);
+  }
+}
 
 async function until(check, ms = 5000) {
   const deadline = Date.now() + ms;
@@ -246,7 +255,15 @@ test('API Sol calls real pooled DSH, inspects and revises the original session w
   assert.equal(result.steps[1].executed_via.service, 'PoolService');
   assert.equal((await find(peer, child, 'loop')).task_id, result.task_id);
   await assert.rejects(find(peer, second, 'loop'), /not found/);
-  assert.deepEqual(countRuns(f.dshRuns).map(item => item.hasOpenAIKey), [false, false]);
+  checkIsolation(f.dshRuns);
+  const { result: { tools } } = await peer.rpc('tools/list');
+  assert.ok(tools.every(tool => !/credential|api_key|set.key|export/i.test(tool.name)));
+  await assert.rejects(peer.call('get_api_key', { context: first }), /Unknown/);
+  await assert.rejects(run(peer, { ...args, apiKey: 'placeholder' }), /unsupported field/);
+  assert.ok(!JSON.stringify(result).includes(fixtureKey));
+  for (const entry of fs.readdirSync(f.config.state_dir, { recursive: true, withFileTypes: true }).filter(entry => entry.isFile())) {
+    assert.ok(!fs.readFileSync(path.join(entry.parentPath, entry.name), 'utf8').includes(fixtureKey));
+  }
   await select(peer, first, 'subscription');
   assert.equal((await run(peer, args)).replayed, true);
   await assert.rejects(run(peer, { ...args, goal: 'Different goal' }), /different frozen handoff/);
@@ -305,7 +322,7 @@ test('Mode 2 real peak WorkBuddy offer is claimed, invoked through the original 
   assert.equal(result.steps[0].receipt.session_id, result.steps[1].receipt.session_id);
   assert.notEqual(result.steps[0].receipt.dispatch_id, result.steps[1].receipt.dispatch_id);
   assert.equal(countRuns(f.dshRuns).length, 0);
-  assert.deepEqual(countRuns(f.buddyRuns).map(item => item.hasOpenAIKey), [false, false]);
+  checkIsolation(f.buddyRuns);
   assert.equal(f.requests.length, 3);
   assert.equal((await run(peer, task(f, context, 'peak'))).replayed, true);
   assert.equal(countRuns(f.buddyRuns).length, 2);
@@ -344,7 +361,7 @@ test('OpenAI 429, incomplete response, wrong route, unverified acceptance and ex
   const throttled = await run(peer, task(f, ctx, '429'));
   assert.equal(throttled.status, 'blocked');
   assert.equal(throttled.error_code, 'OPENAI_HTTP_429');
-  assert.equal(throttled.responses[0].error_code, 'insufficient_quota');
+  assert.equal(throttled.responses[0].http_status, 429);
   assert.equal(throttled.responses[0].request_id, 'req_fixture_1');
   assert.ok(!JSON.stringify(throttled).includes(fixtureKey));
   const incomplete = await run(peer, task(f, ctx, 'incomplete'));
@@ -417,11 +434,11 @@ test('Cancellation belongs to the original coordinator and a disconnected owner 
 });
 
 test('Missing credentials and disrupted HTTP never guess usage, switch source or resend requests', async t => {
-  const f = await fixture(t, (_index, _body, res) => { res.destroy(); });
-  const offline = await f.connect({ SOL_OPENAI_API_KEY: '' });
+  const f = await fixture(t, () => null);
+  const offline = await f.connect({ SOL_TEST_BROKER_UNAVAILABLE: '1' });
   const ctx = f.context();
   await select(offline, ctx, 'api');
-  assert.equal((await run(offline, task(f, ctx, 'missing'))).error_code, 'OPENAI_CREDENTIALS_MISSING');
+  assert.equal((await run(offline, task(f, ctx, 'missing'))).error_code, 'SOL_BROKER_UNAVAILABLE');
   assert.equal(f.requests.length, 0);
   const peer = await f.connect();
   const args = task(f, ctx, 'network');
@@ -433,6 +450,37 @@ test('Missing credentials and disrupted HTTP never guess usage, switch source or
   assert.equal((await run(peer, args)).replayed, true);
   assert.equal(f.requests.length, 1);
   assert.equal(countRuns(f.dshRuns).length, 0);
+});
+
+test('Legacy config blocks API even with an inherited dummy key and preserves subscription and history access', async t => {
+  const f = await fixture(t, () => assert.fail('Legacy credentials must never be used.'));
+  delete f.config.openai.credential_source;
+  f.config.openai.api_key_env = 'SOL_OPENAI_API_KEY';
+  fs.writeFileSync(f.configPath, JSON.stringify(f.config));
+  const peer = await f.connect();
+  const ctx = f.context();
+  assert.equal((await mode(peer, ctx)).coordinator_mode, 'subscription');
+  assert.equal((await select(peer, ctx, 'api')).broker_status, 'SOL_BROKER_MIGRATION_REQUIRED');
+  assert.equal((await run(peer, task(f, ctx, 'legacy'))).error_code, 'SOL_BROKER_MIGRATION_REQUIRED');
+  assert.equal((await select(peer, ctx, 'subscription')).coordinator_mode, 'subscription');
+  assert.equal(f.requests.length, 0);
+});
+
+test('Paid probe requires explicit billing acknowledgement before loading configuration', () => {
+  const result = spawnSync(process.execPath, [path.join(repo, 'bridges', 'sol', 'cli.mjs'), 'verify-api', '--config', 'does-not-exist'], { encoding: 'utf8' });
+  assert.equal(result.status, 1);
+  assert.match(result.stderr, /billable model request/);
+});
+
+test('Standalone DSH version, help and route probes exclude ambient OpenAI variables', () => {
+  const moduleUrl = new URL('../bridges/dsh/core.mjs', import.meta.url).href;
+  const fixture = script('mock-dsh.mjs');
+  const run = spawnSync(process.execPath, ['--input-type=module', '-e',
+    `import { discoverDsh, preflight } from ${JSON.stringify(moduleUrl)}; preflight(discoverDsh(process.argv[1]));`, fixture], {
+    encoding: 'utf8', env: { ...process.env, SOL_TEST_PROBE_ENV: '1', CODEX_API_KEY: 'probe-decoy',
+      SOL_OPENAI_API_KEY: 'legacy-decoy', OPENAI_API_KEY: 'second-decoy' }
+  });
+  assert.equal(run.status, 0, run.stderr);
 });
 
 test('Coordinator context accepts verified roots but legacy pool contexts remain child-only and purpose-isolated', async t => {
@@ -448,15 +496,30 @@ test('Coordinator context accepts verified roots but legacy pool contexts remain
 });
 
 test('Explicit API probe retains verified route and usage evidence when the strict tool call is missing', async t => {
-  const f = await fixture(t, () => assert.fail('Probe uses its test-injected fetch implementation.'));
+  const f = await fixture(t, () => assert.fail('Probe uses its test-injected broker.'));
   const cfg = loadSolConfig(f.configPath);
   let answer = callResult(1, { name: 'confirm_sol_api', args: { result: 'ready' } });
-  const client = new ResponsesClient({ config: cfg, credential: { key: fixtureKey, project: 'proj-fixture' },
-    fetchImpl: async () => new Response(JSON.stringify(answer)) });
+  const client = new ResponsesClient({ config: cfg, callBroker: async () => ({ ok: true, status: 200, body: answer }) });
   const verified = await client.verify();
   assert.equal(verified.verified, true);
   assert.equal(verified.returned_model, model);
   assert.equal(verified.reasoning_effort, effort);
   answer = { ...answer, output: [] };
   await assert.rejects(client.verify(), error => error.evidence.usage.total_tokens === 45);
+});
+
+test('Broker refusals distinguish local admission from unknown billable outcomes without leaking diagnostics', async t => {
+  const f = await fixture(t, () => assert.fail('This test uses an in-memory broker.'));
+  const config = loadSolConfig(f.configPath);
+  let reply = { ok: true, status: 200, body: { ready: true, model: 'different-model', reasoning_effort: effort } };
+  const client = new ResponsesClient({ config, callBroker: async () => reply });
+  assert.equal((await client.readiness()).code, 'SOL_BROKER_ROUTE_MISMATCH');
+  for (const [code, status, unknown] of [
+    ['BROKER_FORBIDDEN', 403, false], ['BROKER_RATE_LIMITED', 429, false], ['UPSTREAM_UNSENT', 502, false],
+    ['UPSTREAM_UNKNOWN', 502, true], ['BROKER_OUTCOME_UNKNOWN', 502, true], ['unexpected', 503, true]
+  ]) {
+    reply = { ok: false, status, code, debug: fixtureKey };
+    await assert.rejects(client.verify(), error => error.usageUnknown === unknown
+      && !JSON.stringify(error).includes(fixtureKey) && !error.message.includes(fixtureKey));
+  }
 });

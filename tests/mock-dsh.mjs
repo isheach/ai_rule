@@ -1,5 +1,9 @@
 import fs from 'node:fs';
+import { executorProbe } from './sol-executor-probe.mjs';
 const args = process.argv.slice(2);
+if (process.env.SOL_TEST_PROBE_ENV === '1' && Object.keys(process.env).some(name => /OPENAI_|^CODEX_API_KEY$/i.test(name))) {
+  throw Error('Fixture found an OpenAI environment variable in the DSH CLI.');
+}
 if (args.includes('--version')) { console.log('mock-dsh-0.3'); process.exit(0); }
 if (args.includes('--help')) { console.log('--json --permission-mode --approval-policy'); process.exit(0); }
 if (args.includes('--dump-config')) {
@@ -10,7 +14,8 @@ const sessionId = sessionArg || `session-mock-${process.pid}-${Math.random().toS
 const prompt = fs.readFileSync(0, 'utf8');
 const emit = value => console.log(JSON.stringify(value));
 if (process.env.SOL_TEST_DSH_RUNS) fs.appendFileSync(process.env.SOL_TEST_DSH_RUNS,
-  JSON.stringify({ sessionId, hasOpenAIKey: Boolean(process.env.SOL_OPENAI_API_KEY || process.env.OPENAI_API_KEY) }) + '\n');
+  JSON.stringify({ sessionId, hasOpenAIKey: Boolean(process.env.SOL_OPENAI_API_KEY || process.env.OPENAI_API_KEY),
+    ...executorProbe(process.cwd(), prompt) }) + '\n');
 emit({ type: 'session', sessionId, cwd: process.cwd() });
 const fixtureControl = process.env.SOL_TEST_DSH_RUNS ? prompt.match(/\nCoordinator instructions:\nfixture-(hang|sleep:\d+)\n/)?.[1] : null;
 const sleep = prompt.match(/(?:^|\n\n)sleep:(\d+)$/)?.[1] ?? fixtureControl?.match(/^sleep:(\d+)$/)?.[1];

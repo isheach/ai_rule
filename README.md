@@ -43,7 +43,7 @@ node .\scripts\manage.mjs --verify
 |---|---|
 | 同一根会话并行多个独立 DSH 任务 | [DSH 根池](docs/root-pool.md) |
 | 宿主按 MCP 服务分配多个独立 DSH 实例 | [DSH 命名实例](docs/multisession.md) |
-| 在同一会话切换 Sol 的订阅和 API 来源 | [Sol 协调器](docs/sol-coordinator.md) |
+| 切换订阅/API Sol，安装 Windows 独立密钥代理并离线验证 | [Sol 协调器与安装步骤](docs/sol-coordinator.md) |
 | 复用既有 WorkBuddy 安装、账户及项目授权 | [WorkBuddy DSF 项目入口](docs/workbuddy-project-entry.md) |
 | 启用官方 CodeBuddy ACP 的 HY4 | [CodeBuddy ACP](docs/codebuddy-acp.md) |
 | DSH 谷时治理及模式 2 实际峰时的 WorkBuddy 交接 | [峰谷调度](docs/offpeak-schedule.md) |

@@ -104,8 +104,10 @@ export class SolService {
     this.closing = false;
   }
 
-  mode(rootId) {
-    return { ...this.journal.mode(rootId), source_configured: this.responses.configured,
+  async mode(rootId) {
+    const mode = this.journal.mode(rootId);
+    const broker = await this.responses.readiness();
+    return { ...mode, source_configured: broker.ready, broker_status: broker.code ?? 'ready',
       api_model: this.config.openai.model, api_reasoning_effort: this.config.openai.reasoning_effort, workbuddy_configured: Boolean(this.config.workbuddy) };
   }
 
@@ -152,7 +154,7 @@ export class SolService {
     return { ...await this.wait(rootId, key, taskId, 10000), cancel_requested: true };
   }
 
-  start(rootId, input) {
+  async start(rootId, input) {
     if (this.closing) throw Error('Coordinator is shutting down.');
     const key = input.idempotencyKey;
     const prior = this.journal.get(rootId, key);
@@ -173,8 +175,13 @@ export class SolService {
       return { status: 'blocked', coordinator_mode: CoordinatorMode.API, backend: handoff.backend, error_code: 'API_BACKEND_UNSUPPORTED',
         message: 'API coordination for this execution backend is unavailable. The selection is preserved.' };
     }
-    if (!this.responses.configured) return { status: 'blocked', coordinator_mode: CoordinatorMode.API, error_code: 'OPENAI_CREDENTIALS_MISSING',
-      message: 'The configured OpenAI credential or project/organization environment reference is unavailable.' };
+    const broker = await this.responses.readiness();
+    if (this.closing) throw Error('Coordinator is shutting down.');
+    // A concurrent start may have admitted this exact key while IPC was pending.
+    const admitted = this.journal.get(rootId, key);
+    if (admitted) return replay(admitted);
+    if (!broker.ready) return { status: 'blocked', coordinator_mode: CoordinatorMode.API, error_code: broker.code,
+      message: 'API Sol requires the configured isolated broker. Check broker-status locally.' };
     if (handoff.backend === 'WorkBuddy DSF' && !this.config.workbuddy) return { status: 'blocked', coordinator_mode: CoordinatorMode.API,
       error_code: 'WORKBUDDY_NOT_CONFIGURED', message: 'The local authorized WorkBuddy DSF adapter is unavailable.' };
     if (this.active.size >= 3) throw Error('This sol-coordinator process is already coordinating three tasks.');

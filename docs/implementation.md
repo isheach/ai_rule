@@ -17,7 +17,18 @@ DSH 通过 stdin 接收任务书。桥核对已安装 CLI 能力、headless 配�
 - DSH 的 `read-only` / `workspace-write` 是其原生权限预设。`--approval-policy never` 拒绝需交互批准的操作。根池另外核验工作目录。结构化文件和命令范围随 DSH 任务书交接，回执以 `scope_handling: task_instructions` 记录这种处理。范围由 DSH 原生权限和指令执行，WorkBuddy 项目入口和 HY4 各自执行结构化范围检查。宿主实际沙箱与账户配置决定进程级边界。
 - 活动桥接进程拥有各自的子进程。断开时尽力清理；异常退出后可保留原锁、进程和回执。非所有者可查看已可读的状态，原 PID 或回执本身不授予取消权。Windows 进程树退出结果以本机核对为准。
 - 任务 ID、幂等键和会话索引在所属根或实例中使用。终态重放返回原结果。作用域内路径、参数变更和有意修订使用新键。受理不明的请求保留键和已见状态。
-- 各执行 Harness 使用自身账号凭据。`sol-coordinator` 从指定的本机环境变量读取 API 密钥，仅用于官方 Responses 请求。下游 DSH 与 WorkBuddy 环境清除相应 OpenAI 凭据。密钥保留在本机环境，任务、报告和交接均须排除。回执、DSH 本机历史和安装备份可能含用户项目或配置细节，留在原机。
+### API Sol 凭据路径
+
+| 边界 | 原路径与变更 |
+|---|---|
+| Codex 与订阅 Sol | 订阅走原生宿主。旧注册通过 `env_vars` 向 Sol 转发 API Key。新注册仅转发 `CODEX_HOME` 和已批准的 WorkBuddy 非 OpenAI 变量。旧 JSON 仍可读取已有回执，使用 API 前须迁移。 |
+| Sol MCP 与 CLI | 旧 `config.mjs` 读取密钥，旧 `responses.mjs` 在协调器内组装 Bearer 请求。现在两种入口都经受保护的本机客户端发送限定 JSON。付费验证和普通任务共用代理，健康检查仅走本地 IPC。 |
+| DSH 与根池 | 原先独立入口的 CLI 探测、配置转储、任务进程及 Windows 终止进程会继承父环境。现在各入口显式过滤 OpenAI 变量和 `CODEX_API_KEY`。OpenCode Go 继续使用自身配置。 |
+| WorkBuddy DSF 与 HY4 | Sol 的定制 stdio 连接按白名单建环境，项目 SDK 显式清除白名单外的继承项，HY4 的 ACP、版本探测及命令入口按已有白名单运行。各执行者继续使用自己的账号。 |
+| 本地 IPC 与上游 | 代理独立进程在专用 Windows 账户内解密和使用 API Key。普通调用支持状态查询和受限模型请求。用户录入走独立管理通道。原始密钥、请求头、上游原始错误不进入普通响应。 |
+| 上下文、任务与日志 | 根上下文引用、幂等键、任务归属及用量回执保留原格式。模型看到获准的任务背景与执行结果，DSF 只收到派发内容。代理审计仅记录调用元数据。协调器和执行器的本机回执可能含用户项目内容，按原规则留在原机。 |
+
+过滤环境变量是迁移保护。隔离取决于专用账户、受保护的程序和存储、对双方身份的验证，以及执行器以普通权限运行。管理员、SYSTEM 或已取得这些权限的程序在信任边界内。同一获准用户下的其他普通进程可以消耗代理配额，不能从请求接口导出密钥。如果要进一步区分调用者与同一桌面用户下的程序，应将协调器或执行器移到独立身份或主机。[部署与迁移](sol-coordinator.md) · [Windows 服务账户与配置文件](https://learn.microsoft.com/windows/win32/services/service-user-accounts) · [Windows 命名管道权限](https://learn.microsoft.com/windows/win32/ipc/named-pipe-security-and-access-rights)
 
 ## 验收
 

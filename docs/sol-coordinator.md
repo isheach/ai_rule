@@ -4,7 +4,7 @@
 
 ## Windows 安装
 
-在现有 Codex 和 DSH 所在的 Windows 用户下操作，使用 Node 22 或更新版本。把例子里的工作区替换成获准的现有目录。模型与档位使用该 API 项目实际能验证的值。
+以下步骤注册协调器。在现有 Codex 和 DSH 所在的普通 Windows 会话中操作，使用 Node 22 或更新版本。把例子里的工作区替换成获准的现有目录。模型与档位使用该 API 项目实际能验证的值。
 
 ```powershell
 Set-Location "$env:USERPROFILE\ai_rule" -ErrorAction Stop
@@ -45,23 +45,57 @@ $solConfig = 'D:\ai-rule-state\sol-coordinator.local.json'
 
 `sol_coordinator.structure_valid: true` 表示托管注册和配置能够通过结构校验。待受影响的已有任务结束后，按宿主支持的方式加载。在可读到新注册的会话中核对 `codex mcp list` 和实际工具。完成一次本机设置后，协调来源可在会话里切换。
 
-## API 凭据和验证
+## 独立凭据代理
 
-API 密钥由启动 Codex 的进程环境提供。默认变量是 `SOL_OPENAI_API_KEY`，注册仅记录变量名。可在当前 Windows 用户的环境变量中配置，或临时设置于随后启动 Codex 的 PowerShell。从已配置的新环境启动 Codex 和所需父进程。首次验证需要实际请求 API，会产生用量。 [OpenAI 模型目录](https://developers.openai.com/api/docs/models) · [Codex MCP 环境配置](https://learn.chatgpt.com/docs/extend/mcp?surface=cli)
+Windows 部署分为协调器注册和独立的 `AiRuleSolBroker` 服务。服务使用 `NT SERVICE\\AiRuleSolBroker` 身份，以该身份的 DPAPI CurrentUser 保存密钥。Codex、订阅 Sol、API Sol 协调器和两个 DeepSeek 执行入口都没有读取密钥的接口。模型 ID 和档位须与现有协调器配置一致。
+
+### 迁移现有机器
+
+1. 在各活动会话中保留原任务 ID、幂等键和入口。需要在迁移期间开工的会话可以明确选择订阅 Sol。等旧 API 协调任务结束再重载对应 MCP。
+2. 若此前使用过真实的环境变量密钥，另建一把专用于代理的项目密钥，在本机安全窗口中设置。撤销旧密钥，移除旧用户或机器环境变量及 MCP 注册中的转发项，再重新启动继承过旧环境的应用。实际使用过自定义变量名时也清理这些变量。避免显示变量值或导出环境快照。历史副本的风险靠撤销旧密钥消除。
+3. 对原协调配置执行上方的预览、应用与结构验证。仅含旧 `api_key_env` 的配置会在原文件就地替换为 `"credential_source": "windows-broker"`。含 `project_env` 或 `organization_env` 的配置会提示人工迁移：先在管理员安装策略中固定原项目或组织标识，再仅替换这些旧引用和 `api_key_env`。保留原 `model`、`reasoning_effort`、`response_model`、`pool_config`、`state_dir` 和 `workbuddy`。自管 MCP 注册要自行移除旧 OpenAI 转发项。
+4. 从管理员控制、版本经过核对的仓库副本运行服务安装。该副本应在执行器可写目录之外。Codex、DSH 和 WorkBuddy 日常以非提升权限运行。管理员身份和 SYSTEM 属于本机信任边界。
+
+### 安装服务和设置密钥
+
+先在实际运行 Codex 的普通用户 PowerShell 中取得调用者 SID。它是 Windows 账户标识，可以提供给本机安装程序。
 
 ```powershell
-$key = Read-Host 'OpenAI API key' -AsSecureString
-$env:SOL_OPENAI_API_KEY = [System.Net.NetworkCredential]::new('', $key).Password
-Remove-Variable key
-
-$codexDir = if ($env:CODEX_HOME) { $env:CODEX_HOME } else { Join-Path $env:USERPROFILE '.codex' }
-$solConfig = Join-Path $codexDir 'ai-rule-sol\coordinator.local.json'
-node .\bridges\sol\cli.mjs verify-api --config $solConfig
+[System.Security.Principal.WindowsIdentity]::GetCurrent().User.Value
 ```
 
-显式配置应替换上方的 `$solConfig`。检查 `verified`、`returned_model`、`reasoning_effort` 和 `usage`。若模型别名与经核实的返回快照不同，可在本机配置 `response_model`。需要项目或组织请求头时，在 `openai` 中配置 `project_env` 或 `organization_env`，并以同一完整配置应用注册以转发变量名称。
+另开本机 64 位管理员 PowerShell（Windows PowerShell 5.1 或更新版本，并已安装 .NET Framework 4.8），进入上述受保护源码目录。将占位 SID 替换为上一步结果，保留实际 API 模型及档位。原来指定 OpenAI 项目或组织时，在安装命令上分别传 `-ProjectId`、`-OrganizationId`。
 
-协调器向官方 Responses 发送获准的本轮任务和相关执行结果，设置 `store: false`。进程读取指定 OpenAI 凭据并清除下游继承。实际交接只包含可共享的任务背景与证据。回执记录 Responses 和执行任务 ID、返回模型、档位、终态及已知用量。模型不符、认证、限流或受理不明按实际状态报告，渠道选择仍保留。 [实现边界](implementation.md#权限进程与数据)
+```powershell
+.\bridges\sol\broker\windows\install.ps1 -ClientSid 'S-1-5-21-填入实际账户SID' -Model 'gpt-6.2-sol' -ReasoningEffort 'max'
+$brokerExe = Join-Path ([Environment]::GetFolderPath('ProgramFiles')) 'AiRuleSolBroker\SolBroker.exe'
+& $brokerExe check
+& $brokerExe set-key
+```
+
+只在 `set-key` 打开的本机交互提示内输入密钥。密钥不会出现在命令、历史记录、MCP 配置和项目文件里。日后轮换也走这个命令。管理员检查与录入均不连接 OpenAI。普通调用者只获准查询状态并提交有限的 Responses 请求；同一获准 Windows 身份下的程序可以消耗该身份共享的 API 配额。
+
+代理最多受理每小时 24 次上游请求，单次请求体上限 768,000 字节、输出上限 64,000 tokens，上游超时 180 秒。协调配置中更低的限制继续生效。限额按服务共享，跨服务重启保留；并发上限为三次上游请求，状态查询走独立管道。管理员可在受保护的 `%ProgramFiles%\AiRuleSolBroker\state\audit.jsonl` 查看时间、操作、结果与状态码。日志定长轮换，排除请求与响应正文、密钥、请求头及组织和项目标识。
+
+### 验证和切换
+
+在运行 Codex 的普通用户窗口执行：
+
+```powershell
+$codexDir = if ($env:CODEX_HOME) { $env:CODEX_HOME } else { Join-Path $env:USERPROFILE '.codex' }
+$solConfig = Join-Path $codexDir 'ai-rule-sol\coordinator.local.json'
+node .\bridges\sol\cli.mjs broker-status --config $solConfig
+```
+
+使用显式配置时将 `$solConfig` 替换为原路径。`ready: true` 表示本地身份、密钥状态和模型策略检查通过。它无法验证远端项目权限、模型可用性或余额。在 Codex 里选择“本会话 Sol 主控切到 API”或“本会话 Sol 主控切回订阅”，切换本身没有模型用量。正在进行的任务继续由原协调来源和执行后端负责。代理不可用时，API 任务明确报告阻塞。无法部署独立身份时，先选订阅 Sol；需要 API 的机器也可改用单独的受控 Windows 主机，将 DeepSeek 执行器隔离在外。
+
+**真实验证会向 OpenAI 提交一个模型请求，产生计费用量。** 只有决定付费验证时才执行下面这一条命令，检查 `verified`、`returned_model`、推理档位和 `usage`。离线测试、安装、状态查询及切换不执行该命令。
+
+```powershell
+node .\bridges\sol\cli.mjs verify-api --config $solConfig --accept-api-charges
+```
+
+代理向官方 Responses 提交获准的任务和相关执行结果，使用 `store: false`。协调器保留模型、档位、响应与执行任务 ID 和可确认的用量。断连后按原任务键查回执。 [凭据路径审计](implementation.md#api-sol-凭据路径)
 
 独立 API 请求使用所配置 API 项目的额度。ChatGPT 赠送 API 额度的资格和扣减规则以 OpenAI 说明及实际 API 账单为准。协调配置的 `max_total_tokens` 根据已返回的用量决定是否继续下一轮，最后一轮可能使合计超过阈值。可配的请求数、输出和时间限制约束此协调任务。 [API 赠额](https://help.openai.com/en/articles/20001626-api-credits-benefit-for-eligible-chatgpt-subscriptions) · [API 账单](https://platform.openai.com/account/billing/overview)
 
@@ -109,4 +143,8 @@ node .\bridges\sol\cli.mjs verify-api --config $solConfig
 
 在 Codex 中说“本会话 Sol 主控切到 API”即可设置会话来源。需要单项覆盖时说“仅本次由 API Sol 主控”。选择、派发的工具参数和已有任务的恢复见 [调度 Skill](../skills/multi-agent-dispatch/SKILL.md#openai-responses-api-sol)。发生断连、超时或受理不明时，用原任务键、ID 和当前有效根上下文查原协调记录及下游状态。
 
-需要回滚时，等待相关活动任务取得终态，用应用命令输出的该次本机备份 manifest 按标准流程恢复。 [回滚步骤](../README.md#更新规则与回滚)
+暂时停用 API 时，先在需要的会话明确切回订阅 Sol；已受理任务仍用原 ID 等待或查询。若要彻底撤销部署：
+
+1. 等已有 API 协调任务结束。在管理员控制的源码目录执行 `.\bridges\sol\broker\windows\install.ps1 -Uninstall`。此操作会删除服务、代理程序、已保存的加密密钥、限额记录及代理审计文件；需留存的审计先由管理员保全。
+2. 若这把 OpenAI 项目密钥也要停用，在 OpenAI 项目中撤销。卸载本机副本不会撤销远端密钥。
+3. 如需恢复安装前的协调器注册，使用原安装输出的 manifest 执行 `.\scripts\install.ps1 -RollbackManifest '<实际 manifest 路径>'`，按提示处理其后的本地修改，再重载宿主。回滚后的旧版继续用订阅 Sol，避免重新给旧环境变量赋值。回滚服务不需要操作 DSH、WorkBuddy 或已有任务目录。 [回滚步骤](../README.md#更新规则与回滚)

@@ -5,7 +5,7 @@ import { DSH_SCOPE_DESCRIPTION } from '../dsh/routing.mjs';
 import { scheduleModeProperty } from '../dsh/schedule.mjs';
 import { resolveContext } from '../pool/context.mjs';
 import { DSH_TIMEOUT_MS, WAIT_MS, preferRun, validateWaitMs, waitForExisting } from '../task-lifecycle.mjs';
-import { COORDINATOR_MODES, EXECUTION_BACKENDS, EXECUTION_PERMISSIONS, loadSolConfig, object, openAIEnvironment, SERVICE } from './config.mjs';
+import { COORDINATOR_MODES, EXECUTION_BACKENDS, EXECUTION_PERMISSIONS, loadSolConfig, object, discardLegacyEnvironment, SERVICE } from './config.mjs';
 import { ResponsesClient } from './responses.mjs';
 import { SolService } from './service.mjs';
 
@@ -52,10 +52,10 @@ function validate(tool, args) {
   }
 }
 
-export function startSolServer({ configPath, stdin = process.stdin, stdout = process.stdout, fetchImpl, clock, sessionsRoot } = {}) {
+export function startSolServer({ configPath, stdin = process.stdin, stdout = process.stdout, callBroker, clock, sessionsRoot } = {}) {
   const config = loadSolConfig(configPath);
-  const credential = openAIEnvironment(config, process.env, { remove: true });
-  const responses = new ResponsesClient({ config, credential, fetchImpl });
+  discardLegacyEnvironment(config);
+  const responses = new ResponsesClient({ config, callBroker });
   const service = new SolService({ config, responses, clock });
   const runs = new Map();
   let initialized = false;
@@ -85,7 +85,7 @@ export function startSolServer({ configPath, stdin = process.stdin, stdout = pro
     }
     const taskArgs = { ...args };
     delete taskArgs.context;
-    const started = service.start(rootId, taskArgs);
+    const started = await service.start(rootId, taskArgs);
     if (name !== 'run_sol_coordination' || started.status !== 'running' || started.replayed) return started;
     runs.set(id, { rootId, key, taskId: started.task_id });
     try { return await service.wait(rootId, key, started.task_id, started.timeout_ms + 12000); }
