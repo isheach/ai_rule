@@ -24,13 +24,13 @@ API Sol 使用 `get_sol_schedule` 和 `set_sol_schedule` 访问其根池日程�
 
 ## 模式 2 的峰时派发
 
-下列调用步骤由订阅 Sol 执行。API Sol 在已核验的根下使用同一根池和交接规则，连接显式配置授权的 WorkBuddy DSF，按实际 schema 领取、派单并回填原记录。
+下列调用步骤由订阅 Sol 执行。API Sol 在已核验的根下使用同一根池和交接规则，通过本机配置的 WorkBuddy DSF 连接领取、派单并回填原记录。项目入口一次配置已授权的项目根与能力。同一项目中的论文、脚本和数据随任务交接，沿用原项目授权及服务。 [WorkBuddy 项目入口](workbuddy-project-entry.md)
 
 1. 使用本会话的正常 DSH 派单入口和稳定的 `idempotencyKey`。经过现有参数、权限、会话、锁和日历检查后，实际峰时的新任务返回 `status: "workbuddy_pending"` 和 `workbuddy_dispatch`。此时没有模型任务 ID。谷时已受理的任务、旧 DSH `sessionId`、锁冲突、权限拒绝和未知状态都不产生交接。
-2. 由唯一的 Sol 协调者核对宿主当前加载的 `deepseek-v4-flash-workbuddy`。用其实际 `get_task_bridge_status` 和工具 schema 验证 ready、固定模型 `deepseek-v4-flash`、授权 profile 及原任务所需目录和权限。如果服务缺失、忙碌、认证失败、模型或权限不匹配，调用 `finish_workbuddy_dsf_dispatch` 将待派发记录置为 `unavailable` 或 `refused`，向用户报告具体阻塞。
+2. 由唯一的 Sol 协调者通过当前来源的 `deepseek-v4-flash-workbuddy` 核实 ready、固定模型 `deepseek-v4-flash` 以及原目录和权限能否保留。项目入口以原 `cwd` 和权限 scope 调用 `get_task_bridge_status`，记录返回的 `project_id`。已有定制入口按实际 schema 核验已授权 profile。服务缺失、忙碌、认证失败或模型、权限不匹配时，用 `finish_workbuddy_dsf_dispatch` 记录 `unavailable` 或 `refused`，报告具体阻塞。
 3. 就在调用模型前，通过原 DSH 或根池入口调用 `claim_workbuddy_dsf_dispatch`，传原 `idempotencyKey`、回执的 `dispatchId`，根池还需要本根有效 `context`。桥会复查同一峰段。只有取得 `claimed: true` 和一次性的 `claimToken` 的协调者可以执行下一步。模式已改变、峰段已结束或领取不明时，读原记录。默认或命名入口的选择由 Sol 按会话保存，切出模式 2 时把本会话未领取的交接记为 `cancelled`。
-4. 仍在回执的 `expires_at` 前时，由该 Sol 按实际 schema 调用一次原 WorkBuddy `run_workbuddy_task`，传原授权范围、任务和目录。使用 WorkBuddy 实际等待机制并保留同一后端。调用参数、profile 和能力随已安装桥接器核验。峰段在领取后、调用前已结束时，用原 token 回填 `refused`。
-5. 用 `finish_workbuddy_dsf_dispatch` 和原 `claimToken` 回填实际终态及已返回的 `backendTaskId`、`backendSessionId` 和可共享答复。断连或受理不明时回填 `unknown_after_disconnect`，使用原回执追踪，只有核实原结果后才能补记终态。`get_workbuddy_dsf_dispatch` 可按原键读回。根池也可用 `get_pool_task` 按键查看。重放返回既有记录，重复领取不会得到 token。已领取的远程任务使用 WorkBuddy 实际支持的查询或取消，未领取的交接可回填 `cancelled`。
+4. 在回执的 `expires_at` 前，Sol 按已加载接口调用一次 `run_workbuddy_task`。项目入口传 `projectId`、原 `idempotencyKey`、`cwd`、`permissionMode`、任务书及更窄的权限参数。已有定制入口按其实际参数派单。使用 WorkBuddy 实际等待机制并保留同一后端。峰段在领取后、调用前已结束时，用原 token 回填 `refused`。
+5. 用 `finish_workbuddy_dsf_dispatch` 和原 `claimToken` 回填实际终态及已返回的 `backendTaskId`、`backendSessionId` 和可共享答复。断连或受理不明时回填 `unknown_after_disconnect`，项目入口可用 `get_workbuddy_task` 和原键核实原回执。只有核实原结果后才能补记终态。`get_workbuddy_dsf_dispatch` 可按原键读回交接，根池也可用 `get_pool_task` 按键查看。重放返回既有记录，重复领取不会得到 token。已领取的远程任务使用 WorkBuddy 实际支持的查询或取消，未领取的交接可回填 `cancelled`。
 
 谷时的下一项独立工作正常用 DSH。若用户在模式 2 的实际峰段明确继续 WorkBuddy，且该桥公开续跑能力，派发时使用新键和 `workBuddyContinuationKey`（本根或实例内、同一目录的已完成交接键）。读取交接返回的 WorkBuddy 会话 ID，并按实际 WorkBuddy schema 续跑。缺少原会话证据或厂商续跑能力时报告阻塞。峰时普通 DSH 续跑使用原 `sessionId` 并遵守 DSH 的峰谷限制。模式切换和峰段结束都不会迁移或自动重跑已受理工作。
 

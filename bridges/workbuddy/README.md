@@ -1,35 +1,26 @@
-# 保留已有 WorkBuddy 桥接器
+# WorkBuddy DSF 桥接器
 
-本仓库不重建用户的定制 WorkBuddy `server.mjs`：目前只有部分代码片段，不能安全重现其授权 profile、实验 runner 及监守扩展。安装器默认保留 `hy4-workbuddy` 与 `deepseek-v4-flash-workbuddy` 的现有配置。
+`deepseek-v4-flash-workbuddy` 可选用本仓库维护的项目入口。一个物理项目根对应一个已批准的本机项目记录。同一项目内换论文、脚本、数据或任务名时，Sol 传新任务和当前 `cwd`，沿用项目授权和已加载的服务。 [安装与验收](../../docs/workbuddy-project-entry.md)
 
-模式 2 的实际峰时通过 `dispatch.mjs` 管理 Sol 的一次性交接和回执。Sol 使用宿主已加载的 `deepseek-v4-flash-workbuddy` 原工具，按实际 schema 执行固定 `deepseek-v4-flash` 的任务。该模式按已部署桥接器的状态和 profile 验证权限。未部署或验证失败时，峰时交接记录阻塞。完整调用步骤和离线验证见 [峰谷调度](../../docs/offpeak-schedule.md)。
+项目入口使用固定版本的 Tencent Agent SDK 和本机 WorkBuddy 安装内已核实的实际脚本。显式锁定 `cli/dist` 下的 `codebuddy-lite-wb.mjs` 或 `codebuddy-headless.js`，沿用现有桥接器实际使用的脚本。在状态检查和派发前核对脚本的 SHA-256，核对目录及执行流中的固定模型 `deepseek-v4-flash`。`get_task_bridge_status` 检查项目和任务权限，`run_workbuddy_task` 同步返回回执，`get_workbuddy_task` 按原幂等键查回执。模式 2 的实际峰时仍由 `dispatch.mjs` 管理一次领取和终态回填。 [峰谷派发](../../docs/offpeak-schedule.md)
 
-第二台电脑如已有完整桥接器，可执行：
+订阅 Sol 使用宿主加载的入口。API Sol 可在 `workbuddy.project_config` 指向同一本机项目配置。一次性迁移沿用 MCP 名称 `deepseek-v4-flash-workbuddy`，在原任务完成后只载入变化的入口。安装器支持预览和备份，已有 HY4 和 DSH 注册继续使用原设置。 [API Sol 配置](../../docs/sol-coordinator.md)
+
+## 已有定制入口
+
+安装器默认保留 `hy4-workbuddy` 和 `deepseek-v4-flash-workbuddy` 的原注册。仍采用旧 DSF 桥接的机器，按其实际 schema 使用已获批的 profile。旧桥由其实际 `server.mjs`、伴随模块、权限配置、依赖及本机认证一起提供。私有实现由原工作目录维护。
+
+在已有整套定制桥接器的机器上，可用以下命令添加缺少的旧入口。
 
 ```powershell
-.\scripts\install.ps1 -WorkBuddyBridge "D:\实际位置\完整桥接器\server.mjs"
-.\scripts\install.ps1 -Apply -WorkBuddyBridge "D:\实际位置\完整桥接器\server.mjs"
+.\scripts\install.ps1 -WorkBuddyBridge 'D:\实际位置\完整桥接器\server.mjs'
+.\scripts\install.ps1 -Apply -WorkBuddyBridge 'D:\实际位置\完整桥接器\server.mjs'
 ```
 
-只有缺少的 MCP 条目才会添加，已存在的同名条目不覆盖。`WB_MODEL` 分别设置为 `hy4-preview` / `deepseek-v4-flash`；脚本必须确实读取该变量。所有伴随模块、策略配置、依赖和本机认证须先齐备。只复制 `server.mjs` 并不足够。本安装器不会调用 WorkBuddy、提交研究任务或验证长任务监守；需在本机分别调用状态工具及一次批准的测试。不要上传凭据、研究数据、私人日志或未经审核的整个旧工作目录。
+旧入口的 `WB_MODEL` 分别为 `hy4-preview` 和 `deepseek-v4-flash`。脚本须实际读取这些值，Sol 按加载的工具和真实结果验收。凭据、研究数据和完整私有日志留在原机器。
 
-## 2026-11-13 HY4 入口核查（历史 2.165 证据 + 新 2.184 ACP）
+## 相关 HY4 核查
 
-**Phase 2 更新**：用户已授权下载并登录官方 CodeBuddy Code 2.184.0。独立安装、tarball SHA-256 `882f681a…dc9b7`、entry SHA-256 `94e1ff12…857853`；ACP `initialize`/`session/new` 返回 `hy4free`（官方名 Hy4）与 `hy4std`，权限 `dontAsk`；`session/set_config_option` 确认 `hy4free`。一次工具关闭的 smoke 返回 `HY4_OK`，但无 provider model/usage 字段。由此新增**可选、未注册**的 ACP 适配器 `bridges/hy4/`，固定 `hy4free`/`dontAsk`/无工具，不使用 WorkBuddy 桌面内部协议或 GUI token。详见 `docs/codebuddy-acp.md`。
+2026-11-13 的历史 WorkBuddy 5.9.3 附带 CodeBuddy 2.165.0。该版本的帮助列出 ACP，隔离的无 prompt ACP 检查没有得到 `initialize` 回复。后续独立的 CodeBuddy Code 2.184.0 ACP 会话目录和设模回执确认了 `hy4free`，并完成一个纯文本 smoke。HY4 的文件能力和预准入回退另见当前适配器验收。 [CodeBuddy ACP](../../docs/codebuddy-acp.md) · [HY4 回退](../../docs/hy4-fallback.md)
 
-以下 2.165/桌面证据仅保留为历史；它不再代表当前 ACP 入口：
-
-- WorkBuddy 桌面 5.9.3：`D:\WorkBuddy\WorkBuddy.exe`。
-- 捆绑 CodeBuddy 2.165.0：`D:\WorkBuddy\resources\app.asar.unpacked\cli\bin\codebuddy`。
-- 在 `CODEBUDDY_FORCE_LITE_WB_BUNDLE=1` 下可打印 CLI help；静态 `--model` 列表**不含** `hy4-preview`；help 提及 `--permission-mode` 的 TUI、serve、ACP。
-- 一次无 prompt、工具禁用、严格空 MCP 配置、`dontAsk`、隔离配置的 2.165 ACP 能力检查没有返回 initialize 响应；`--help` 退出 0 且列出 ACP，但这不证明旧 CLI 可选 Hy4。
-- 官方 WorkBuddy PC 本地 assistant API 只接受 `content`/`msg_type`，要求用户 OAuth，没有 model/cwd/permission 参数。
-- WorkBuddy 明确可能以同系列/系统默认模型替换已退役内置模型；“桌面选择器有 Hy4”不是稳定的可脚本 `hy4-preview` 路由证明。
-- 本仓库没有完整的旧 WorkBuddy `server.mjs`；已安装的 `hy4-workbuddy` 是否真实可用仍未验证。
-- 未读取 `models.json`、auth/config 凭据存储，未提取 GUI token，未修改任何 WorkBuddy/CodeBuddy 注册或配置。
-
-**当前结论**：官方 2.184 ACP 已有真实 `hy4free` 入口；本仓库的适配器与 MCP endpoint 已实现但**未注册、未部署、未在本环境运行**。配置模型不等于 provider/账单证明；CodeBuddy/WorkBuddy 共享中国账号 credits，不声明免费。
-
-**支持范围内的下一步**：用本地 manifest 在人工授权下做一次无 prompt readiness，再按 `docs/codebuddy-acp.md` 决定是否注册新 endpoint。文件读写能力未验证，保持 fail-closed；不得用 `hy4std`、auto、default、其他账号、GUI token 或 prompt 约定冒充已验证能力。
-
-**遗留桥接交接条件**：若走既有 `hy4-workbuddy` 桥接，必须提供完整、经审核的 `server.mjs` 及全部依赖/profile、厂商支持的显式模型选择、fail-closed 窄权限模式、readiness 和获授权的隔离只读/写入验证。只凭登录、桌面 UI 或 Open API OAuth 不能证明 HY4 可用。
+WorkBuddy DSF 项目入口与 HY4 ACP 适配器分别核验。本机旧 WorkBuddy 2.165.0 对当前 SDK 项目入口的兼容性及实际 DSF 模型调用待本机验收。

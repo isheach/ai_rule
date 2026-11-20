@@ -38,7 +38,7 @@ export function tomlStringArray(section, key) {
   }
 }
 
-function tomlString(section, key) {
+export function tomlString(section, key) {
   const value = section.match(new RegExp('^[\\t ]*' + key + '\\s*=\\s*(.+)$', 'm'))?.[1];
   try {
     const parsed = JSON.parse(value);
@@ -48,11 +48,11 @@ function tomlString(section, key) {
   }
 }
 
-function isNodeCommand(executable) {
+export function isNodeCommand(executable) {
   return typeof executable === 'string' && /^node(?:\.exe)?$/i.test(path.basename(executable));
 }
 
-function hasInlineEnv(toml, section, name) {
+export function hasInlineEnv(toml, section, name) {
   const table = new RegExp('^[\\t ]*\\[[\\t ]*' + serverKey(name) + '[\\t ]*\\.[\\t ]*' + tableKey('env') + '[\\t ]*\\]', 'm');
   return /^[\t ]*env\s*=/m.test(section) || table.test(toml);
 }

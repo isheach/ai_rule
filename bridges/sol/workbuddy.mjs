@@ -1,5 +1,6 @@
 import { spawn } from 'node:child_process';
 import { WORKBUDDY_DSF } from '../workbuddy/dispatch.mjs';
+import { PROJECT_ID } from '../workbuddy/project-config.mjs';
 import { limitText, SAFE_ID } from './config.mjs';
 
 const PROTOCOLS = ['2025-06-18', '2025-03-26', '2024-11-05'];
@@ -21,7 +22,9 @@ function validateArguments(args, schema) {
   for (const [key, value] of Object.entries(args)) {
     if (!Object.hasOwn(schema.properties, key)) throw Error('A configured WorkBuddy argument is missing from the installed run schema.');
     const rule = schema.properties[key];
-    if (!rule || (rule.type === 'integer' ? !Number.isInteger(value) : rule.type !== typeof value)
+    const matches = rule?.type === 'integer' ? Number.isInteger(value)
+      : rule?.type === 'array' ? Array.isArray(value) : rule?.type === typeof value;
+    if (!matches
       || (Array.isArray(rule.enum) && !rule.enum.includes(value)) || (rule.const !== undefined && rule.const !== value)
       || (typeof value === 'string' && ((rule.minLength && value.length < rule.minLength) || (rule.maxLength && value.length > rule.maxLength)
         || (rule.pattern && !new RegExp(rule.pattern).test(value))))
@@ -108,18 +111,19 @@ export class WorkBuddyConnection {
     const status = list?.tools?.find(tool => tool.name === WORKBUDDY_DSF.status_tool);
     const run = list?.tools?.find(tool => tool.name === WORKBUDDY_DSF.run_tool);
     if (!status || !run) throw Error('The WorkBuddy MCP server does not advertise the required DSF tools.');
-    validateArguments({}, status.inputSchema);
-    this.ready = run.inputSchema;
+    this.ready = { status: status.inputSchema, run: run.inputSchema };
     return this.ready;
   }
 
   async prepare(task, signal) {
+    if (this.config.projectContract) return this._prepareProject(task, signal);
     const profile = this.config.profiles[task.permissionMode];
     if (!profile || task.capability !== 'default' || task.writes?.length || task.writeScopes?.length || task.commands?.length) {
       throw Error('The original WorkBuddy task permission and scope have no compatible configured DSF profile.');
     }
     const readinessSignal = AbortSignal.any([signal, AbortSignal.timeout(30_000)]);
     const schema = await this._connect(readinessSignal);
+    validateArguments({}, schema.status);
     const fields = this.config.statusFields;
     const status = await this._rpc('tools/call', { name: WORKBUDDY_DSF.status_tool, arguments: {} }, readinessSignal);
     const proof = resultData(status);
@@ -133,7 +137,29 @@ export class WorkBuddyConnection {
       if (!names.session) throw Error('The configured WorkBuddy interface has no verified continuation argument.');
       args[names.session] = task.sessionId;
     }
-    validateArguments(args, schema);
+    validateArguments(args, schema.run);
+    return args;
+  }
+
+  async _prepareProject(task, signal) {
+    const readinessSignal = AbortSignal.any([signal, AbortSignal.timeout(30_000)]);
+    const schema = await this._connect(readinessSignal);
+    const scope = { cwd: task.cwd, permissionMode: task.permissionMode, capability: task.capability ?? 'default' };
+    if (task.authorizationNote) scope.authorizationNote = task.authorizationNote;
+    for (const key of ['writes', 'writeScopes', 'commands']) if (task[key]?.length) scope[key] = task[key];
+    validateArguments(scope, schema.status);
+    const status = await this._rpc('tools/call', { name: WORKBUDDY_DSF.status_tool, arguments: scope }, readinessSignal);
+    const proof = resultData(status);
+    if (status?.isError || proof?.model !== WORKBUDDY_DSF.model || proof.project_contract !== this.config.projectContract) {
+      throw Error('The WorkBuddy status does not confirm the project entry and fixed deepseek-v4-flash model.');
+    }
+    if (proof.ready !== true || proof.permission_mode !== task.permissionMode || !PROJECT_ID.test(proof.project_id ?? '')) {
+      throw Error(typeof proof.message === 'string' ? limitText(this.sanitize(proof.message), 1000)
+        : 'The WorkBuddy project entry does not confirm the task directory and permission.');
+    }
+    const args = { ...scope, projectId: proof.project_id, prompt: task.prompt, idempotencyKey: task.idempotencyKey, timeoutMs: task.timeoutMs };
+    if (task.sessionId) args.sessionId = task.sessionId;
+    validateArguments(args, schema.run);
     return args;
   }
 

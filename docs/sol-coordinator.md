@@ -73,9 +73,25 @@ API 协调器向 `https://api.openai.com/v1/responses` 发送任务交接、模�
 
 符合资格的 ChatGPT 赠送 API 额度适用于已关联的 API 组织内的独立 API 请求。OpenAI 先使用赠送额度，赠额用尽时可扣减该组织的已购余额。赠额政策排除 Codex 自身的 API key 用法。`max_total_tokens` 根据已返回的用量判断是否继续下一轮，最后一轮的输入和输出可能使累计用量超过阈值。请求次数、单次输出和时间限制用于控制协调任务，最终费用和余额以 OpenAI 账单为准。 [赠额使用规则](https://help.openai.com/en/articles/20001626-api-credits-benefit-for-eligible-chatgpt-subscriptions) · [API 账单](https://platform.openai.com/account/billing/overview)
 
-## 使用现有 WorkBuddy DSF
+## 使用 WorkBuddy DSF
 
-默认 DSH 配置可先独立验收。要在 API 协调中执行显式 WorkBuddy DSF 或让模式 2 在实际峰时派发，`coordinator.local.json` 需要本机已有 `deepseek-v4-flash-workbuddy` 的授权配置。它通过另一条受支持的本机 stdio 连接访问同一桥接器入口。先确认原桥支持这种连接和当前 profile，再将 `codex mcp get deepseek-v4-flash-workbuddy --json` 解析到变量，只使用已批准的 `transport.command`、`args`、`cwd` 和需要转发的环境变量名。保留原注册中的实际路径、参数、权限及 profile；绝对命令路径应指向 Windows 可执行程序。
+### 项目入口
+
+先完成本机 WorkBuddy 项目配置。使用显式 WorkBuddy DSF 或模式 2 实际峰时派发时，`coordinator.local.json` 的 `workbuddy` 对象指向订阅入口使用的同一本机 JSON。API Sol 会使用同一实现和项目授权检查，并传递原任务的权限及更窄的范围。DSH 根池也执行自己的工作区和日程检查。 [WorkBuddy 项目入口](workbuddy-project-entry.md)
+
+```json
+{
+  "workbuddy": {
+    "project_config": "D:\\ai-rule-state\\workbuddy-project.local.json"
+  }
+}
+```
+
+将该 `workbuddy` 对象写入现有协调配置，用 `-SolCoordinatorConfig` 指向完整的协调配置，预览、应用并验证。等该入口的活动任务结束后，按宿主支持的方式加载协调器配置一次。之后 API Sol 用原项目范围，即可派同一项目内新的论文、脚本或数据任务。写任务的 `authorizationNote` 可以引用既有项目授权，任务的 scope 只在该授权下收窄。
+
+### 已有定制入口
+
+现有定制 WorkBuddy DSF 可继续使用以下配置。先确认原桥支持本机 stdio 连接和当前 profile，再将 `codex mcp get deepseek-v4-flash-workbuddy --json` 解析到变量，只使用已批准的 `transport.command`、`args`、`cwd` 和需要转发的环境变量名。保留原注册中的实际路径、参数、权限及 profile。绝对命令路径应指向 Windows 可执行程序。
 
 按原桥实际 `get_task_bridge_status`、`run_workbuddy_task` 的工具定义与回执字段填写以下映射。示例字段和 profile 必须替换为机器上已存在、经过授权的值。`env_vars` 可省略；如需转发环境变量，填写名称。适配器固定 `WB_MODEL=deepseek-v4-flash` 和 `WB_SKIP_PERMISSIONS=false`。
 
@@ -97,7 +113,7 @@ API 协调器向 `https://api.openai.com/v1/responses` 发送任务交接、模�
 
 默认状态字段是 `ready` 和 `model`，结果是 `status`、`model`、`task_id`、`session_id`、`answer`。需要适配字段名时使用 `status_fields` 与 `result_fields`。如原桥公开续跑能力，`arguments.session` 填实际会话参数；仅在返回同后端原会话 ID 且本轮满足准入时续跑。授权工作区可写时，可在 `profiles` 配置现有 `workspace-write` profile。对无法原样满足的权限或 profile，任务在可见的阻塞处停止。
 
-将 `workbuddy` 对象加入现有协调配置，指定同一路径重新预览、应用并验证。在活动协调结束后按宿主支持方式重新加载。第一项真实 WorkBuddy 验收选择批准目录和真实只读 profile，检查任务回执和 `deepseek-v4-flash`。缺少桥接器或映射时，模式 2 的实际峰时交接会报告不可用；谷时仍按原 DSH 门禁执行。 [现有 WorkBuddy 桥](../bridges/workbuddy/README.md) · [DSH 峰谷模式](offpeak-schedule.md)
+将 `workbuddy` 对象加入现有协调配置，指定同一路径重新预览、应用并验证。在活动协调结束后按宿主支持方式加载一次。首项本机验收选择批准目录和真实只读 profile，核对任务回执及 `deepseek-v4-flash`。缺少有效 WorkBuddy 配置时，模式 2 的实际峰时交接会报告不可用。谷时按原 DSH 门禁执行。 [WorkBuddy 桥接器](../bridges/workbuddy/README.md) · [DSH 峰谷模式](offpeak-schedule.md)
 
 ## 在 Codex 聊天中切换
 
@@ -124,7 +140,7 @@ $helper = Join-Path (Split-Path -Parent $entry.args[0]) 'cli.mjs'
 & $entry.command $helper context --config $entry.args[$pos + 1]
 ```
 
-把 `context_ref` 作为 `context` 传入 MCP。`get_sol_coordinator_mode` 查询当前根的来源，`set_sol_coordinator_mode` 以 `mode: "api"` 或 `mode: "subscription"` 更新后续任务。一次性 API 覆盖在 `start_sol_coordination` 或 `run_sol_coordination` 中传 `coordinatorMode: "api"`。API 任务需要稳定 `idempotencyKey`、`backend`、`goal`、绝对 `cwd`、`permissionMode` 和 `acceptance`；写任务还需明确 `authorizationNote`。
+把 `context_ref` 作为 `context` 传入 MCP。`get_sol_coordinator_mode` 查询当前根的来源，`set_sol_coordinator_mode` 以 `mode: "api"` 或 `mode: "subscription"` 更新后续任务。一次性 API 覆盖在 `start_sol_coordination` 或 `run_sol_coordination` 中传 `coordinatorMode: "api"`。API 任务需要稳定 `idempotencyKey`、`backend`、`goal`、绝对 `cwd`、`permissionMode` 和 `acceptance`。写任务的 `authorizationNote` 说明适用授权，可引用已有项目授权。
 
 从默认或命名 DSH 服务切到 API 后，首项 DSH 任务开始前用 `get_sol_schedule` 核对当前根池。如果这个聊天已有可信的峰谷选择且与池中的值不同，用 `set_sol_schedule` 把该选择带入当前根池。已共用根池且模式一致时直接沿用。继续原传统 DSH 服务时，派单仍传当前会话已有 `scheduleMode`。只切换来源时，先执行来源工具，峰谷设置依据本会话已经授权的选择。
 

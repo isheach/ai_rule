@@ -11,6 +11,8 @@ param(
     [string[]]$DshInstance,
     [string[]]$RemoveDshInstance,
     [string]$WorkBuddyBridge,
+    [string]$WorkBuddyProjectConfig,
+    [switch]$ReplaceWorkBuddyDsf,
     [string]$SolCoordinatorConfig,
     [string]$SolWorkspaceRoot,
     [string]$SolModel,
@@ -32,6 +34,8 @@ if ($DshEntry) { $nodeArgs += @('--dsh-entry', $DshEntry) }
 if ($DshInstance) { foreach ($name in $DshInstance) { $nodeArgs += @('--dsh-instance', $name) } }
 if ($RemoveDshInstance) { foreach ($name in $RemoveDshInstance) { $nodeArgs += @('--remove-dsh-instance', $name) } }
 if ($WorkBuddyBridge) { $nodeArgs += @('--workbuddy-bridge', $WorkBuddyBridge) }
+if ($WorkBuddyProjectConfig) { $nodeArgs += @('--workbuddy-project-config', $WorkBuddyProjectConfig) }
+if ($ReplaceWorkBuddyDsf) { $nodeArgs += '--replace-workbuddy-dsf' }
 if ($SolCoordinatorConfig) { $nodeArgs += @('--sol-coordinator-config', $SolCoordinatorConfig) }
 if ($SolWorkspaceRoot) { $nodeArgs += @('--sol-workspace-root', $SolWorkspaceRoot) }
 if ($SolModel) { $nodeArgs += @('--sol-model', $SolModel) }

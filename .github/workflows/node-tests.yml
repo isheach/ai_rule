@@ -20,3 +20,11 @@ jobs:
           node-version: ${{ matrix.node }}
       - name: Offline test suite
         run: npm test
+      - name: Install pinned WorkBuddy SDK for protocol testing
+        if: matrix.os == 'windows-latest' && matrix.node == 22
+        run: npm ci --ignore-scripts --prefix bridges/workbuddy
+      - name: WorkBuddy SDK protocol against a local fixture
+        if: matrix.os == 'windows-latest' && matrix.node == 22
+        env:
+          AI_RULE_TEST_WORKBUDDY_SDK: '1'
+        run: node --test tests/workbuddy-sdk.test.mjs
