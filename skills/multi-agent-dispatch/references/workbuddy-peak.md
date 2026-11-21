@@ -1,5 +1,7 @@
-<!-- ai-rule-managed: 2026-11-21.unified-dispatch-r2 -->
+<!-- ai-rule-managed: 2026-11-21.layered-dispatch-r1 -->
 # 模式 2 峰时 WorkBuddy DSF 交接
+
+这是模式 2 的既有显式交接路径，不是全新会话的默认底层。只有已选择模式 2 且进入实际峰段时才使用；不因全新默认或 Terra 专家任务自动启用，也不改写已受理任务的所有者。
 
 此流程在 [DSH 模式 2](dsh.md#schedulemode-如何作用) 的实际峰段使用。已受理任务继续由原执行者处理。订阅 Sol 执行下列步骤。API Sol 通过本机已配置的 WorkBuddy DSF 连接完成同一领取和回填合同。
 

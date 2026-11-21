@@ -25,6 +25,7 @@ namespace AiRule.Sol.Windows
         internal const int IoTimeoutMs = 5000;
         internal const int ConnectTimeoutMs = 2500;
         internal const int CallsPerHour = 24;
+        internal const int MaxCallsPerHour = 1000;
         internal const byte Hello = 1;
         internal const byte Finish = 2;
         internal const byte Check = 3;
@@ -214,25 +215,49 @@ namespace AiRule.Sol.Windows
         private static readonly Regex ModelPattern = new Regex(@"\A[a-z0-9][a-z0-9_.:-]{0,99}\z", RegexOptions.CultureInvariant);
         private static readonly Regex HeaderPattern = new Regex(@"\A[A-Za-z0-9_.:@/-]{1,160}\z", RegexOptions.CultureInvariant);
         private static readonly string[] Efforts = { "none", "minimal", "low", "medium", "high", "xhigh", "max" };
-        private static readonly string[] Tools = { "confirm_sol_api", "delegate_work", "finish_coordination" };
+        private static readonly string[] SolTools = { "confirm_sol_api", "delegate_work", "finish_coordination" };
+        // Terra is the optional second role in the same API project and shared quota.
+        private static readonly string[] TerraTools = { "confirm_terra_api", "terra_action", "finish_terra" };
+        internal const string TerraModel = "gpt-6.1-terra";
+        internal const string TerraEffort = "max";
         internal SecurityIdentifier Caller { get; private set; }
         internal string Model { get; private set; }
         internal string Effort { get; private set; }
         internal string Project { get; private set; }
         internal string Organization { get; private set; }
+        internal bool TerraEnabled { get; private set; }
+        internal int RequestsPerHour { get; private set; }
 
         internal static Policy Load(byte[] json)
         {
             if (json.Length > 4096) throw new InvalidDataException();
             var value = Protocol.Parse(json);
-            Protocol.Fields(value, new[] { "caller_sid", "model", "reasoning_effort" }, "project", "organization");
+            Protocol.Fields(value, new[] { "caller_sid", "model", "reasoning_effort" },
+                "project", "organization", "allow_terra_api", "requests_per_hour");
             var sid = new SecurityIdentifier((string)value["caller_sid"]);
             string model = value["model"] as string;
             string effort = value["reasoning_effort"] as string;
             if ((!sid.IsAccountSid() && !sid.Value.StartsWith("S-1-12-1-", StringComparison.Ordinal)) || sid.Equals(WindowsPipe.ServiceSid) ||
                 model == null || !ModelPattern.IsMatch(model) || !Efforts.Contains(effort)) throw new InvalidDataException();
-            return new Policy { Caller = sid, Model = model, Effort = effort,
-                Project = Header(value, "project"), Organization = Header(value, "organization") };
+            bool terraEnabled = false;
+            if (value.ContainsKey("allow_terra_api"))
+            {
+                object allowed = value["allow_terra_api"];
+                if (!(allowed is bool)) throw new InvalidDataException();
+                terraEnabled = (bool)allowed;
+            }
+            // Role selection is by the two fixed models. The same model cannot name both roles.
+            if (terraEnabled && TerraModel.Equals(model, StringComparison.Ordinal)) throw new InvalidDataException();
+            int requestsPerHour = Protocol.CallsPerHour;
+            if (value.ContainsKey("requests_per_hour"))
+            {
+                object quota = value["requests_per_hour"];
+                if (!(quota is int) || (int)quota < 1 || (int)quota > Protocol.MaxCallsPerHour)
+                    throw new InvalidDataException();
+                requestsPerHour = (int)quota;
+            }
+            return new Policy { Caller = sid, Model = model, Effort = effort, TerraEnabled = terraEnabled,
+                RequestsPerHour = requestsPerHour, Project = Header(value, "project"), Organization = Header(value, "organization") };
         }
 
         private static string Header(Dictionary<string, object> value, string name)
@@ -245,8 +270,23 @@ namespace AiRule.Sol.Windows
 
         internal object Status(bool ready)
         {
-            return new { ready = ready, model = Model, reasoning_effort = Effort, max_input_bytes = Protocol.MaxInputBytes,
-                max_output_tokens = Protocol.MaxOutputTokens, api_timeout_ms = Protocol.ApiTimeoutMs };
+            if (!TerraEnabled)
+                return new { ready = ready, model = Model, reasoning_effort = Effort, requests_per_hour = RequestsPerHour,
+                    max_input_bytes = Protocol.MaxInputBytes, max_output_tokens = Protocol.MaxOutputTokens,
+                    api_timeout_ms = Protocol.ApiTimeoutMs };
+
+            var status = new Dictionary<string, object>(StringComparer.Ordinal) {
+                { "ready", ready }, { "model", Model }, { "reasoning_effort", Effort },
+                { "requests_per_hour", RequestsPerHour },
+                { "max_input_bytes", Protocol.MaxInputBytes }, { "max_output_tokens", Protocol.MaxOutputTokens },
+                { "api_timeout_ms", Protocol.ApiTimeoutMs }
+            };
+            // Policy capability only. The top-level ready flag remains the runtime credential check.
+            status.Add("terra_enabled", true);
+            status.Add("terra_model", TerraModel);
+            status.Add("terra_reasoning_effort", TerraEffort);
+            status.Add("terra_tools", TerraTools.ToArray());
+            return status;
         }
 
         internal byte[] ValidateRequest(object rawBody)
@@ -256,7 +296,13 @@ namespace AiRule.Sol.Windows
             var reasoning = Protocol.Object(body["reasoning"]);
             Protocol.Fields(reasoning, new[] { "effort" });
             object[] include = Protocol.Array(body["include"]);
-            if (!Model.Equals(body["model"]) || !Effort.Equals(reasoning["effort"]) || !false.Equals(body["store"]) ||
+            // The fixed request model selects the role; tool names never do.
+            string model = body["model"] as string;
+            bool sol = Model.Equals(model);
+            bool terra = TerraEnabled && TerraModel.Equals(model, StringComparison.Ordinal);
+            string[] allowedTools = sol ? SolTools : terra ? TerraTools : null;
+            string effort = sol ? Effort : terra ? TerraEffort : null;
+            if (allowedTools == null || !effort.Equals(reasoning["effort"]) || !false.Equals(body["store"]) ||
                 !false.Equals(body["parallel_tool_calls"]) || !"required".Equals(body["tool_choice"]) ||
                 include.Length != 1 || !"reasoning.encrypted_content".Equals(include[0]) || !(body["max_output_tokens"] is int))
                 throw new InvalidDataException();
@@ -265,25 +311,25 @@ namespace AiRule.Sol.Windows
 
             object[] tools = Protocol.Array(body["tools"]);
             var names = new HashSet<string>(StringComparer.Ordinal);
-            if (tools.Length == 0 || tools.Length > Tools.Length) throw new InvalidDataException();
+            if (tools.Length == 0 || tools.Length > allowedTools.Length) throw new InvalidDataException();
             foreach (object tool in tools)
-                if (!names.Add(ValidateTool(Protocol.Object(tool)))) throw new InvalidDataException();
+                if (!names.Add(ValidateTool(Protocol.Object(tool), allowedTools))) throw new InvalidDataException();
 
             // The bridge uses text messages and replays Responses output while carrying forward encrypted reasoning.
             // These types have no built-in tools, file handles or URL-backed inputs.
             object[] input = Protocol.Array(body["input"]);
             if (input.Length == 0 || input.Length > 256) throw new InvalidDataException();
-            foreach (object item in input) ValidateInput(Protocol.Object(item));
+            foreach (object item in input) ValidateInput(Protocol.Object(item), allowedTools);
             byte[] normalized = Protocol.Encode(body);
             if (normalized.Length > Protocol.MaxInputBytes) throw new BodyTooLargeException();
             return normalized;
         }
 
-        private static string ValidateTool(Dictionary<string, object> tool)
+        private static string ValidateTool(Dictionary<string, object> tool, string[] allowedTools)
         {
             Protocol.Fields(tool, new[] { "type", "name", "description", "strict", "parameters" });
             string name = tool["name"] as string;
-            if (!"function".Equals(tool["type"]) || !Tools.Contains(name) || !(tool["description"] is string) || !true.Equals(tool["strict"]))
+            if (!"function".Equals(tool["type"]) || !allowedTools.Contains(name) || !(tool["description"] is string) || !true.Equals(tool["strict"]))
                 throw new InvalidDataException();
             var schema = Protocol.Object(tool["parameters"]);
             Protocol.Fields(schema, new[] { "type", "properties", "required", "additionalProperties" });
@@ -302,7 +348,7 @@ namespace AiRule.Sol.Windows
             return name;
         }
 
-        private static void ValidateInput(Dictionary<string, object> item)
+        private static void ValidateInput(Dictionary<string, object> item, string[] allowedTools)
         {
             string type = Protocol.Get(item, "type") as string;
             if (!item.ContainsKey("type"))
@@ -320,7 +366,7 @@ namespace AiRule.Sol.Windows
                 case "function_call":
                     Protocol.Fields(item, new[] { "type", "call_id", "arguments", "name" }, "id", "status");
                     RequireStrings(item, "call_id", "arguments", "name", "id", "status");
-                    if (!Tools.Contains((string)item["name"])) throw new InvalidDataException();
+                    if (!allowedTools.Contains((string)item["name"])) throw new InvalidDataException();
                     return;
                 case "reasoning":
                     Protocol.Fields(item, new[] { "type", "id", "summary" }, "encrypted_content", "content", "status");

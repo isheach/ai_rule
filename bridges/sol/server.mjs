@@ -8,6 +8,7 @@ import { DSH_TIMEOUT_MS, WAIT_MS, preferRun, validateWaitMs, waitForExisting } f
 import { COORDINATOR_MODES, EXECUTION_BACKENDS, EXECUTION_PERMISSIONS, loadSolConfig, object, discardLegacyEnvironment, SERVICE } from './config.mjs';
 import { ResponsesClient } from './responses.mjs';
 import { SolService } from './service.mjs';
+import { PURPOSES } from '../dispatch.mjs';
 
 const PROTOCOLS = ['2025-06-18', '2025-03-26', '2024-11-05'];
 const text = { type: 'string' };
@@ -15,9 +16,9 @@ const choices = (...values) => ({ type: 'string', enum: values });
 const source = choices(...COORDINATOR_MODES);
 const task = { idempotencyKey: text, taskId: text };
 const handoff = {
-  ...task, coordinatorMode: source, backend: choices(...EXECUTION_BACKENDS), goal: text, cwd: text,
+  ...task, coordinatorMode: source, backend: choices(...EXECUTION_BACKENDS), purpose: choices(...PURPOSES), goal: text, cwd: text,
   permissionMode: choices(...EXECUTION_PERMISSIONS), authorizationNote: text, constraints: text, contextSummary: text,
-  acceptance: text,
+  acceptance: text, acceptTerraCharges: { type: 'boolean', description: 'Explicit billing consent for a specialist API Terra task. Required before the protected Terra client sends a response.' },
   timeoutMs: { type: 'integer', minimum: DSH_TIMEOUT_MS.minimum, maximum: DSH_TIMEOUT_MS.maximum,
     description: 'Total coordination budget. The local API Sol configuration can impose a lower maximum and defines the default.' },
   capability: choices('default', 'text-only', 'workspace-read', 'workspace-write'),
@@ -25,7 +26,7 @@ const handoff = {
   commands: { type: 'array', items: text }
 };
 delete handoff.taskId;
-const requireHandoff = ['idempotencyKey', 'backend', 'goal', 'cwd', 'permissionMode', 'acceptance'];
+const requireHandoff = ['idempotencyKey', 'goal', 'cwd', 'permissionMode', 'acceptance'];
 const tool = (name, description, properties = {}, required = [], readOnlyHint = false) => ({
   name, description, inputSchema: { type: 'object', properties: { context: text, ...properties }, required: ['context', ...required], additionalProperties: false },
   annotations: { readOnlyHint }
@@ -33,6 +34,9 @@ const tool = (name, description, properties = {}, required = [], readOnlyHint = 
 const TOOLS = [
   tool('get_sol_coordinator_mode', 'Read the selected Sol source for this verified Codex root, without an API call.', {}, [], true),
   tool('set_sol_coordinator_mode', 'Set this verified Codex root’s source for future work only, without an API call.', { mode: source }, ['mode']),
+  tool('resolve_layer_dispatch', 'Resolve the layered model route for this root without a model call. Omit purpose for general/coordinating work; omit backend to use the purpose default (DSH or Terra).', {
+    purpose: choices(...PURPOSES), backend: choices(...EXECUTION_BACKENDS)
+  }, [], true),
   tool('get_sol_schedule', 'Read the DSH root pool schedule and current phase.', {}, [], true),
   tool('set_sol_schedule', 'Apply an explicitly requested root-pool schedule mode, including to active DSH workers in this root.', { scheduleMode: scheduleModeProperty }, ['scheduleMode']),
   tool('start_sol_coordination', `Start API Sol coordination for an early task ID or later intervention. Keep the returned task ID and the original idempotency key. ${DSH_SCOPE_DESCRIPTION}`, handoff, requireHandoff),
@@ -52,11 +56,11 @@ function validate(tool, args) {
   }
 }
 
-export function startSolServer({ configPath, stdin = process.stdin, stdout = process.stdout, callBroker, clock, sessionsRoot } = {}) {
+export function startSolServer({ configPath, stdin = process.stdin, stdout = process.stdout, callBroker, clock, sessionsRoot, dispatch = {} } = {}) {
   const config = loadSolConfig(configPath);
   discardLegacyEnvironment(config);
   const responses = new ResponsesClient({ config, callBroker });
-  const service = new SolService({ config, responses, clock });
+  const service = new SolService({ config, responses, clock, dispatch });
   const runs = new Map();
   let initialized = false;
   let input = '';
@@ -74,6 +78,10 @@ export function startSolServer({ configPath, stdin = process.stdin, stdout = pro
     const { context, idempotencyKey: key, taskId } = args;
     if (name === 'get_sol_coordinator_mode') return service.mode(rootId);
     if (name === 'set_sol_coordinator_mode') return service.setMode(rootId, args.mode);
+    if (name === 'resolve_layer_dispatch') return service.resolve(rootId, {
+      ...(args.purpose === undefined ? {} : { purpose: args.purpose }),
+      ...(args.backend === undefined ? {} : { backend: args.backend })
+    });
     if (name === 'get_sol_schedule') return service.schedule(rootId);
     if (name === 'set_sol_schedule') return service.setSchedule(rootId, args.scheduleMode);
     if (name === 'get_sol_coordination') return service.get(rootId, key, taskId);

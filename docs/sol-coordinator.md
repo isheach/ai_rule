@@ -1,6 +1,6 @@
 # Sol 协调器
 
-部署本机 `sol-coordinator` 后，可在 Codex 会话内选择原生订阅 Sol 或独立 OpenAI Responses API Sol。API 任务使用所配 DSH 根池或 WorkBuddy DSF。会话选择、派发、等待与恢复以 [调度 Skill](../skills/multi-agent-dispatch/SKILL.md) 为准。
+部署本机 `sol-coordinator` 后，可在 Codex 会话内选择原生订阅 Sol 或独立 OpenAI Responses API Sol。全新默认底层是 DSH/OpenCode Go DSF；WorkBuddy DSF 仅在明确选择或既有模式 2 峰时交接时使用。主机操作/验收、写作、绘图或图像生成与识别由 GPT-6.1 Terra Max 承担，来源与 Sol 相同。会话选择、派发、等待与恢复以 [调度 Skill](../skills/multi-agent-dispatch/SKILL.md) 为准。
 
 ## 执行宿主与目标机
 
@@ -43,7 +43,7 @@ $solSource = & {
 
 同一普通用户窗口先预览，再应用。已有托管协调器使用其现有配置。可继承的标准 DSH 根池提供已有工作区与只读限制。首次设置需要明确工作区时，在下方参数表加入 `SolWorkspaceRoot`，填获准的现有绝对目录。传统 DSH 仍可沿用可继承的 JavaScript 入口、日历和只读限制，生成独立根池配置。没有可继承权限的生成配置默认只读。
 
-新配置的模型与推理档位默认使用 `gpt-6.2-sol` 和 `max`，可通过 `SolModel` 和 `SolReasoningEffort` 指定。需定位已安装的 DSH JavaScript 入口时加入 `DshEntry`，使用自定义 Codex profile 时加入其绝对路径参数 `CodexHome`。使用 WorkBuddy 项目入口时，先为新工作树安装锁定的 SDK。 [项目入口](#项目入口)
+新配置的模型与推理档位默认使用 `gpt-6.2-sol` 和 `max`，可通过 `SolModel` 和 `SolReasoningEffort` 指定。Terra 专家任务与 Sol 共用同一已选来源；API 来源固定使用 `gpt-6.1-terra` 和 `max` 并走受保护 Terra 客户端，订阅来源按宿主实际提供的 Terra 入口核对模型和档位。需定位已安装的 DSH JavaScript 入口时加入 `DshEntry`，使用自定义 Codex profile 时加入其绝对路径参数 `CodexHome`。使用 WorkBuddy 项目入口时，先为新工作树安装锁定的 SDK。 [项目入口](#项目入口)
 
 ```powershell
 $setupArgs = @{ ExpectedRevision = $solSource.Revision }
@@ -91,7 +91,21 @@ $brokerExe = Join-Path ([Environment]::GetFolderPath('ProgramFiles')) 'AiRuleSol
 
 `AiRuleSolBroker` 使用 `NT SERVICE\AiRuleSolBroker` 服务身份，并以该身份的 DPAPI CurrentUser 保存密钥。普通客户端只可查询状态和提交受限的 Responses 请求。同一获准 Windows 身份下的进程共享调用配额。Codex 和执行器日常以普通权限运行，服务程序和存储受本机管理员保护。 [凭据路径审计](implementation.md#api-sol-凭据路径)
 
-代理每小时最多受理 24 次上游请求，每次最多 768,000 字节请求体与 64,000 个输出 token，上游超时 180 秒。协调配置中更低的限制继续生效。服务配额跨重启保留。最多并发三次上游请求，状态查询走独立管道。管理员可在受保护的 `%ProgramFiles%\AiRuleSolBroker\state\audit.jsonl` 查看时间、操作、结果和状态码。日志定长轮换，只记录调用元数据。
+受保护安装器为新装策略写入每小时 100 次上游请求上限；缺少 `requests_per_hour` 的旧策略仍为 24。每次最多 768,000 字节请求体与 64,000 个输出 token，上游超时 180 秒。协调配置中更低的限制继续生效。Sol API 与 Terra API 共用此配额，服务配额跨重启保留。最多并发三次上游请求，状态查询走独立管道。管理员可在受保护的 `%ProgramFiles%\AiRuleSolBroker\state\audit.jsonl` 查看时间、操作、结果和状态码。日志定长轮换，只记录调用元数据。
+
+### API 配额
+
+已有显式值（如 96）保留。只有用户授权并显式运行受保护升级才提高到 100，不会静默迁移，只接受提高、拒绝降低。沿用上文已核对的 `$solSource`：
+
+```powershell
+& ($solSource.Setup) -ExpectedRevision $solSource.Revision -EnableTerraApi -RequestsPerHour 100
+# 核对预览后：
+& ($solSource.Setup) -ExpectedRevision $solSource.Revision -EnableTerraApi -RequestsPerHour 100 -Apply
+```
+
+运行中的服务需在在途调用结束后显式加 `-AllowBriefRestart`，只进行一次短维护窗口停服；默认不停服。成功后用只读 `status` 核对 `requests_per_hour` 为 100；滚动记录和审计文件不会被重置。 [详细配额与 Terra 入口](../skills/multi-agent-dispatch/references/terra-api.md#共享配额与显式升级)
+
+Terra API 固定使用 `bridges/terra/protected.mjs` 与 `bridges/terra/cli.mjs`，上游只经同一 `bridges/sol/broker.mjs` 的 `brokerCall`。模型 `gpt-6.1-terra`、max；只执行项目预注册的有限动作。本仓库现有的只读验收动作 `inspect_contract` 不是通用桌面、CUA 或图像驱动；缺少对应动作时报告不可用。
 
 ## 验证和切换
 
@@ -138,17 +152,17 @@ npm.cmd ci --ignore-scripts --prefix (Join-Path $solSource.Root 'bridges\workbud
 if ($LASTEXITCODE -ne 0) { throw 'WorkBuddy SDK 安装失败' }
 ```
 
-首次将项目入口接入 API Sol 时，将以下 `workbuddy` 对象写入完整的协调配置，按上方普通用户注册流程应用并载入。显式 WorkBuddy DSF 和模式 2 的实际峰时派发均可由这一连接执行。API 沿用本机项目 JSON 和工具实现，本次目录与权限还受协调器工作区和只读上限约束。 [项目配置](workbuddy-project-entry.md#项目配置)
+首次将项目入口接入 API Sol 时，将以下 `workbuddy` 对象写入完整的协调配置，按上方普通用户注册流程应用并载入。显式 WorkBuddy DSF 和模式 2 的实际峰时派发均可由这一连接执行；它不是全新默认底层。API 沿用本机项目 JSON 和工具实现，本次目录与权限还受协调器工作区和只读上限约束。 [项目配置](workbuddy-project-entry.md#项目配置)
 
 ```json
 {
   "workbuddy": {
-    "project_config": "D:\\ai-rule-state\\workbuddy-project.local.json"
+    "project_config": "<absolute-state-root>/workbuddy-project.local.json"
   }
 }
 ```
 
-本机项目入口已加载后，同一批准范围内换课题、论文、数据或实验脚本时，仅按任务交接输入及适用范围。协调器沿用已有项目及授权，任务范围可收窄。 [WorkBuddy 工具参数](../skills/multi-agent-dispatch/references/workbuddy.md#项目入口)
+把 `<absolute-state-root>` 替换为实际的获准绝对目录。本机项目入口已加载后，同一批准范围内换课题、论文、数据或实验脚本时，仅按任务交接输入及适用范围。协调器沿用已有项目及授权，任务范围可收窄。 [WorkBuddy 工具参数](../skills/multi-agent-dispatch/references/workbuddy.md#项目入口)
 
 ### 已有定制入口
 
@@ -157,18 +171,20 @@ if ($LASTEXITCODE -ne 0) { throw 'WorkBuddy SDK 安装失败' }
 ```json
 {
   "workbuddy": {
-    "command": "C:\\Program Files\\nodejs\\node.exe",
-    "args": ["D:\\WorkBuddyBridge\\server.mjs"],
-    "cwd": "D:\\WorkBuddyBridge",
+    "command": "<absolute-node-executable>",
+    "args": ["<absolute-bridge-entry>"],
+    "cwd": "<absolute-bridge-directory>",
     "arguments": {
       "task": "实际任务参数名",
       "cwd": "实际目录参数名",
       "profile": "实际权限参数名"
     },
-    "profiles": { "read-only": "actual-authorized-profile" }
+    "profiles": { "read-only": "<authorized-profile>" }
   }
 }
 ```
+
+把占位符替换为已核实的实际绝对路径、参数名和 profile。
 
 定制连接使用固定 `WB_MODEL=deepseek-v4-flash` 与 `WB_SKIP_PERMISSIONS=false`。状态默认字段是 `ready`、`model`，结果默认字段是 `status`、`model`、`task_id`、`session_id`、`answer`，可用 `status_fields` 和 `result_fields` 匹配原桥。可通过 `env_vars` 传递所需非 OpenAI 环境变量名称，通过 `arguments.session` 映射已验证的续跑参数。配置已有获准工作区可写能力时，使用对应的 `workspace-write` profile。该定制适配器使用默认能力及 profile，显式结构化文件或命令范围由项目入口处理。
 

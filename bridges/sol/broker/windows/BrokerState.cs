@@ -58,11 +58,14 @@ namespace AiRule.Sol.Windows
             lock (gate) AtomicWrite("credential.dpapi", Protect(key));
         }
 
-        internal bool Reserve(DateTime utc)
+        internal bool Reserve(DateTime utc, int requestsPerHour)
         {
+            if (requestsPerHour < 1 || requestsPerHour > Protocol.MaxCallsPerHour) throw new InvalidDataException();
             lock (gate)
             {
-                byte[] previous = ReadOptional("rate.bin", Protocol.CallsPerHour * sizeof(long)) ?? new byte[0];
+                // Read the full supported bound so a later increase never hides earlier records
+                // behind a shorter file. The active limit is applied to the parsed rolling window.
+                byte[] previous = ReadOptional("rate.bin", Protocol.MaxCallsPerHour * sizeof(long)) ?? new byte[0];
                 if (previous.Length % sizeof(long) != 0) throw new InvalidDataException();
                 long last = 0;
                 long cutoff = utc.Subtract(TimeSpan.FromHours(1)).Ticks;
@@ -74,7 +77,7 @@ namespace AiRule.Sol.Windows
                     if (stamp > cutoff) times.Add(stamp);
                     last = stamp;
                 }
-                if (times.Count >= Protocol.CallsPerHour) return false;
+                if (times.Count >= requestsPerHour) return false;
                 times.Add(Math.Max(last, utc.Ticks));
                 AtomicWrite("rate.bin", times.SelectMany(BitConverter.GetBytes).ToArray());
                 return true;

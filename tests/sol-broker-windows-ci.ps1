@@ -223,8 +223,8 @@ function Assert-Status([string]$Step, $Reply, [bool]$Ready) {
         throw "$Step was declined ($code)."
     }
     if ($envelope.status -ne 200 -or $envelope.body.ready -ne $Ready -or $envelope.body.model -ne 'gpt-6.2-sol' -or
-        $envelope.body.reasoning_effort -ne 'max') {
-        throw "$Step returned inconsistent status (ready: $($envelope.body.ready -eq $true), expected: $Ready)."
+        $envelope.body.reasoning_effort -ne 'max' -or $envelope.body.requests_per_hour -ne 100) {
+        throw "$Step returned inconsistent status (ready: $($envelope.body.ready -eq $true), expected: $Ready; quota: $($envelope.body.requests_per_hour), expected: 100)."
     }
     Write-Output "$Step passed."
 }
@@ -291,7 +291,11 @@ try {
     $installResult = Invoke-ReviewedElevation $encoded
     if ($installResult.Status -ne 0) { throw "The protected broker install failed: $($installResult.Output)" }
     $installed = $true
-    Write-Output 'Broker installation from protected staged source passed.'
+    $freshPolicy = Get-Content -LiteralPath (Join-Path $root 'policy.json') -Raw | ConvertFrom-Json
+    if ($freshPolicy.requests_per_hour -ne 100) {
+        throw "A fresh protected installation did not write requests_per_hour=100 (actual: $($freshPolicy.requests_per_hour))."
+    }
+    Write-Output 'Broker installation from protected staged source passed with explicit requests_per_hour=100.'
     $statusJson = '{"op":"status"}'
     Assert-Status 'Authorized native status before enrollment' (Invoke-TestUser $allowed $exe 'client' $statusJson) $false
     Assert-Status 'Authorized Node status before enrollment' (Invoke-TestUser $allowed $node ('"{0}"' -f $nodeFixture)) $false

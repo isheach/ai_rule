@@ -10,6 +10,7 @@ import { DSH_SCOPE_DESCRIPTION, PreAdmissionRejection, RoutingConflictError } fr
 import { redact } from '../dsh/core.mjs';
 import { workBuddyDispatchTools, WORKBUDDY_FAILURE } from '../workbuddy/dispatch.mjs';
 import { DSH_TIMEOUT_MS, WAIT_MS, preferRun, waitForExisting } from '../task-lifecycle.mjs';
+import { PURPOSES, hostHandoff, resolveDispatch } from '../dispatch/policy.mjs';
 
 const FAILURE = new Set([...WORKBUDDY_FAILURE, 'schedule_stopped', 'unknown', 'not_accepted']);
 const safeText = value => redact(value).replace(/[A-Za-z]:\\[^\s"']+/g, '<local-path>');
@@ -63,7 +64,9 @@ const taskProperties = {
       }
     }
   },
-  commands: { type: 'array', maxItems: 32, uniqueItems: true, items: { type: 'string' } }
+  commands: { type: 'array', maxItems: 32, uniqueItems: true, items: { type: 'string' } },
+  purpose: { type: 'string', enum: PURPOSES, description: 'Explicit task purpose. Omitted means general; prompt keywords never select a purpose.' },
+  backend: { type: 'string', enum: ['DSH', 'WorkBuddy DSF', 'Terra'], description: 'Explicit supported backend. Omit for the purpose default (DSH or Terra).' }
 };
 const tools = [
   {
@@ -81,6 +84,15 @@ const tools = [
       properties: { context: contextProperty, enabled: { type: 'boolean' }, scheduleMode: scheduleModeProperty }
     },
     annotations: { readOnlyHint: false }
+  },
+  {
+    name: 'resolve_layer_dispatch',
+    description: 'Resolve the layered route for this verified root without launching a model. General work -> gpt-6.2-sol max; specialist work -> gpt-6.1-terra max.',
+    inputSchema: {
+      type: 'object', additionalProperties: false, required: ['context'],
+      properties: { context: contextProperty, purpose: { type: 'string', enum: PURPOSES }, backend: { type: 'string', enum: ['DSH', 'WorkBuddy DSF', 'Terra'] } }
+    },
+    annotations: { readOnlyHint: true }
   },
   {
     name: 'start_pool_task',
@@ -156,6 +168,13 @@ export async function startPoolServer({
     if (args.context !== undefined) rootId = contextFor(args.context).rootId;
     if (name === 'get_pool_status') return service.status(rootId);
     if (!rootId) throw Error('A verified root context is required.');
+    if (name === 'resolve_layer_dispatch') {
+      return resolveDispatch({
+        source: 'subscription',
+        ...(args.purpose === undefined ? {} : { purpose: args.purpose }),
+        ...(args.backend === undefined ? {} : { backend: args.backend })
+      });
+    }
     if (name === 'set_pool_schedule') {
       if (args.scheduleMode === undefined && args.enabled === undefined) throw Error('scheduleMode or enabled is required.');
       return service.setSchedule(rootId, selectScheduleMode(args.scheduleMode, args.enabled));
@@ -170,6 +189,21 @@ export async function startPoolServer({
     if (name === 'cancel_pool_task') return service.cancel(rootId, { idempotencyKey: args.idempotencyKey, taskId: args.taskId });
     const task = { ...args };
     delete task.context;
+    const purpose = task.purpose;
+    const backend = task.backend;
+    delete task.purpose;
+    delete task.backend;
+    if (name === 'start_pool_task' || name === 'run_pool_task') {
+      const plan = resolveDispatch({
+        source: 'subscription',
+        ...(purpose === undefined ? {} : { purpose }),
+        ...(backend === undefined ? {} : { backend })
+      });
+      // This subscription entry executes the default DSH layer only. Native
+      // Terra and an explicitly selected WorkBuddy backend are handed to the
+      // host's real entries; they are never silently run as DSH.
+      if (plan.layer !== 'coordinator' || plan.executor.backend !== 'dsh') return hostHandoff(plan);
+    }
     if (name === 'start_pool_task') {
       const result = await service.submit(rootId, task);
       if (result.task_id && !result.replayed && !result.deduplicated) inFlight.set(requestId, { rootId, taskId: result.task_id, cancellable: true });

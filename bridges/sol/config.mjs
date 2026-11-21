@@ -11,7 +11,7 @@ import { DSH_TIMEOUT_MS } from '../task-lifecycle.mjs';
 export const SERVICE = 'sol-coordinator';
 export const CoordinatorMode = Object.freeze({ SUBSCRIPTION: 'subscription', API: 'api' });
 export const COORDINATOR_MODES = Object.freeze(Object.values(CoordinatorMode));
-export const EXECUTION_BACKENDS = Object.freeze(['DSH', 'WorkBuddy DSF', 'HY4', 'A']);
+export const EXECUTION_BACKENDS = Object.freeze(['DSH', 'WorkBuddy DSF', 'Terra', 'HY4', 'A']);
 export const EXECUTION_PERMISSIONS = Object.freeze(['read-only', 'workspace-write']);
 export const SAFE_KEY = /^[A-Za-z0-9_.:-]{1,100}$/;
 export const SAFE_ID = /^[A-Za-z0-9_.:@/-]{1,160}$/;

@@ -1,5 +1,7 @@
-<!-- ai-rule-managed: 2026-11-21.unified-dispatch-r2 -->
+<!-- ai-rule-managed: 2026-11-21.layered-dispatch-r1 -->
 # DSH 派发与日程
+
+DSH 是全新会话的默认底层：GPT-6.2 Sol Max 协调，OpenCode Go DSF 执行。A 是原生 Sol 的显式模式；WorkBuddy DSF 是另一个显式底层，仅在用户选择或既有模式 2 峰时交接时使用，不是全新默认或自动回退。
 
 ## 选择入口
 

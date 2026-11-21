@@ -1,5 +1,7 @@
-<!-- ai-rule-managed: 2026-11-21.unified-dispatch-r2 -->
+<!-- ai-rule-managed: 2026-11-21.layered-dispatch-r1 -->
 # WorkBuddy DSF
+
+WorkBuddy DSF 是底层显式替代，不是全新默认；默认底层是 DSH/OpenCode Go `deepseek-v4.1-flash`。这里固定使用 `deepseek-v4-flash`，不要与 OpenCode Go 的路由混用。只有用户明确选择 WorkBuddy DSF，或既有模式 2 的实际峰时交接，才进入本入口；Terra 专家任务不因本入口可用而改派 WorkBuddy。
 
 订阅 Sol 使用宿主加载的 `deepseek-v4-flash-workbuddy`。API Sol 使用本机协调配置所选的 WorkBuddy 连接。项目入口通过 `workbuddy.project_config` 指向同一本机项目 JSON，可直接复用项目授权。API 交接还须符合协调器配置的工作区和权限上限。
 

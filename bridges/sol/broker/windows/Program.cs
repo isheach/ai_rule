@@ -324,7 +324,7 @@ namespace AiRule.Sol.Windows
                     key = state.Key();
                     if (status) return Protocol.Success(policy.Status(key != null));
                     if (key == null) return Protocol.Error("BROKER_CREDENTIAL_MISSING");
-                    if (!state.Reserve(DateTime.UtcNow)) return Protocol.Error("BROKER_RATE_LIMITED");
+                    if (!state.Reserve(DateTime.UtcNow, policy.RequestsPerHour)) return Protocol.Error("BROKER_RATE_LIMITED");
                     state.Audit("response", "reserved");
                 }
                 catch (Exception) { return Protocol.Error("BROKER_STORAGE_UNAVAILABLE"); }

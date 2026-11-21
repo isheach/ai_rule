@@ -15,8 +15,36 @@ const repo = path.resolve(path.dirname(fileURLToPath(import.meta.url)), '..');
 const bootstrapPath = 'scripts/sol-broker-elevated.ps1';
 const brokerDirectory = 'bridges/sol/broker/windows';
 const brokerFiles = ['install.ps1', 'build.ps1', 'Protocol.cs', 'WindowsPipe.cs', 'BrokerState.cs', 'Upstream.cs', 'Program.cs'];
+const maxRequestsPerHour = 1000;
+export const NEW_INSTALL_REQUESTS_PER_HOUR = 100;
+export const LEGACY_REQUESTS_PER_HOUR = 24;
+
+export function installQuotaPreview() {
+  return {
+    field: 'requests_per_hour',
+    new_protected_install: NEW_INSTALL_REQUESTS_PER_HOUR,
+    legacy_missing_field: LEGACY_REQUESTS_PER_HOUR,
+    existing_explicit: 'preserved unless an explicitly requested installed-broker quota upgrade succeeds',
+    explicit_upgrade: '-EnableTerraApi -RequestsPerHour <1..1000> -Apply'
+  };
+}
 
 function hash(data) { return createHash('sha256').update(data).digest('hex'); }
+
+function parseRequestsPerHour(value) {
+  if (value === undefined) return undefined;
+  if (!/^[1-9][0-9]*$/.test(value)) throw Error('The hourly quota must be a positive integer.');
+  const number = Number(value);
+  if (!Number.isSafeInteger(number) || number > maxRequestsPerHour) {
+    throw Error(`The hourly quota must not exceed ${maxRequestsPerHour}.`);
+  }
+  return number;
+}
+
+export function brokerBundle(sources) {
+  return Buffer.from(JSON.stringify(Object.fromEntries(brokerFiles.map(name => [name,
+    sources.get(`${brokerDirectory}/${name}`).toString('base64')]))));
+}
 
 function printableJson(value, indent) {
   // Windows PowerShell 5.1 may decode native stdout using an OEM code page.
@@ -106,18 +134,33 @@ export function workbuddySdkStatus(configured, directory = path.join(repo, 'brid
 function quotePowerShell(value) { return `'${value.replaceAll("'", "''")}'`; }
 
 export function prepareElevation(sources, options) {
-  const bundle = Buffer.from(JSON.stringify(Object.fromEntries(brokerFiles.map(name => [name,
-    sources.get(`${brokerDirectory}/${name}`).toString('base64')]))));
-  const args = { BundlePath: options.bundlePath, BundleSha256: hash(bundle), ClientSid: options.clientSid,
-    Model: options.model, ReasoningEffort: options.effort };
-  if (options.project) args.ProjectId = options.project;
-  if (options.organization) args.OrganizationId = options.organization;
+  if (options.requestsPerHour !== undefined
+    && (!Number.isInteger(options.requestsPerHour) || options.requestsPerHour < 1 || options.requestsPerHour > maxRequestsPerHour)) {
+    throw Error(`The hourly quota must be an integer from 1 to ${maxRequestsPerHour}.`);
+  }
+  const bundle = brokerBundle(sources);
+  let args;
+  let switches;
+  if (options.enableTerraApi) {
+    if (options.action || options.setKey) throw Error('The Terra API upgrade is a separate elevation action.');
+    args = { BundlePath: options.bundlePath, BundleSha256: hash(bundle) };
+    const quota = options.requestsPerHour === undefined ? '' : ` -RequestsPerHour ${options.requestsPerHour}`;
+    switches = `-EnableTerraApi${quota}${options.allowBriefRestart === true ? ' -AllowBriefRestart' : ''}`;
+  } else {
+    if (options.allowBriefRestart) throw Error('-AllowBriefRestart is accepted only for the reviewed Terra API elevation.');
+    if (options.requestsPerHour !== undefined) throw Error('-RequestsPerHour is accepted only for the reviewed installed-broker quota elevation.');
+    args = { BundlePath: options.bundlePath, BundleSha256: hash(bundle), ClientSid: options.clientSid,
+      Model: options.model, ReasoningEffort: options.effort };
+    if (options.project) args.ProjectId = options.project;
+    if (options.organization) args.OrganizationId = options.organization;
+    switches = [options.action === 'Install' ? '-Install' : '', options.setKey ? '-SetKey' : ''].filter(Boolean).join(' ');
+  }
   const values = Object.entries(args).map(([name, value]) => `-${name} ${quotePowerShell(value)}`).join(' ');
   const script = sources.get(bootstrapPath).toString('utf8').replace(/^\uFEFF/, '');
-  const switches = [options.action === 'Install' ? '-Install' : '', options.setKey ? '-SetKey' : ''].filter(Boolean).join(' ');
+  const invocation = `${values} ${switches}`.trim();
   const command = `try { & {
 ${script}
-} ${values} ${switches} } catch {
+} ${invocation} } catch {
     [Console]::Error.WriteLine($_.Exception.Message)
     if ([Environment]::UserInteractive -and -not [Console]::IsInputRedirected -and -not [Console]::IsOutputRedirected -and
         [Environment]::GetCommandLineArgs() -notcontains '-NonInteractive') {
@@ -128,11 +171,15 @@ ${script}
 }`;
   const encodedCommand = Buffer.from(command, 'utf16le').toString('base64');
   if (encodedCommand.length > 30000) throw Error('The reviewed Windows elevation command exceeds its size limit.');
-  return { bundle, encodedCommand };
+  return { bundle, encodedCommand, invocation };
 }
 
-const options = Object.fromEntries(['revision', 'git', 'codex-home', 'config', 'workspace', 'model', 'effort', 'dsh-entry',
-  'fingerprint', 'bundle-path', 'client-sid', 'project', 'organization', 'action', 'program-files'].map(name => [name, { type: 'string' }]));
+const options = {
+  ...Object.fromEntries(['revision', 'git', 'codex-home', 'config', 'workspace', 'model', 'effort', 'dsh-entry',
+    'fingerprint', 'bundle-path', 'client-sid', 'project', 'organization', 'action', 'program-files', 'requests-per-hour']
+    .map(name => [name, { type: 'string' }])),
+  'allow-brief-restart': { type: 'boolean' }
+};
 
 async function main(args) {
   if (process.platform !== 'win32') {
@@ -140,7 +187,54 @@ async function main(args) {
   }
   if (Number(process.versions.node.split('.')[0]) < 22) throw Error('Windows Sol setup requires Node.js 22 or later.');
   const { values: opts, positionals: [mode, ...extra] } = parseArgs({ args, options, allowPositionals: true });
-  if (extra.length || !['plan', 'elevation', 'apply'].includes(mode)) throw Error('Use the reviewed scripts/setup-sol.ps1 entry point.');
+  const terraModes = ['terra-plan', 'terra-elevation'];
+  if (extra.length || !['plan', 'elevation', 'apply', ...terraModes].includes(mode)) {
+    throw Error('Use the reviewed scripts/setup-sol.ps1 entry point.');
+  }
+  if (opts['allow-brief-restart'] === true && mode !== 'terra-elevation') {
+    throw Error('-AllowBriefRestart is accepted only with the reviewed Terra API elevation; it is not part of plan, normal elevation, apply or install.');
+  }
+  const requestsPerHour = parseRequestsPerHour(opts['requests-per-hour']);
+  if (requestsPerHour !== undefined && !terraModes.includes(mode)) {
+    throw Error('-RequestsPerHour is accepted only with the reviewed Terra API elevation; it is not part of plan, normal elevation, apply or install.');
+  }
+  if (terraModes.includes(mode)) {
+    for (const name of ['codex-home', 'config', 'workspace', 'model', 'effort', 'dsh-entry', 'fingerprint',
+      'client-sid', 'project', 'organization', 'action']) {
+      if (opts[name] !== undefined) throw Error(`The Terra API upgrade does not accept --${name}.`);
+    }
+    if (!path.isAbsolute(opts['program-files'] ?? '')) throw Error('The target Windows Program Files directory is unavailable.');
+    if (mode === 'terra-plan' && opts['bundle-path'] !== undefined) throw Error('The Terra API preview does not write a source bundle.');
+    if (mode === 'terra-elevation' && !path.isAbsolute(opts['bundle-path'] ?? '')) {
+      throw Error('The Terra API elevation requires an absolute protected transfer path.');
+    }
+    const { revision, sources } = verifyCheckout(opts.revision, opts.git);
+    if (mode === 'terra-plan') {
+      const bundle = brokerBundle(sources);
+      console.log(printableJson({ status: {
+        operation: 'EnableTerraApi', revision, install_root: path.join(opts['program-files'], 'AiRuleSolBroker'),
+        source_bundle_sha256: hash(bundle), source_files: brokerFiles,
+        changed_files: ['SolBroker.exe', 'policy.json'], service_registration_changed: false,
+        credential_accessed: false, state_accessed: false, preview_side_effects: false,
+        brief_restart: { supported: true, consent_switch: '-AllowBriefRestart', accepted_only_with: '-EnableTerraApi -Apply',
+          default: 'refuse-running-service', no_atomic_drain: true, maintenance_window_required: true },
+        quota: {
+          requested: requestsPerHour ?? null,
+          ...installQuotaPreview(), maximum: maxRequestsPerHour, increases_only: true
+        },
+        preserves: ['caller_sid', 'model', 'reasoning_effort', 'project', 'organization'],
+        adds: { allow_terra_api: true, ...(requestsPerHour === undefined ? {} : { requests_per_hour: requestsPerHour }) }
+      } }, 2));
+      return;
+    }
+    const { bundle, encodedCommand } = prepareElevation(sources, {
+      bundlePath: opts['bundle-path'], enableTerraApi: true, requestsPerHour,
+      allowBriefRestart: opts['allow-brief-restart'] === true
+    });
+    fs.writeFileSync(opts['bundle-path'], bundle, { flag: 'wx' });
+    console.log(encodedCommand);
+    return;
+  }
   const { revision, sources } = verifyCheckout(opts.revision, opts.git);
   const plan = deploymentPlan(opts);
   const { openai, workspaceRoot, pool, workbuddy } = plan.solConfig;
@@ -168,7 +262,8 @@ async function main(args) {
   const result = {
     revision, node: process.versions.node, codex_home: plan.codexHome, coordinator_config: plan.solCoordinatorConfig,
     workspace_root: workspaceRoot, pool_allow_write: pool.allow_write, model: openai.model, reasoning_effort: openai.reasoning_effort,
-    workbuddy_configured: Boolean(workbuddy), workbuddy_sdk: workbuddySdk, broker, live_model_call_performed: false
+    workbuddy_configured: Boolean(workbuddy), workbuddy_sdk: workbuddySdk, broker, broker_quota: installQuotaPreview(),
+    live_model_call_performed: false
   };
   if (mode === 'plan') {
     console.log(printableJson({ status: result, fingerprint: plan.fingerprint }));
