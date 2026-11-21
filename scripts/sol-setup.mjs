@@ -153,7 +153,9 @@ export function prepareElevation(sources, options) {
       Model: options.model, ReasoningEffort: options.effort };
     if (options.project) args.ProjectId = options.project;
     if (options.organization) args.OrganizationId = options.organization;
-    switches = [options.action === 'Install' ? '-Install' : '', options.setKey ? '-SetKey' : ''].filter(Boolean).join(' ');
+    const setKey = options.action === 'Enroll' || options.setKey === true;
+    switches = [options.action === 'Install' ? '-Install' : '', setKey ? '-SetKey' : '',
+      options.action === 'Enroll' ? '-ValidateExisting' : ''].filter(Boolean).join(' ');
   }
   const values = Object.entries(args).map(([name, value]) => `-${name} ${quotePowerShell(value)}`).join(' ');
   const script = sources.get(bootstrapPath).toString('utf8').replace(/^\uFEFF/, '');

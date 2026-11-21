@@ -25,7 +25,7 @@ function sources() {
   return map;
 }
 
-function elevation(action) {
+function elevation(action, setKey = true) {
   return prepareElevation(sources(), {
     bundlePath: 'C:\\Temp\\broker-source.json',
     clientSid: 'S-1-5-21-1-2-3-4',
@@ -34,7 +34,7 @@ function elevation(action) {
     project: 'proj_ci_example',
     organization: 'org-ci-example',
     action,
-    setKey: true
+    setKey
   });
 }
 
@@ -62,6 +62,7 @@ function bind(invocation) {
     '    ParameterSetName = $PSCmdlet.ParameterSetName',
     '    Install = [bool]$Install',
     '    SetKey = [bool]$SetKey',
+    '    ValidateExisting = [bool]$ValidateExisting',
     '    EnableTerraApi = [bool]$EnableTerraApi',
     '}',
     '$result | ConvertTo-Json -Compress',
@@ -77,20 +78,26 @@ function bind(invocation) {
   }
 }
 
-test('existing-broker elevation omits -Install and keeps -SetKey in its own set', () => {
+test('existing-broker elevation omits -Install and selects its set explicitly', () => {
   const enroll = elevation('Enroll');
-  assert.match(enroll.invocation, /-SetKey$/);
+  assert.match(enroll.invocation, /-SetKey -ValidateExisting$/);
   assert.doesNotMatch(enroll.invocation, /(?:^|\s)-Install(?:\s|$)/);
   assert.match(elevation('Install').invocation, /-Install -SetKey$/);
+  assert.match(elevation('Install', false).invocation, /-Install$/);
 
+  const validate = switchParameters('ValidateExisting');
+  assert.match(validate, /ParameterSetName = 'SetKey'/);
+  assert.match(validate, /Mandatory/);
+  assert.doesNotMatch(validate, /ParameterSetName = 'Install'\)/);
+
+  // -SetKey remains valid for the install-then-enroll path. -ValidateExisting
+  // is the selector that keeps the existing-broker call out of Install.
   const setKey = switchParameters('SetKey');
+  assert.match(setKey, /ParameterSetName = 'Install'\)/);
   assert.match(setKey, /ParameterSetName = 'SetKey'/);
-  assert.match(setKey, /ParameterSetName = 'InstallSetKey'/);
-  assert.doesNotMatch(setKey, /ParameterSetName = 'Install'\)/);
 
   const install = switchParameters('Install');
   assert.match(install, /ParameterSetName = 'Install'\)/);
-  assert.match(install, /ParameterSetName = 'InstallSetKey'/);
 });
 
 test('Windows PowerShell binds the real existing and fresh elevation call shapes', (t) => {
@@ -98,11 +105,12 @@ test('Windows PowerShell binds the real existing and fresh elevation call shapes
     t.skip('Windows PowerShell 5.1 is not available on this host.');
     return;
   }
-  for (const [name, action, expected] of [
-    ['existing', 'Enroll', { ParameterSetName: 'SetKey', Install: false, SetKey: true, EnableTerraApi: false }],
-    ['fresh', 'Install', { ParameterSetName: 'InstallSetKey', Install: true, SetKey: true, EnableTerraApi: false }]
+  for (const [name, request, expected] of [
+    ['existing', elevation('Enroll'), { ParameterSetName: 'SetKey', Install: false, SetKey: true, ValidateExisting: true, EnableTerraApi: false }],
+    ['fresh with enrollment', elevation('Install'), { ParameterSetName: 'Install', Install: true, SetKey: true, ValidateExisting: false, EnableTerraApi: false }],
+    ['fresh install only', elevation('Install', false), { ParameterSetName: 'Install', Install: true, SetKey: false, ValidateExisting: false, EnableTerraApi: false }]
   ]) {
-    const result = bind(elevation(action).invocation);
+    const result = bind(request.invocation);
     assert.equal(result.error, undefined, `${name}: ${result.error?.message ?? ''}`);
     assert.equal(result.status, 0, `${name}: ${result.stderr || result.stdout}`);
     assert.deepEqual(JSON.parse(result.stdout.trim()), expected, name);

@@ -1,34 +1,29 @@
-# -SetKey is exclusive to the existing-key and combined install sets so a
-# -SetKey-only invocation cannot fall back to the Install parameter set.
+# -ValidateExisting is exclusive to the existing-broker set so that its
+# -SetKey invocation cannot fall back to the Install parameter set.
 [CmdletBinding(DefaultParameterSetName = 'Install')]
 param(
     [Parameter(Mandatory)][string]$BundlePath,
     [Parameter(Mandatory)][ValidatePattern('\A[0-9a-f]{64}\z')][string]$BundleSha256,
     [Parameter(Mandatory, ParameterSetName = 'Install')]
     [Parameter(Mandatory, ParameterSetName = 'SetKey')]
-    [Parameter(Mandatory, ParameterSetName = 'InstallSetKey')]
     [ValidatePattern('\AS-1-(?:5-21|12-1)(?:-[0-9]+){4}\z')][string]$ClientSid,
     [Parameter(Mandatory, ParameterSetName = 'Install')]
     [Parameter(Mandatory, ParameterSetName = 'SetKey')]
-    [Parameter(Mandatory, ParameterSetName = 'InstallSetKey')]
     [ValidatePattern('\A[a-z0-9][a-z0-9_.:-]{0,99}\z')][string]$Model,
     [Parameter(Mandatory, ParameterSetName = 'Install')]
     [Parameter(Mandatory, ParameterSetName = 'SetKey')]
-    [Parameter(Mandatory, ParameterSetName = 'InstallSetKey')]
     [ValidateSet('none', 'minimal', 'low', 'medium', 'high', 'xhigh', 'max')][string]$ReasoningEffort,
     [Parameter(ParameterSetName = 'Install')]
     [Parameter(ParameterSetName = 'SetKey')]
-    [Parameter(ParameterSetName = 'InstallSetKey')]
     [ValidatePattern('\Aproj_[A-Za-z0-9_-]{1,140}\z')][string]$ProjectId,
     [Parameter(ParameterSetName = 'Install')]
     [Parameter(ParameterSetName = 'SetKey')]
-    [Parameter(ParameterSetName = 'InstallSetKey')]
     [ValidatePattern('\Aorg[-_][A-Za-z0-9_-]{1,140}\z')][string]$OrganizationId,
-    [Parameter(Mandatory, ParameterSetName = 'Install')]
-    [Parameter(Mandatory, ParameterSetName = 'InstallSetKey')][switch]$Install,
+    [Parameter(Mandatory, ParameterSetName = 'Install')][switch]$Install,
+    [Parameter(ParameterSetName = 'Install')]
     [Parameter(Mandatory, ParameterSetName = 'SetKey')]
-    [Parameter(Mandatory, ParameterSetName = 'InstallSetKey')]
     [switch]$SetKey,
+    [Parameter(Mandatory, ParameterSetName = 'SetKey')][switch]$ValidateExisting,
     [Parameter(Mandatory, ParameterSetName = 'EnableTerraApi')][switch]$EnableTerraApi,
     [Parameter(ParameterSetName = 'EnableTerraApi')][ValidateRange(1, 1000)][int]$RequestsPerHour,
     [Parameter(ParameterSetName = 'EnableTerraApi')][switch]$AllowBriefRestart
