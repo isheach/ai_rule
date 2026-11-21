@@ -1,4 +1,5 @@
 import fs from 'node:fs';
+import { openAIEnvName } from '../executor-environment.mjs';
 import path from 'node:path';
 import { runtimeBase } from '../dsh/core.mjs';
 import { contextDirFor } from '../pool/context.mjs';
@@ -10,14 +11,13 @@ import { DSH_TIMEOUT_MS } from '../task-lifecycle.mjs';
 export const SERVICE = 'sol-coordinator';
 export const CoordinatorMode = Object.freeze({ SUBSCRIPTION: 'subscription', API: 'api' });
 export const COORDINATOR_MODES = Object.freeze(Object.values(CoordinatorMode));
-export const EXECUTION_BACKENDS = Object.freeze(['DSH', 'WorkBuddy DSF', 'HY4', 'A']);
+export const EXECUTION_BACKENDS = Object.freeze(['DSH', 'WorkBuddy DSF', 'Terra', 'HY4', 'A']);
 export const EXECUTION_PERMISSIONS = Object.freeze(['read-only', 'workspace-write']);
 export const SAFE_KEY = /^[A-Za-z0-9_.:-]{1,100}$/;
 export const SAFE_ID = /^[A-Za-z0-9_.:@/-]{1,160}$/;
 const ENV = /^[A-Z][A-Z0-9_]{1,99}$/;
 const MODEL = /^[a-z0-9][a-z0-9_.:-]{0,99}$/;
 const FIELD = /^[A-Za-z_][A-Za-z0-9_]{0,79}$/;
-const OPENAI_ENV = /^(?:(?:.*_)?OPENAI_|CODEX_API_KEY$)/i;
 const LIMITS = {
   max_responses: [8, 2, 20], max_delegations: [3, 1, 8], max_output_tokens: [16000, 256, 64000],
   max_total_tokens: [60000, 1000, 500000], max_input_bytes: [192000, 16000, 768000],
@@ -112,7 +112,7 @@ function loadWorkBuddy(value, reservedEnv) {
   }
   const envVars = wb.env_vars ?? [];
   if (!Array.isArray(envVars) || envVars.length > 24 || new Set(envVars).size !== envVars.length
-    || envVars.some(name => typeof name !== 'string' || !ENV.test(name) || reservedEnv.includes(name) || OPENAI_ENV.test(name)
+    || envVars.some(name => typeof name !== 'string' || !ENV.test(name) || reservedEnv.includes(name) || openAIEnvName(name)
       || /^(?:NODE_OPTIONS|ELECTRON_RUN_AS_NODE|WB_MODEL)$|(?:SKIP|BYPASS|ALLOW_ALL|UNSAFE|PERMISSION)/i.test(name))) {
     throw Error('workbuddy.env_vars contains an unsupported reference.');
   }
@@ -139,13 +139,20 @@ export function validateSolConfig(value, { poolConfig } = {}) {
   if (protectedPaths.some(dir => contains(dir, stateDir) || contains(stateDir, dir))) {
     throw Error('state_dir must be physically disjoint from the workspace, pool, pool contexts and legacy DSH runtimes.');
   }
-  const openai = object(value.openai, ['model', 'reasoning_effort', 'api_key_env', 'project_env', 'organization_env', 'response_model'], 'openai');
+  const openai = object(value.openai, ['model', 'reasoning_effort', 'credential_source', 'api_key_env', 'project_env', 'organization_env', 'response_model'], 'openai');
   if (typeof openai.model !== 'string' || !MODEL.test(openai.model) || (openai.response_model !== undefined
     && (typeof openai.response_model !== 'string' || !MODEL.test(openai.response_model)))) throw Error('An explicit OpenAI API model ID is required.');
   if (!['none', 'minimal', 'low', 'medium', 'high', 'xhigh', 'max'].includes(openai.reasoning_effort)) throw Error('An explicit OpenAI reasoning_effort is required.');
-  const reservedEnv = [envName(openai.api_key_env, /API_KEY$/, 'openai.api_key_env')];
+  // Legacy files remain readable for subscription and existing task receipts.
+  // Never resolve their environment references, even if those variables exist.
+  const reservedEnv = [];
+  if (openai.api_key_env !== undefined) reservedEnv.push(envName(openai.api_key_env, /API_KEY$/, 'openai.api_key_env'));
   if (openai.project_env !== undefined) reservedEnv.push(envName(openai.project_env, /PROJECT(?:_ID)?$/, 'openai.project_env'));
   if (openai.organization_env !== undefined) reservedEnv.push(envName(openai.organization_env, /(?:ORG|ORGANIZATION)(?:_ID)?$/, 'openai.organization_env'));
+  if (openai.credential_source !== 'windows-broker' && !(reservedEnv.length && openai.credential_source === undefined)) {
+    throw Error('openai.credential_source must be windows-broker.');
+  }
+  if (openai.credential_source && reservedEnv.length) throw Error('Remove legacy OpenAI environment references from the broker configuration.');
   const supplied = object(value.limits ?? {}, Object.keys(LIMITS), 'limits');
   const limits = Object.fromEntries(Object.entries(LIMITS).map(([key, [fallback, min, max]]) => {
     const number = supplied[key] ?? fallback;
@@ -166,13 +173,9 @@ export function loadSolConfig(filename) {
   return validateSolConfig(config);
 }
 
-// The stdio bridge has a process per host connection. Its API credential is
-// captured before any subprocess can inherit this process environment.
-export function openAIEnvironment(config, env = process.env, { remove = false } = {}) {
-  const read = name => name ? env[name] : undefined;
-  const credential = { key: read(config.openai.api_key_env), project: read(config.openai.project_env), organization: read(config.openai.organization_env) };
-  if (remove) for (const name of Object.keys(env)) {
-    if (config.reservedEnv.includes(name.toUpperCase()) || OPENAI_ENV.test(name)) delete env[name];
+// Drop obsolete references at the process boundary without reading their values.
+export function discardLegacyEnvironment(config, env = process.env) {
+  for (const name of Object.keys(env)) {
+    if (config.reservedEnv.includes(name.toUpperCase()) || openAIEnvName(name)) delete env[name];
   }
-  return credential;
 }

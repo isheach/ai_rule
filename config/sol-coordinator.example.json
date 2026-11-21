@@ -4,7 +4,7 @@
   "openai": {
     "model": "gpt-6.2-sol",
     "reasoning_effort": "max",
-    "api_key_env": "SOL_OPENAI_API_KEY"
+    "credential_source": "windows-broker"
   },
   "limits": {
     "max_responses": 8,

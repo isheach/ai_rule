@@ -94,14 +94,51 @@ function validateCalendar(config) {
 }
 
 export function solEnvironmentNames(config) {
-  return [...new Set(['CODEX_HOME', ...config.reservedEnv, ...(config.workbuddy?.envVars ?? [])])];
+  return [...new Set(['CODEX_HOME', ...(config.workbuddy?.envVars ?? [])])];
 }
 
-export function buildSolRegistration({ toml, plannedDsh, codexHome, repo, explicit, workspace, model, effort, dshEntry }) {
+function existingRegistration(filename) {
+  const current = validateCalendar(loadSolConfig(filename));
+  if (current.openai.credential_source === 'windows-broker') return { files: [], filename, config: current };
+  if (current.openai.project_env || current.openai.organization_env) {
+    throw Error('Preserve the existing project/organization in broker installation policy, then replace the legacy openai environment references with credential_source="windows-broker" in the local JSON.');
+  }
+  const value = JSON.parse(fs.readFileSync(filename, 'utf8').replace(/^\uFEFF/, ''));
+  delete value.openai.api_key_env;
+  value.openai.credential_source = 'windows-broker';
+  return { filename, config: validateCalendar(validateSolConfig(value)), files: [{ file: filename, data: JSON.stringify(value, null, 2) + '\n' }] };
+}
+
+export function solSetupInputs({ toml, codexHome, explicit, workspace, model, effort }) {
+  if (explicit) {
+    if (workspace || model || effort) throw Error('Choose either a Sol coordinator config or generation options.');
+    return { solCoordinatorConfig: explicit };
+  }
+  const prior = findMcpRegistration(toml, SOL_SERVER);
+  const args = prior && tomlStringArray(prior, 'args');
+  if (prior && (args?.length !== 3 || args[1] !== '--config' || !path.isAbsolute(args[2]))) {
+    throw Error('The existing sol-coordinator registration needs local review. Supply its absolute config path.');
+  }
+  const filename = args?.[2] ?? path.join(codexHome, 'ai-rule-sol', 'coordinator.local.json');
+  if (prior || fs.existsSync(filename)) {
+    const config = loadSolConfig(filename);
+    if ((workspace && pathKey(existingAbsolute(workspace, '--sol-workspace-root')) !== pathKey(config.workspaceRoot))
+      || (model && model !== config.openai.model) || (effort && effort !== config.openai.reasoning_effort)) {
+      throw Error('The existing Sol config has different choices. Review it locally before changing broker policy or workspace scope.');
+    }
+    return { solCoordinatorConfig: filename };
+  }
+  const pool = standardRegistrationArgs(toml, 'dsh-root-pool', 'pool', ['--config']);
+  if (!workspace && pool) workspace = loadPoolConfig(existingAbsolute(pool.get('--config'), 'Registered pool config')).workspace_root;
+  if (!workspace) throw Error('No existing Sol config or standard DSH root pool determines the project scope. Pass -SolCoordinatorConfig or -SolWorkspaceRoot with an approved absolute path.');
+  return { solWorkspaceRoot: workspace, solModel: model ?? 'gpt-6.2-sol', solReasoningEffort: effort ?? 'max' };
+}
+
+export function buildSolRegistration({ toml, plannedDsh, codexHome, repo, explicit, workspace, model, effort, dshEntry, readOnlyByDefault }) {
   if (explicit) {
     if (workspace || model || effort) throw Error('Choose either --sol-coordinator-config or the three generation options.');
     const filename = existingAbsolute(explicit, '--sol-coordinator-config');
-    return { files: [], filename, config: validateCalendar(loadSolConfig(filename)) };
+    return existingRegistration(filename);
   }
   if (!workspace || !model || !effort) throw Error('Generating a Sol config requires --sol-workspace-root, --sol-model and --sol-reasoning-effort.');
   const workspaceRoot = existingAbsolute(workspace, '--sol-workspace-root');
@@ -113,7 +150,7 @@ export function buildSolRegistration({ toml, plannedDsh, codexHome, repo, explic
     if (current.openai.model !== model || current.openai.reasoning_effort !== effort || pathKey(current.workspaceRoot) !== pathKey(workspaceRoot)) {
       throw Error('The existing Sol config has different choices. Review it locally and use --sol-coordinator-config.');
     }
-    return { files: [], filename, config: current };
+    return existingRegistration(filename);
   }
   const files = [];
   let poolFile, pool;
@@ -138,13 +175,13 @@ export function buildSolRegistration({ toml, plannedDsh, codexHome, repo, explic
     pool = validatePoolConfig({
       pool_root: path.join(solDir, 'pool'), workspace_root: workspaceRoot, dsh_entry: cli.prefix[0],
       schedule_config: legacy?.get('--schedule-config') || path.join(repo, 'config', 'offpeak.schedule.json'),
-      allow_write: !legacy?.has('--read-only')
+      allow_write: legacy ? !legacy.has('--read-only') : !readOnlyByDefault
     });
     files.push({ file: poolFile, data: JSON.stringify(pool, null, 2) + '\n' });
   }
   const value = {
     state_dir: path.join(solDir, 'state'), pool_config: poolFile,
-    openai: { model, reasoning_effort: effort, api_key_env: 'SOL_OPENAI_API_KEY' }
+    openai: { model, reasoning_effort: effort, credential_source: 'windows-broker' }
   };
   const config = validateCalendar(validateSolConfig(value, { poolConfig: pool }));
   files.push({ file: filename, data: JSON.stringify(value, null, 2) + '\n' });
@@ -167,7 +204,7 @@ export function solRegistrationStatus({ managedSection, outside, bridgeEntry }) 
       || pathKey(args[0]) !== pathKey(bridgeEntry) || !fs.existsSync(bridgeEntry)) throw Error('registration');
     const config = validateCalendar(loadSolConfig(args[2]));
     const expectedEnv = solEnvironmentNames(config).sort();
-    const valid = JSON.stringify(env?.sort()) === JSON.stringify(expectedEnv)
+    const valid = config.openai.credential_source === 'windows-broker' && JSON.stringify(env?.sort()) === JSON.stringify(expectedEnv)
       && !hasInlineEnv(managedSection, section, SOL_SERVER) && !/^[\t ]*enabled\s*=\s*false\b/m.test(section);
     return { registered: true, managed: true, structure_valid: valid };
   } catch {

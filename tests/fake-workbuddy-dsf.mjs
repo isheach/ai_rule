@@ -1,5 +1,6 @@
 import { createInterface } from 'node:readline';
 import fs from 'node:fs';
+import { executorProbe } from './sol-executor-probe.mjs';
 
 // This is a fixture-only schema. Production Sol calls the locally installed
 // WorkBuddy tools using their own schema and authorization profile.
@@ -29,7 +30,8 @@ function call({ name, arguments: args = {} }) {
   const session_id = args.resumeSession ?? 'fixture-session-' + runs;
   sessions.add(session_id);
   if (process.env.SOL_TEST_WB_RUNS) fs.appendFileSync(process.env.SOL_TEST_WB_RUNS,
-    JSON.stringify({ session_id, hasOpenAIKey: Boolean(process.env.SOL_OPENAI_API_KEY || process.env.OPENAI_API_KEY) }) + '\n');
+    JSON.stringify({ session_id, hasOpenAIKey: Boolean(process.env.SOL_OPENAI_API_KEY || process.env.OPENAI_API_KEY),
+      ...executorProbe(args.directory, args) }) + '\n');
   return { model, status: 'completed', task_id: 'fixture-task-' + runs, session_id, answer: 'fixture result: ' + args.task };
 }
 

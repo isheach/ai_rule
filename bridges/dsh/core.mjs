@@ -7,6 +7,7 @@ import { normalizeScheduleMode, ScheduleMode, schedulePolicySnapshot, scheduleTa
 import { AdmissionCode, PreAdmissionRejection } from './routing.mjs';
 import { validateWorkBuddyContinuation, WorkBuddyDispatch, WORKBUDDY_DSF } from '../workbuddy/dispatch.mjs';
 import { DSH_TIMEOUT_MS, WAIT_MS, validateWaitMs } from '../task-lifecycle.mjs';
+import { executorEnvironment } from '../executor-environment.mjs';
 
 export const ROUTE = Object.freeze({ provider: 'opencode-go', model: 'deepseek-v4.1-flash', reasoningEffort: 'max' });
 export const VERSION = '0.3.0';
@@ -108,7 +109,7 @@ export function discoverDsh(explicitEntry) {
 }
 function probe(cli, args) {
   const result = spawnSync(cli.command, [...cli.prefix, ...args], {
-    encoding: 'utf8', shell: false, windowsHide: true, timeout: 20000, maxBuffer: 8 * 1024 * 1024
+    env: executorEnvironment(), encoding: 'utf8', shell: false, windowsHide: true, timeout: 20000, maxBuffer: 8 * 1024 * 1024
   });
   if (result.error || result.status !== 0) throw Error(`DSH probe failed: ${redact(result.error?.message || result.stderr || 'nonzero exit').slice(0, 2000)}`);
   return result.stdout;
@@ -166,7 +167,7 @@ function killTree(child) {
   if (!child?.pid) return;
   if (process.platform === 'win32') {
     const exe = path.join(process.env.SystemRoot || 'C:\\Windows', 'System32', 'taskkill.exe');
-    const result = spawnSync(exe, ['/PID', String(child.pid), '/T', '/F'], { windowsHide: true, shell: false, timeout: 10000, stdio: 'ignore' });
+    const result = spawnSync(exe, ['/PID', String(child.pid), '/T', '/F'], { env: executorEnvironment(), windowsHide: true, shell: false, timeout: 10000, stdio: 'ignore' });
     if (result.status !== 0 && child.exitCode === null) child.kill();
   } else {
     try { process.kill(-child.pid, 'SIGKILL'); } catch { try { child.kill('SIGKILL'); } catch {} }
@@ -525,7 +526,7 @@ export class TaskManager {
       this.active = active;
       this.pending.set(id, finished);
       const child = spawn(this.cli.command, [...this.cli.prefix, ...dshArgs(task)], {
-        cwd: task.cwd, shell: false, windowsHide: true, detached: process.platform !== 'win32', stdio: ['pipe', 'pipe', 'pipe']
+        cwd: task.cwd, env: executorEnvironment(), shell: false, windowsHide: true, detached: process.platform !== 'win32', stdio: ['pipe', 'pipe', 'pipe']
       });
       active.child = child;
       record.pid = child.pid || null;

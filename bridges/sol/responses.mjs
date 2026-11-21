@@ -1,7 +1,11 @@
 import { redact } from '../dsh/core.mjs';
 import { SAFE_ID } from './config.mjs';
+import { brokerCall } from './broker.mjs';
 
-const ENDPOINT = 'https://api.openai.com/v1/responses';
+// Only these replies prove no upstream request was admitted. An interrupted
+// client or an unrecognized reply always leaves the usage outcome unknown.
+const UNSENT = new Set(['BROKER_FORBIDDEN', 'BROKER_PROTOCOL', 'BROKER_POLICY_DENIED', 'BROKER_INPUT_LIMIT',
+  'BROKER_CREDENTIAL_MISSING', 'BROKER_RATE_LIMITED', 'BROKER_BUSY', 'BROKER_STORAGE_UNAVAILABLE', 'UPSTREAM_UNSENT']);
 const ID = value => typeof value === 'string' && SAFE_ID.test(value) && redact(value) === value ? value : null;
 const PROBE = {
   type: 'function', name: 'confirm_sol_api', description: 'Confirm the configured model can call a strict function.', strict: true,
@@ -31,88 +35,67 @@ function usageOf(value) {
   };
 }
 
-async function readJson(response, maxBytes = 1_200_000) {
-  const reader = response.body?.getReader();
-  if (!reader) throw Error('Empty Responses API body.');
-  const parts = [];
-  let size = 0;
-  try {
-    for (;;) {
-      const { value, done } = await reader.read();
-      if (done) break;
-      size += value.byteLength;
-      if (size > maxBytes) throw Error('Responses API body exceeds the local limit.');
-      parts.push(Buffer.from(value));
-    }
-    return JSON.parse(Buffer.concat(parts, size).toString('utf8'));
-  } catch (error) {
-    void reader.cancel().catch(() => {});
-    throw error;
-  }
-}
-
 export class ResponsesClient {
-  constructor({ config, credential, fetchImpl = globalThis.fetch }) {
+  constructor({ config, callBroker = brokerCall }) {
     this.config = config.openai;
     this.limits = config.limits;
-    this.credential = credential;
-    this.fetch = fetchImpl;
+    this.callBroker = callBroker;
   }
 
-  get configured() {
-    const { key, project, organization } = this.credential;
-    return typeof key === 'string' && /^[\x21-\x7e]{8,500}$/.test(key)
-      && (!this.config.project_env || Boolean(ID(project))) && (!this.config.organization_env || Boolean(ID(organization)));
+  async readiness() {
+    if (this.config.credential_source !== 'windows-broker') return { ready: false, code: 'SOL_BROKER_MIGRATION_REQUIRED' };
+    try {
+      const reply = await this.callBroker({ op: 'status' }, AbortSignal.timeout(5000));
+      if (reply?.ok === false && UNSENT.has(reply.code)) return { ready: false, code: reply.code };
+      if (reply?.ok === true && reply.status === 200) {
+        if (reply.body?.model !== this.config.model || reply.body?.reasoning_effort !== this.config.reasoning_effort) {
+          return { ready: false, code: 'SOL_BROKER_ROUTE_MISMATCH' };
+        }
+        if (reply.body.ready === true) return { ready: true };
+        return { ready: false, code: 'SOL_BROKER_NOT_READY' };
+      }
+    } catch { /* unavailable or unauthenticated helper */ }
+    return { ready: false, code: 'SOL_BROKER_UNAVAILABLE' };
   }
 
-  sanitize(value) {
-    const key = this.credential.key;
-    const text = String(value);
-    return redact(key && key.length >= 8 ? text.split(key).join('[REDACTED]') : text);
-  }
+  sanitize(value) { return redact(String(value)); }
 
   async request({ input, tools, signal, outputTokens = this.limits.max_output_tokens }) {
-    if (!this.configured) throw new ResponsesError('OPENAI_CREDENTIALS_MISSING', 'The configured OpenAI credential or project/organization environment reference is unavailable.');
+    if (this.config.credential_source !== 'windows-broker') throw new ResponsesError('SOL_BROKER_MIGRATION_REQUIRED', 'Migrate the local Sol configuration before using API Sol.');
     if (signal?.aborted) throw new ResponsesError('COORDINATION_STOPPED', 'Coordination stopped before the next API call.');
-    const { key, project, organization } = this.credential;
     const { model, reasoning_effort: effort, response_model: responseModel = model } = this.config;
-    const body = JSON.stringify({
+    const body = {
       model, store: false, reasoning: { effort }, include: ['reasoning.encrypted_content'],
       input, tools, tool_choice: 'required', parallel_tool_calls: false, max_output_tokens: outputTokens
-    });
-    if (Buffer.byteLength(body) > this.limits.max_input_bytes) {
+    };
+    if (Buffer.byteLength(JSON.stringify(body)) > this.limits.max_input_bytes) {
       throw new ResponsesError('OPENAI_INPUT_LIMIT', 'The next Responses request exceeds the configured input byte limit.');
     }
     const timeout = AbortSignal.timeout(this.limits.api_timeout_ms);
     const requestSignal = signal ? AbortSignal.any([signal, timeout]) : timeout;
-    let response;
-    let result;
+    let reply;
     try {
-      response = await this.fetch(ENDPOINT, {
-        method: 'POST', redirect: 'error', signal: requestSignal,
-        headers: {
-          Authorization: `Bearer ${key}`, 'Content-Type': 'application/json',
-          ...(project ? { 'OpenAI-Project': project } : {}), ...(organization ? { 'OpenAI-Organization': organization } : {})
-        },
-        body
-      });
-      if (response.ok) result = await readJson(response);
-      else {
-        try { result = await readJson(response, 8192); } catch { /* the HTTP status remains authoritative */ }
-      }
+      reply = await this.callBroker({ op: 'response', body }, requestSignal);
+      if (typeof reply?.ok !== 'boolean' || !Number.isInteger(reply.status)) throw Error();
     } catch {
       throw new ResponsesError(requestSignal.aborted ? 'OPENAI_REQUEST_INTERRUPTED' : 'OPENAI_RESPONSE_UNKNOWN',
-        'The OpenAI request did not return a complete response. Usage and the outcome of this API request are unknown.', { usageUnknown: true });
+        'The broker did not return a complete response. API usage and outcome are unknown.', { usageUnknown: true });
     }
     const safeId = value => this.sanitize(value) === value ? ID(value) : null;
-    const requestId = safeId(response.headers.get('x-request-id'));
-    if (!response.ok) {
-      const status = response.status;
-      const code = safeId(result?.error?.code);
-      const type = safeId(result?.error?.type);
-      throw new ResponsesError(`OPENAI_HTTP_${status}`, `OpenAI returned HTTP ${status}${code ? ` (${code})` : ''}.`, {
-        evidence: { request_id: requestId, http_status: status, error_code: code, error_type: type, usage: null }, usageUnknown: status >= 500 || status === 408
-      });
+    const requestId = /^req_[a-zA-Z0-9_-]{1,100}$/.test(reply.request_id ?? '') ? safeId(reply.request_id) : null;
+    if (!reply.ok) {
+      if (reply.code === 'UPSTREAM_HTTP' && reply.status >= 300 && reply.status <= 599) {
+        throw new ResponsesError(`OPENAI_HTTP_${reply.status}`, `OpenAI returned HTTP ${reply.status}.`, {
+          evidence: { request_id: requestId, http_status: reply.status, usage: null }, usageUnknown: reply.status >= 500 || reply.status === 408
+        });
+      }
+      const refused = UNSENT.has(reply.code);
+      throw new ResponsesError(refused ? reply.code : 'OPENAI_RESPONSE_UNKNOWN',
+        refused ? 'Credential broker declined the request.' : 'The broker could not confirm the API outcome.', { usageUnknown: !refused });
+    }
+    const result = reply.body;
+    if (reply.status !== 200 || !result || typeof result !== 'object') {
+      throw new ResponsesError('OPENAI_RESPONSE_UNKNOWN', 'Invalid broker response.', { usageUnknown: true });
     }
     const usage = usageOf(result?.usage);
     const evidence = {

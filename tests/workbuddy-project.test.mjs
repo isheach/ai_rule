@@ -42,7 +42,7 @@ function fixture(t) {
 function apiConfig(f) {
   return validateSolConfig({
     state_dir: path.join(f.base, 'coordination'), pool_config: path.join(f.base, 'pool.local.json'),
-    openai: { model: 'gpt-6.2-sol', reasoning_effort: 'max', api_key_env: 'SOL_OPENAI_API_KEY' },
+    openai: { model: 'gpt-6.2-sol', reasoning_effort: 'max', credential_source: 'windows-broker' },
     workbuddy: { project_config: f.configPath }
   }, { poolConfig: {
     pool_root: path.join(f.base, 'pool'), workspace_root: f.cwd, dsh_entry: filename('./mock-dsh.mjs'),
@@ -99,7 +99,7 @@ test('API Sol mode 2 claims and finishes the new WorkBuddy project entry at peak
   let next = 0;
   let clock = new Date('2026-11-16T02:00:00.000Z');
   const responses = {
-    configured: true, sanitize: value => String(value),
+    readiness: async () => ({ ready: true }), sanitize: value => String(value),
     async request({ input }) {
       const delegated = input.some(item => item.type === 'function_call_output');
       const options = { plan: 'Run the fixture task', instructions: JSON.stringify({ paper: 'new paper', script, output }) };
@@ -116,10 +116,10 @@ test('API Sol mode 2 claims and finishes the new WorkBuddy project entry at peak
     backend: 'DSH', cwd: f.cwd, goal: 'Reproduce a new paper within the existing local project',
     permissionMode: 'workspace-write', authorizationNote: 'Existing fixture project grant', acceptance: 'Fixture receipt'
   };
-  service.setMode(root, 'api');
+  await service.setMode(root, 'api');
   service.setSchedule(root, 2);
   try {
-    const started = service.start(root, { ...handoff, idempotencyKey: 'new-research-at-peak',
+    const started = await service.start(root, { ...handoff, idempotencyKey: 'new-research-at-peak',
       capability: 'workspace-write', writeScopes: [{ path: f.cwd, operations: ['create'] }] });
     const peak = await service.wait(root, started.idempotency_key, started.task_id, 10000);
     assert.equal(peak.status, 'completed', peak.message);
@@ -130,11 +130,11 @@ test('API Sol mode 2 claims and finishes the new WorkBuddy project entry at peak
     assert.equal(finished.workbuddy_dispatch.backend_task_id, step.receipt.task_id);
     assert.equal(fs.readFileSync(path.join(f.cwd, output), 'utf8'), 'new paper: fixture script / ');
     clock = new Date('2026-11-16T04:30:00.000Z');
-    const valleyStarted = service.start(root, { ...handoff, idempotencyKey: 'next-valley-research' });
+    const valleyStarted = await service.start(root, { ...handoff, idempotencyKey: 'next-valley-research' });
     const valley = await service.wait(root, valleyStarted.idempotency_key, valleyStarted.task_id, 10000);
     assert.equal(valley.status, 'completed', valley.message);
     assert.equal(valley.executor_backend, 'dsh');
-    assert.equal(service.mode(root).coordinator_mode, 'api');
+    assert.equal((await service.mode(root)).coordinator_mode, 'api');
     assert.equal(service.schedule(root).mode, 2);
   } finally { await service.close(); }
 });

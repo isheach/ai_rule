@@ -5,6 +5,7 @@ import { PreAdmissionRejection, RoutingConflictError } from './routing.mjs';
 import { loadSchedule, ScheduleMode, scheduleModeProperty, selectScheduleMode } from './schedule.mjs';
 import { workBuddyDispatchTools, WORKBUDDY_FAILURE } from '../workbuddy/dispatch.mjs';
 import { DSH_TIMEOUT_MS, WAIT_MS, preferRun, waitForExisting } from '../task-lifecycle.mjs';
+import { PURPOSES, hostHandoff, resolveDispatch } from '../dispatch/policy.mjs';
 import { fileURLToPath } from 'node:url';
 
 const argv = process.argv.slice(2);
@@ -34,11 +35,14 @@ const taskSchema = {
     scheduleEnabled: { type: 'boolean', description: 'Legacy task-level selector. False selects mode 1 and true selects mode 3. Supply only one schedule selector.' },
     scheduleMode: scheduleModeProperty,
     workBuddyContinuationKey: { type: 'string', description: 'Continue a recorded WorkBuddy DSF session in the same workspace, only during a peak in mode 2.' },
-    sessionId: { type: 'string', description: `Resume a DSH session recorded by ${scoped} from the SAME cwd; never use an invented or foreign ID.` }
+    sessionId: { type: 'string', description: `Resume a DSH session recorded by ${scoped} from the SAME cwd; never use an invented or foreign ID.` },
+    purpose: { type: 'string', enum: PURPOSES, description: 'Explicit task purpose. Omitted means general; prompt keywords never select a purpose.' },
+    backend: { type: 'string', enum: ['DSH', 'WorkBuddy DSF', 'Terra'], description: 'Explicit supported backend. Omit to use the purpose default (DSH for general, Terra for a specialist purpose).' }
   }
 };
 const idSchema = { type: 'object', additionalProperties: false, required: ['taskId'], properties: { taskId: { type: 'string', description: `Task ID scoped to ${scoped}` } } };
 const tools = [
+  { name: 'resolve_layer_dispatch', description: 'Resolve the layered route for this subscription host without launching a model. General work -> gpt-6.2-sol max; specialist work -> gpt-6.1-terra max.', inputSchema: { type: 'object', additionalProperties: false, properties: { purpose: { type: 'string', enum: PURPOSES }, backend: { type: 'string', enum: ['DSH', 'WorkBuddy DSF', 'Terra'] } } }, annotations: { readOnlyHint: true } },
   { name: 'get_dsh_schedule_status', description: `Local phase and admission gate for ${scoped} Omit scheduleMode for the active/default mode, or supply one to preview. No model call.`, inputSchema: { type: 'object', additionalProperties: false, properties: { scheduleMode: scheduleModeProperty } }, annotations: { readOnlyHint: true } },
   {
     name: 'set_dsh_task_schedule',
@@ -66,6 +70,13 @@ async function call(name, args, requestId) {
   for (const key of Object.keys(args)) if (!(key in schema.properties)) throw Error(`Unknown argument: ${key}`);
   for (const key of schema.required || []) if (!(key in args)) throw Error(`Missing argument: ${key}`);
   if (name === 'get_dsh_bridge_status') return manager.status();
+  if (name === 'resolve_layer_dispatch') {
+    return resolveDispatch({
+      source: 'subscription',
+      ...(args.purpose === undefined ? {} : { purpose: args.purpose }),
+      ...(args.backend === undefined ? {} : { backend: args.backend })
+    });
+  }
   if (name === 'get_dsh_schedule_status') {
     return manager.scheduleStatus(args.scheduleMode === undefined ? undefined : selectScheduleMode(args.scheduleMode));
   }
@@ -81,7 +92,23 @@ async function call(name, args, requestId) {
   if (name === 'get_dsh_task') return manager.get(args.taskId);
   if (name === 'wait_dsh_task') return manager.wait(args.taskId, args.waitMs ?? WAIT_MS.default);
   if (name === 'cancel_dsh_task') return manager.cancel(args.taskId);
-  const record = await manager.start(args);
+  let task = args;
+  if (name === 'start_dsh_task' || name === 'run_dsh_task') {
+    const plan = resolveDispatch({
+      source: 'subscription',
+      ...(args.purpose === undefined ? {} : { purpose: args.purpose }),
+      ...(args.backend === undefined ? {} : { backend: args.backend })
+    });
+    task = { ...args };
+    delete task.purpose;
+    delete task.backend;
+    // Only the default/general DSH layer is executable in this bridge. A
+    // specialist purpose is handed to the host's real native Terra entry; an
+    // explicit WorkBuddy backend is handed to the already registered WorkBuddy
+    // service. Neither is silently executed as DSH.
+    if (plan.layer !== 'coordinator' || plan.executor.backend !== 'dsh') return hostHandoff(plan);
+  }
+  const record = await manager.start(task);
   if (name === 'start_dsh_task' || record.workbuddy_dispatch) return record;
   if (!record.replayed) inFlight.set(requestId, record.task_id);
   try {
