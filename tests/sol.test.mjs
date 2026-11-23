@@ -10,6 +10,7 @@ import { createInterface } from 'node:readline';
 import { fileURLToPath } from 'node:url';
 import { setTimeout as delay } from 'node:timers/promises';
 import { issueContext } from '../bridges/pool/context.mjs';
+import { LUNA_MODEL, TERRA_MODEL } from '../bridges/dispatch/policy.mjs';
 import { loadSolConfig } from '../bridges/sol/config.mjs';
 import { ResponsesClient } from '../bridges/sol/responses.mjs';
 
@@ -20,6 +21,13 @@ const childOne = '00000000-0000-4000-8000-000000000603';
 const fixtureKey = 'sk-offlineSolBroker' + randomBytes(16).toString('hex');
 const model = 'gpt-6.2-sol';
 const effort = 'max';
+const peerPolicy = {
+  sol_tools: ['confirm_sol_api', 'delegate_work', 'delegate_peer', 'finish_coordination'],
+  terra_enabled: true, terra_model: TERRA_MODEL, terra_reasoning_effort: effort,
+  terra_tools: ['confirm_terra_api', 'terra_action', 'finish_terra', 'delegate_work', 'finish_coordination'],
+  luna_enabled: true, luna_model: LUNA_MODEL, luna_reasoning_effort: effort,
+  luna_tools: ['confirm_luna_api', 'delegate_work', 'finish_coordination']
+};
 const peak = '2026-11-16T02:00:00.000Z';
 const offpeak = '2026-11-16T00:30:00.000Z';
 const script = name => path.join(repo, 'tests', name);
@@ -30,6 +38,10 @@ function delegate(instructions = 'Read the authorized folder and return actual v
 }
 function finish(report = 'Verified the delegate receipt.') {
   return { name: 'finish_coordination', args: { verdict: 'accepted', report } };
+}
+function peerCall(peer, extra = {}) {
+  return { name: 'delegate_peer', args: { peer, goal: `Complete the approved ${peer} subtask.`,
+    acceptance: `Return the ${peer} result and actual evidence.`, contextSummary: 'Specific subtask context.', ...extra } };
 }
 function callResult(sequence, call, extra = {}) {
   const id = String(sequence);
@@ -45,8 +57,12 @@ function callResult(sequence, call, extra = {}) {
   };
 }
 
-async function fixture(t, onResponse, { clock = offpeak, workbuddy = false, limits = {}, rootSource = 'vscode' } = {}) {
-  const base = fs.mkdtempSync(path.join(fs.realpathSync(os.tmpdir()), 'ai-rule-sol-'));
+async function fixture(t, onResponse, {
+  clock = offpeak, workbuddy = false, allowWrite = false, limits = {}, rootSource = 'vscode', brokerPolicy = {}
+} = {}) {
+  // Windows runners can expose an 8.3 alias in TEMP. Use its native long path
+  // so exact write authorizations pass the real path policy.
+  const base = fs.mkdtempSync(path.join(fs.realpathSync.native(os.tmpdir()), 'ai-rule-sol-'));
   const codexHome = path.join(base, 'codex');
   const sessions = path.join(codexHome, 'sessions', '2026', '11', '16');
   fs.mkdirSync(sessions, { recursive: true });
@@ -62,7 +78,7 @@ async function fixture(t, onResponse, { clock = offpeak, workbuddy = false, limi
   const poolConfig = path.join(base, 'pool.json');
   fs.writeFileSync(poolConfig, JSON.stringify({
     pool_root: path.join(base, 'pool'), dsh_entry: script('mock-dsh.mjs'), schedule_config: path.join(repo, 'config', 'offpeak.schedule.json'),
-    workspace_root: workspace, allow_write: false, running_cap: 3
+    workspace_root: workspace, allow_write: allowWrite, running_cap: 3
   }));
   const configPath = path.join(base, 'sol.json');
   const config = {
@@ -83,11 +99,11 @@ async function fixture(t, onResponse, { clock = offpeak, workbuddy = false, limi
       assert.deepEqual(Object.keys(extra), []);
       if (op === 'status') {
         assert.equal(body, undefined);
-        return { ok: true, status: 200, body: { ready: true, model, reasoning_effort: effort } };
+        return { ok: true, status: 200, body: { ready: true, model, reasoning_effort: effort, ...brokerPolicy } };
       }
       assert.equal(op, 'response');
       requests.push(body);
-      assert.equal(body.model, model);
+      assert.ok([model, brokerPolicy.terra_model, brokerPolicy.luna_model].filter(Boolean).includes(body.model));
       assert.equal(body.reasoning.effort, effort);
       assert.equal(body.store, false);
       assert.equal(body.parallel_tool_calls, false);
@@ -99,6 +115,7 @@ async function fixture(t, onResponse, { clock = offpeak, workbuddy = false, limi
       assert.ok(body.tools.every(tool => tool.strict === true && tool.parameters.additionalProperties === false));
       const result = await onResponse(requests.length, body);
       if (result === null) return null; // Simulate losing the reply after admission.
+      if (result.brokerError) return { ok: false, ...result.brokerError };
       const request_id = `req_fixture_${requests.length}`;
       return result.http ? { ok: false, status: result.http, code: 'UPSTREAM_HTTP', request_id }
         : { ok: true, status: 200, body: result, request_id };
@@ -271,6 +288,175 @@ test('API Sol calls real pooled DSH, inspects and revises the original session w
   const secondConnection = await f.connect();
   assert.equal((await mode(secondConnection, first)).coordinator_mode, 'subscription');
   assert.equal((await find(secondConnection, first, 'loop')).status, 'completed');
+});
+
+test('API Sol calls Terra and Luna under one approved workspace scope and receives their results and usage', async t => {
+  const writeScope = () => [{
+    path: f.workspace, operations: ['create', 'edit']
+  }];
+  const writes = () => [{ path: path.join(f.workspace, 'public-control.txt'), mode: 'edit', content_sha256: null }];
+  const commands = ['node --version'];
+  const f = await fixture(t, (index, body) => {
+    const shared = [model, TERRA_MODEL, TERRA_MODEL, model, LUNA_MODEL, LUNA_MODEL, model];
+    assert.equal(body.model, shared[index - 1]);
+    if (body.model === model) {
+      const tool = body.tools.find(item => item.name === 'delegate_peer');
+      assert.deepEqual(tool.parameters.properties.peer.enum, ['terra', 'luna']);
+      if (index > 1) {
+        const result = previousReceipt(body);
+        assert.equal(result.status, 'completed');
+        assert.equal(result.model, index === 4 ? TERRA_MODEL : LUNA_MODEL);
+        assert.equal(result.executor.backend, 'dsh');
+        assert.ok(result.executor.task_id);
+        assert.equal(result.usage.total_tokens, 90);
+      }
+      return callResult(index, index === 1 ? peerCall('terra') : index === 4 ? peerCall('luna') : finish());
+    }
+    assert.deepEqual(body.tools.map(tool => tool.name), ['delegate_work', 'finish_coordination']);
+    const handoff = JSON.parse(body.input[1].content);
+    const role = body.model === TERRA_MODEL ? 'terra' : 'luna';
+    assert.equal(handoff.goal, peerCall(role).args.goal);
+    assert.equal(handoff.acceptance, peerCall(role).args.acceptance);
+    assert.match(handoff.contextSummary, /Relevant approved memory[\s\S]+Specific subtask context/);
+    assert.equal(handoff.cwd, f.workspace);
+    assert.equal(handoff.permissionMode, 'workspace-write');
+    assert.equal(handoff.capability, 'workspace-write');
+    assert.equal(handoff.authorizationNote, 'User approved this fixture workspace, file and command.');
+    assert.deepEqual(handoff.writeScopes, writeScope());
+    assert.deepEqual(handoff.writes, writes());
+    assert.deepEqual(handoff.commands, commands);
+    if (index === 2 || index === 5) return callResult(index, delegate(), { model: body.model });
+    const executor = previousReceipt(body);
+    assert.equal(executor.status, 'completed');
+    assert.deepEqual(JSON.parse(executor.answer.match(/Explicit task authorization:\n([^\n]+)/)[1]),
+      { writes: writes(), writeScopes: writeScope(), commands });
+    return callResult(index, finish(), { model: body.model });
+  }, { allowWrite: true, brokerPolicy: peerPolicy });
+  const connection = await f.connect();
+  const context = f.context();
+  const state = await select(connection, context, 'api');
+  assert.equal(state.delegate_peer_available, true);
+  assert.equal(state.peer_api.luna.ready, true);
+  const args = task(f, context, 'api-collaboration', {
+    permissionMode: 'workspace-write', capability: 'workspace-write',
+    authorizationNote: 'User approved this fixture workspace, file and command.',
+    writeScopes: writeScope(), writes: writes(), commands, acceptPeerCharges: true
+  });
+  const result = await run(connection, args);
+  assert.equal(result.status, 'completed', result.message);
+  assert.equal(result.acceptance, 'accepted');
+  assert.deepEqual(result.peer_results.map(peer => peer.model), [TERRA_MODEL, LUNA_MODEL]);
+  assert.equal(result.responses.length, 3);
+  assert.equal(result.steps.length, 0);
+  assert.equal(result.usage.total_tokens, 7 * 45);
+  assert.equal(result.usage_unknown, false);
+  assert.equal(new Set(result.peer_results.map(peer => peer.steps[0].receipt.task_id)).size, 2);
+  checkIsolation(f.dshRuns);
+  await select(connection, context, 'subscription');
+  assert.equal((await run(connection, args)).replayed, true);
+  await assert.rejects(run(connection, { ...args, acceptPeerCharges: false }), /different frozen handoff/);
+  assert.equal(f.requests.length, 7);
+});
+
+test('API collaboration rejects unconsented, unadvertised or out-of-scope peer calls before dispatch', async t => {
+  for (const scenario of [
+    { name: 'unconsented', policy: peerPolicy, consent: false, available: false, error: 'SOL_PEER_UNAVAILABLE' },
+    { name: 'legacy broker', policy: {}, consent: true, available: false, error: 'SOL_PEER_UNAVAILABLE' },
+    { name: 'scope override', policy: peerPolicy, consent: true, available: true, error: 'SOL_COORDINATION_BLOCKED',
+      extra: { commands: ['node --version'] } }
+  ]) {
+    await t.test(scenario.name, async t => {
+      const f = await fixture(t, (index, body) => {
+        assert.equal(body.tools.some(tool => tool.name === 'delegate_peer'), scenario.available);
+        return callResult(index, peerCall('luna', scenario.extra));
+      }, { brokerPolicy: scenario.policy });
+      const connection = await f.connect();
+      const context = f.context();
+      const result = await run(connection, task(f, context, 'deny-peer', {
+        coordinatorMode: 'api', acceptPeerCharges: scenario.consent
+      }));
+      assert.equal(result.status, 'blocked');
+      assert.equal(result.error_code, scenario.error);
+      assert.deepEqual(result.peer_results, []);
+      assert.equal(f.requests.length, 1);
+      assert.deepEqual(countRuns(f.dshRuns), []);
+    });
+  }
+});
+
+test('An uncertain Luna response stops the original API task without a retry or substituted model', async t => {
+  const f = await fixture(t, (index, body) => {
+    if (index === 1) return callResult(index, peerCall('luna'));
+    assert.equal(body.model, LUNA_MODEL);
+    return null;
+  }, { brokerPolicy: peerPolicy });
+  const connection = await f.connect();
+  const args = task(f, f.context(), 'unknown-luna', { coordinatorMode: 'api', acceptPeerCharges: true });
+  const result = await run(connection, args);
+  assert.equal(result.status, 'unknown_after_disconnect');
+  assert.equal(result.error_code, 'SOL_PEER_OUTCOME_UNKNOWN');
+  assert.equal(result.peer_results[0].status, 'unknown_after_disconnect');
+  assert.equal(result.peer_results[0].usage_unknown, true);
+  assert.equal(result.usage_unknown, true);
+  assert.equal((await run(connection, args)).replayed, true);
+  assert.deepEqual(f.requests.map(body => body.model), [model, LUNA_MODEL]);
+  assert.deepEqual(countRuns(f.dshRuns), []);
+});
+
+test('A shared broker quota refusal is reported to the originating Sol rather than retried', async t => {
+  const f = await fixture(t, (index, body) => {
+    if (index === 1) return callResult(index, peerCall('luna'));
+    assert.equal(index, 2);
+    assert.equal(body.model, LUNA_MODEL);
+    return { brokerError: { code: 'BROKER_RATE_LIMITED', status: 429 } };
+  }, { brokerPolicy: peerPolicy });
+  const connection = await f.connect();
+  const result = await run(connection, task(f, f.context(), 'rate-limited-luna', { coordinatorMode: 'api', acceptPeerCharges: true }));
+  assert.equal(result.status, 'blocked');
+  assert.equal(result.error_code, 'BROKER_RATE_LIMITED');
+  assert.equal(result.peer_results[0].error_code, 'BROKER_RATE_LIMITED');
+  assert.equal(result.usage_unknown, false);
+  assert.equal(result.usage.total_tokens, 45);
+  assert.deepEqual(f.requests.map(body => body.model), [model, LUNA_MODEL]);
+});
+
+test('A text-only Luna result can satisfy the original text-only task without an executor call', async t => {
+  const f = await fixture(t, (index, body) => {
+    if (index === 1) return callResult(index, peerCall('luna'));
+    if (index === 2) return callResult(index, finish('A textual analysis based on the provided facts.'), { model: LUNA_MODEL });
+    const receipt = previousReceipt(body);
+    assert.equal(receipt.status, 'completed');
+    assert.equal(receipt.executor, null);
+    assert.deepEqual(receipt.response_ids, ['resp_2']);
+    return callResult(index, finish(receipt.report));
+  }, { brokerPolicy: peerPolicy });
+  const connection = await f.connect();
+  const result = await run(connection, task(f, f.context(), 'text-only-luna', {
+    coordinatorMode: 'api', acceptPeerCharges: true, capability: 'text-only'
+  }));
+  assert.equal(result.status, 'completed', result.message);
+  assert.equal(result.report, 'A textual analysis based on the provided facts.');
+  assert.deepEqual(countRuns(f.dshRuns), []);
+  assert.deepEqual(f.requests.map(body => body.model), [model, LUNA_MODEL, model]);
+});
+
+test('A collaborator cannot use Sol’s reserved finalization round to start an executor', async t => {
+  const blocked = { name: 'finish_coordination', args: { verdict: 'blocked', report: 'The collaborator reached the shared call budget.' } };
+  const f = await fixture(t, (index, body) => {
+    if (index === 1) return callResult(index, peerCall('luna'));
+    if (index === 2) return callResult(index, delegate(), { model: LUNA_MODEL });
+    const receipt = previousReceipt(body);
+    assert.equal(receipt.status, 'blocked');
+    assert.equal(receipt.error_code, 'OPENAI_COORDINATION_LIMIT');
+    return callResult(index, blocked);
+  }, { brokerPolicy: peerPolicy, limits: { max_responses: 3, max_delegations: 2 } });
+  const connection = await f.connect();
+  const result = await run(connection, task(f, f.context(), 'bounded-luna', { coordinatorMode: 'api', acceptPeerCharges: true }));
+  assert.equal(result.status, 'blocked');
+  assert.equal(result.peer_results[0].responses.length, 1);
+  assert.equal(result.usage.total_tokens, 3 * 45);
+  assert.equal(f.requests.length, 3);
+  assert.deepEqual(countRuns(f.dshRuns), []);
 });
 
 test('One-shot override and an in-flight source switch preserve the original owner, schedule and downstream job', async t => {
@@ -467,9 +653,39 @@ test('Legacy config blocks API even with an inherited dummy key and preserves su
 });
 
 test('Paid probe requires explicit billing acknowledgement before loading configuration', () => {
-  const result = spawnSync(process.execPath, [path.join(repo, 'bridges', 'sol', 'cli.mjs'), 'verify-api', '--config', 'does-not-exist'], { encoding: 'utf8' });
-  assert.equal(result.status, 1);
-  assert.match(result.stderr, /billable model request/);
+  for (const command of ['verify-api', 'verify-luna-api']) {
+    const result = spawnSync(process.execPath, [path.join(repo, 'bridges', 'sol', 'cli.mjs'), command, '--config', 'does-not-exist'], { encoding: 'utf8' });
+    assert.equal(result.status, 1);
+    assert.match(result.stderr, /billable model request/);
+  }
+});
+
+test('Protected Luna status is read-only and its explicit probe verifies the fixed model, tool and usage', async t => {
+  const f = await fixture(t, () => assert.fail('Probe uses only its injected broker.'));
+  const config = loadSolConfig(f.configPath);
+  const envelopes = [];
+  const status = { ready: true, model, reasoning_effort: effort, requests_per_hour: 96, ...peerPolicy };
+  const client = new ResponsesClient({ config, callBroker: async envelope => {
+    envelopes.push(envelope);
+    if (envelope.op === 'status') return { ok: true, status: 200, body: status };
+    assert.equal(envelope.body.model, LUNA_MODEL);
+    assert.equal(envelope.body.reasoning.effort, effort);
+    assert.deepEqual(envelope.body.tools.map(tool => tool.name), ['confirm_luna_api']);
+    return { ok: true, status: 200, body: callResult(1, { name: 'confirm_luna_api', args: { result: 'ready' } }, { model: LUNA_MODEL }) };
+  } }).forPeer('luna');
+  const readiness = await client.readiness();
+  assert.equal(readiness.ready, true);
+  assert.equal(readiness.requests_per_hour, 96);
+  assert.deepEqual(envelopes.map(item => item.op), ['status']);
+  const verified = await client.verify();
+  assert.equal(verified.returned_model, LUNA_MODEL);
+  assert.equal(verified.response_id, 'resp_1');
+  assert.equal(verified.usage.total_tokens, 45);
+  status.luna_reasoning_effort = 'high';
+  assert.equal((await client.readiness()).code, 'LUNA_BROKER_ROUTE_MISMATCH');
+  delete status.luna_enabled;
+  assert.equal((await client.readiness()).code, 'LUNA_BROKER_DISABLED');
+  assert.deepEqual(envelopes.map(item => item.op), ['status', 'response', 'status', 'status']);
 });
 
 test('Standalone DSH version, help and route probes exclude ambient OpenAI variables', () => {

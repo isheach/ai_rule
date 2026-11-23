@@ -212,7 +212,7 @@ function Invoke-ReviewedElevation([string]$Encoded) {
     finally { $process.Dispose() }
 }
 
-function Assert-Status([string]$Step, $Reply, [bool]$Ready) {
+function Assert-Status([string]$Step, $Reply, [bool]$Ready, [int]$Quota = 100, [switch]$Luna) {
     if ($Reply.Status -ne 0 -or $Reply.Error) {
         throw "$Step failed (exit $($Reply.Status), stderr present $([bool]$Reply.Error))."
     }
@@ -223,8 +223,14 @@ function Assert-Status([string]$Step, $Reply, [bool]$Ready) {
         throw "$Step was declined ($code)."
     }
     if ($envelope.status -ne 200 -or $envelope.body.ready -ne $Ready -or $envelope.body.model -ne 'gpt-6.2-sol' -or
-        $envelope.body.reasoning_effort -ne 'max' -or $envelope.body.requests_per_hour -ne 100) {
-        throw "$Step returned inconsistent status (ready: $($envelope.body.ready -eq $true), expected: $Ready; quota: $($envelope.body.requests_per_hour), expected: 100)."
+        $envelope.body.reasoning_effort -ne 'max' -or $envelope.body.requests_per_hour -ne $Quota) {
+        throw "$Step returned inconsistent status (ready: $($envelope.body.ready -eq $true), expected: $Ready; quota: $($envelope.body.requests_per_hour), expected: $Quota)."
+    }
+    if ($Luna -and ($envelope.body.luna_enabled -ne $true -or $envelope.body.luna_model -cne 'gpt-6-luna' -or
+        $envelope.body.luna_reasoning_effort -cne 'max' -or $envelope.body.terra_enabled -ne $true -or
+        'delegate_peer' -cnotin $envelope.body.sol_tools -or
+        ($envelope.body.luna_tools -join ',') -cne 'confirm_luna_api,delegate_work,finish_coordination')) {
+        throw "$Step returned unexpected Luna or Terra capabilities."
     }
     Write-Output "$Step passed."
 }
@@ -324,6 +330,58 @@ try {
 
     Restart-Service -Name $svc
     Assert-Status 'Authorized Node status after service restart' (Invoke-TestUser $allowed $node ('"{0}"' -f $nodeFixture)) $true
+
+    $entry = Join-Path $setup.Checkout 'scripts\setup-sol.ps1'
+    $arguments = '-NoLogo -NoProfile -NonInteractive -File "{0}" -ExpectedRevision {1} -EnableLunaApi' -f $entry, $setup.Revision
+    $preview = Invoke-TestUser $allowed $powershell $arguments -FixtureProfile $setup.Home
+    Assert-TestCommand $preview 'Luna upgrade preview from the ordinary caller'
+    if ($preview.Output -notmatch '"operation"\s*:\s*"EnableLunaApi"' -or $preview.Output -notmatch '"current"\s*:\s*100' -or
+        $preview.Output -notmatch '"current_source"\s*:\s*"broker-status"') {
+        throw 'The ordinary Luna upgrade preview did not obtain the current quota through the protected broker status.'
+    }
+
+    # Build an existing-policy fixture without placing any upstream call.
+    Stop-Service -Name $svc
+    $policyFile = Join-Path $root 'policy.json'
+    $priorPolicy = Get-Content -LiteralPath $policyFile -Raw | ConvertFrom-Json
+    Add-Member -InputObject $priorPolicy -NotePropertyName 'allow_terra_api' -NotePropertyValue $true
+    $priorPolicy.requests_per_hour = 96
+    [IO.File]::WriteAllText($policyFile, ($priorPolicy | ConvertTo-Json -Compress), [Text.UTF8Encoding]::new($false))
+    $rateFile = Join-Path $root 'state\rate.bin'
+    [IO.File]::WriteAllBytes($rateFile, [BitConverter]::GetBytes([DateTime]::UtcNow.Ticks))
+    $rateHash = (Get-FileHash -LiteralPath $rateFile).Hash
+    $credentialHash = (Get-FileHash -LiteralPath $credentialFile).Hash
+
+    $preview = Invoke-TestUser $allowed $powershell $arguments -FixtureProfile $setup.Home
+    Assert-TestCommand $preview 'Luna upgrade preview without policy-file access or a running service'
+    if ($preview.Output -notmatch '"operation"\s*:\s*"EnableLunaApi"' -or
+        $preview.Output -notmatch '"current"\s*:\s*null' -or $preview.Output -notmatch '"preview_side_effects"\s*:\s*false' -or
+        (Get-Content -LiteralPath $policyFile -Raw | ConvertFrom-Json).PSObject.Properties['allow_luna_api']) {
+        throw 'The ordinary preview must not guess a quota or apply Luna while the policy and status are unavailable.'
+    }
+
+    [IO.File]::Delete($bundle)
+    $helper = Join-Path $repository 'scripts\sol-setup.mjs'
+    $programs = [Environment]::GetFolderPath('ProgramFiles')
+    $encoded = & $node $helper luna-elevation --revision $revision --git $git --program-files $programs --bundle-path $bundle
+    if ($LASTEXITCODE -ne 0) { throw 'Could not prepare the reviewed Luna upgrade.' }
+    $lunaResult = Invoke-ReviewedElevation $encoded
+    if ($lunaResult.Status -ne 0) { throw "The protected Luna upgrade failed: $($lunaResult.Output)" }
+    $newPolicy = Get-Content -LiteralPath $policyFile -Raw | ConvertFrom-Json
+    if ($newPolicy.allow_luna_api -ne $true -or (Get-Service -Name $svc).Status -ne 'Stopped') {
+        throw 'The protected Luna upgrade did not enable the role while preserving the stopped service state.'
+    }
+    foreach ($property in $priorPolicy.PSObject.Properties) {
+        if ($newPolicy.PSObject.Properties[$property.Name].Value -cne $property.Value) {
+            throw "The protected Luna upgrade changed the existing policy field $($property.Name)."
+        }
+    }
+    if ((Get-FileHash -LiteralPath $credentialFile).Hash -ne $credentialHash -or (Get-FileHash -LiteralPath $rateFile).Hash -ne $rateHash) {
+        throw 'The protected Luna upgrade changed the credential or shared quota record.'
+    }
+    Start-Service -Name $svc
+    Assert-Status 'Luna upgrade readiness and shared quota' (Invoke-TestUser $allowed $node ('"{0}"' -f $nodeFixture)) $true 96 -Luna
+
     $lines = Get-Content -LiteralPath (Join-Path $root 'state\audit.jsonl')
     foreach ($line in $lines) {
         $entry = $line | ConvertFrom-Json

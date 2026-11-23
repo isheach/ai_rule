@@ -20,6 +20,7 @@ import {
 } from './policy.mjs';
 import { createProtectedTerraClient } from '../terra/protected.mjs';
 import { ACTION_TOOL, CONFIRM_TOOL, FINISH_TOOL } from '../terra/client.mjs';
+import { nativePeerCoordinator } from './native-peer.mjs';
 
 const MAX_PROMPT_BYTES = 60000;
 const ACTION_NAMES = Object.freeze({
@@ -482,27 +483,37 @@ async function runGeneralCoordinator(plan, input, options) {
       { plan, missingAdapters: ['sol_coordinator'] });
   }
   const backend = executorFor(plan, options);
-  const result = await coordinator.coordinate({
-    plan,
-    prompt: input.prompt,
-    task: input.task ?? null,
-    purpose: plan.purpose,
-    source: plan.source,
-    model: plan.coordinator.model,
-    reasoning_effort: plan.coordinator.reasoning_effort,
-    coordinator: plan.coordinator,
-    backend,
-    ...(options.signal ? { signal: options.signal } : {})
-  });
-  if (!isObject(result)) {
-    throw new DispatchBlockedError('DISPATCH_COORDINATOR_INVALID_RESULT',
-      'The Sol coordinator adapter returned no receipt; no backend result was substituted.',
-      { plan });
+  const peers = plan.source === DispatchSource.SUBSCRIPTION ? nativePeerCoordinator(input, options) : null;
+  let result;
+  let peerResults;
+  try {
+    result = await coordinator.coordinate({
+      plan,
+      prompt: input.prompt,
+      task: input.task ?? null,
+      purpose: plan.purpose,
+      source: plan.source,
+      model: plan.coordinator.model,
+      reasoning_effort: plan.coordinator.reasoning_effort,
+      coordinator: plan.coordinator,
+      backend,
+      ...(options.signal ? { signal: options.signal } : {}),
+      ...(peers ? { delegatePeer: peers.delegate } : {})
+    });
+    if (!isObject(result)) {
+      throw new DispatchBlockedError('DISPATCH_COORDINATOR_INVALID_RESULT',
+        'The Sol coordinator adapter returned no receipt; no backend result was substituted.',
+        { plan });
+    }
+    peerResults = await peers?.collect();
+  } finally {
+    peers?.close();
   }
   // Preserve actual producer fields. Only the requested labels are added, and
   // selected_backend is not allowed to overwrite a coordinator's actual value.
   return {
     ...result,
+    ...(peerResults?.length ? { peer_results: peerResults } : {}),
     dispatch: plan,
     ...(Object.hasOwn(result, 'selected_backend') ? {} : { selected_backend: plan.executor.backend }),
     requested_backend: plan.executor.backend,

@@ -1,4 +1,5 @@
 import { redact } from '../dsh/core.mjs';
+import { LUNA_MODEL, LUNA_REASONING_EFFORT, TERRA_MODEL, TERRA_REASONING_EFFORT } from '../dispatch/policy.mjs';
 import { SAFE_ID } from './config.mjs';
 import { brokerCall } from './broker.mjs';
 
@@ -11,6 +12,30 @@ const PROBE = {
   type: 'function', name: 'confirm_sol_api', description: 'Confirm the configured model can call a strict function.', strict: true,
   parameters: { type: 'object', properties: { result: { type: 'string', enum: ['ready'] } }, required: ['result'], additionalProperties: false }
 };
+const PEERS = Object.freeze({
+  terra: Object.freeze({ model: TERRA_MODEL, effort: TERRA_REASONING_EFFORT, confirm: 'confirm_terra_api' }),
+  luna: Object.freeze({ model: LUNA_MODEL, effort: LUNA_REASONING_EFFORT, confirm: 'confirm_luna_api' })
+});
+export const PEER_NAMES = Object.freeze(Object.keys(PEERS));
+
+function peerReadiness(body, peer) {
+  const { model, effort, confirm } = PEERS[peer];
+  const tools = [confirm, 'delegate_work', 'finish_coordination'];
+  const route = { model, reasoning_effort: effort,
+    ...(Number.isSafeInteger(body.requests_per_hour) && body.requests_per_hour > 0
+      ? { requests_per_hour: body.requests_per_hour } : {}) };
+  const prefix = peer.toUpperCase();
+  if (body[`${peer}_enabled`] !== true) return { ...route, ready: false, code: `${prefix}_BROKER_DISABLED` };
+  if (body[`${peer}_model`] !== model || body[`${peer}_reasoning_effort`] !== effort) {
+    return { ...route, ready: false, code: `${prefix}_BROKER_ROUTE_MISMATCH` };
+  }
+  const advertised = body[`${peer}_tools`];
+  if (!Array.isArray(advertised) || tools.some(tool => !advertised.includes(tool))) {
+    return { ...route, ready: false, code: `${prefix}_BROKER_UNSUPPORTED` };
+  }
+  return { ...route, ready: body.ready === true, tools,
+    ...(body.ready === true ? {} : { code: `${prefix}_BROKER_NOT_READY` }) };
+}
 
 export class ResponsesError extends Error {
   constructor(code, message, { evidence = null, usageUnknown = false } = {}) {
@@ -36,10 +61,23 @@ function usageOf(value) {
 }
 
 export class ResponsesClient {
-  constructor({ config, callBroker = brokerCall }) {
-    this.config = config.openai;
+  constructor({ config, callBroker = brokerCall, peer = null }) {
+    if (peer !== null && !PEER_NAMES.includes(peer)) throw Error('Unknown protected API collaborator.');
+    this.peer = peer;
+    const route = peer ? PEERS[peer] : null;
+    this.config = route
+      ? { model: route.model, reasoning_effort: route.effort, credential_source: config.openai.credential_source }
+      : config.openai;
     this.limits = config.limits;
     this.callBroker = callBroker;
+  }
+
+  forPeer(peer) {
+    if (!PEER_NAMES.includes(peer)) throw Error('Unknown protected API collaborator.');
+    return new ResponsesClient({
+      config: { openai: this.config, limits: this.limits },
+      callBroker: this.callBroker, peer
+    });
   }
 
   async readiness() {
@@ -47,12 +85,15 @@ export class ResponsesClient {
     try {
       const reply = await this.callBroker({ op: 'status' }, AbortSignal.timeout(5000));
       if (reply?.ok === false && UNSENT.has(reply.code)) return { ready: false, code: reply.code };
-      if (reply?.ok === true && reply.status === 200) {
+      if (reply?.ok === true && reply.status === 200 && reply.body && typeof reply.body === 'object') {
+        if (this.peer) return peerReadiness(reply.body, this.peer);
         if (reply.body?.model !== this.config.model || reply.body?.reasoning_effort !== this.config.reasoning_effort) {
           return { ready: false, code: 'SOL_BROKER_ROUTE_MISMATCH' };
         }
-        if (reply.body.ready === true) return { ready: true };
-        return { ready: false, code: 'SOL_BROKER_NOT_READY' };
+        const peer_api = Object.fromEntries(PEER_NAMES.map(peer => [peer, peerReadiness(reply.body, peer)]));
+        const delegate_peer = Array.isArray(reply.body.sol_tools) && reply.body.sol_tools.includes('delegate_peer');
+        return { ready: reply.body.ready === true, peer_api, delegate_peer,
+          ...(reply.body.ready === true ? {} : { code: 'SOL_BROKER_NOT_READY' }) };
       }
     } catch { /* unavailable or unauthenticated helper */ }
     return { ready: false, code: 'SOL_BROKER_UNAVAILABLE' };
@@ -114,13 +155,14 @@ export class ResponsesClient {
   }
 
   async verify() {
+    const probe = this.peer ? { ...PROBE, name: PEERS[this.peer].confirm } : PROBE;
     const { output, evidence } = await this.request({
-      input: [{ role: 'developer', content: 'Call confirm_sol_api with result ready.' }], tools: [PROBE]
+      input: [{ role: 'developer', content: `Call ${probe.name} with result ready.` }], tools: [probe]
     });
     let call;
     try { call = singleCall(output); }
     catch (error) { throw new ResponsesError(error.code, error.message, { evidence }); }
-    if (call.name !== PROBE.name || Object.keys(call.args).length !== 1 || call.args.result !== 'ready') {
+    if (call.name !== probe.name || Object.keys(call.args).length !== 1 || call.args.result !== 'ready') {
       throw new ResponsesError('OPENAI_TOOL_UNVERIFIED', 'The verification request did not return the expected strict tool call.', { evidence });
     }
     return { verified: true, model: this.config.model, requested_reasoning_effort: this.config.reasoning_effort, ...evidence };

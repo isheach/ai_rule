@@ -1,6 +1,6 @@
 # Sol 协调器
 
-部署本机 `sol-coordinator` 后，可在 Codex 会话内选择原生订阅 Sol 或独立 OpenAI Responses API Sol。全新默认底层是 DSH/OpenCode Go DSF；WorkBuddy DSF 仅在明确选择或既有模式 2 峰时交接时使用。主机操作/验收、写作、绘图或图像生成与识别由 GPT-6.1 Terra Max 承担，来源与 Sol 相同。会话选择、派发、等待与恢复以 [调度 Skill](../skills/multi-agent-dispatch/SKILL.md) 为准。
+部署本机 `sol-coordinator` 后，可在 Codex 会话内选择订阅或受保护 OpenAI Responses API。全新默认底层是 DSH/OpenCode Go DSF，WorkBuddy DSF 仅在明确选择或既有模式 2 峰时交接时使用。Sol 可按同一来源调用 Terra 或 Luna 协作，直接的主机操作/验收、写作、绘图或图像生成与识别保留 Terra 专家路由。 [调度 Skill](../skills/multi-agent-dispatch/SKILL.md)
 
 ## 执行宿主与目标机
 
@@ -8,7 +8,7 @@
 
 ## 固定源码修订
 
-在运行 Codex 和 DSH 的普通 Windows 账户中操作。需要 Git、Node 22 或更新版本、64 位 Windows PowerShell Desktop 5.1（`powershell.exe`）及 .NET Framework 4.8。以下命令可从任意目录执行。示例从现有仓库获取 PR #6 的独立 ref，包括尚未合并时。仓库位于其他位置时，把 `$localRepo` 改成其实际绝对路径。使用其他 PR 或已发布版本时，将 `$sourceRef` 改成提供该提交的完整 Git ref。先从审核过的版本记录取得含 `scripts/setup-sol.ps1` 的完整提交 SHA。 [PR #6 的提交](https://github.com/isheach/ai_rule/pull/6/commits)
+在运行 Codex 和 DSH 的普通 Windows 账户中操作。需要 Git、Node 22 或更新版本、64 位 Windows PowerShell Desktop 5.1（`powershell.exe`）及 .NET Framework 4.8。示例从现有仓库获取已审核的主分支版本。将 `$localRepo` 设为本地仓库绝对路径，`$sourceRef` 设为提供该版本的完整 Git ref。先从审核过的版本记录取得含 `scripts/setup-sol.ps1` 的完整提交 SHA。
 
 ```powershell
 $solSource = & {
@@ -16,7 +16,7 @@ $solSource = & {
     $profileRoot = [Environment]::GetFolderPath('UserProfile')
     $localRepo = Join-Path $profileRoot 'ai_rule'
     $repositoryUrl = 'https://github.com/isheach/ai_rule.git'
-    $sourceRef = 'refs/pull/6/head'
+    $sourceRef = 'refs/heads/main'
     $expectedRevision = (Read-Host '输入已核对的完整提交 SHA').Trim().ToLowerInvariant()
     if ($expectedRevision -cnotmatch '^[0-9a-f]{40}$') { throw '需要完整的 Git 提交 SHA' }
     $sourceRoot = Join-Path $profileRoot "ai-rule-sol-$expectedRevision"
@@ -91,7 +91,21 @@ $brokerExe = Join-Path ([Environment]::GetFolderPath('ProgramFiles')) 'AiRuleSol
 
 `AiRuleSolBroker` 使用 `NT SERVICE\AiRuleSolBroker` 服务身份，并以该身份的 DPAPI CurrentUser 保存密钥。普通客户端只可查询状态和提交受限的 Responses 请求。同一获准 Windows 身份下的进程共享调用配额。Codex 和执行器日常以普通权限运行，服务程序和存储受本机管理员保护。 [凭据路径审计](implementation.md#api-sol-凭据路径)
 
-受保护安装器为新装策略写入每小时 100 次上游请求上限；缺少 `requests_per_hour` 的旧策略仍为 24。每次最多 768,000 字节请求体与 64,000 个输出 token，上游超时 180 秒。协调配置中更低的限制继续生效。Sol API 与 Terra API 共用此配额，服务配额跨重启保留。最多并发三次上游请求，状态查询走独立管道。管理员可在受保护的 `%ProgramFiles%\AiRuleSolBroker\state\audit.jsonl` 查看时间、操作、结果和状态码。日志定长轮换，只记录调用元数据。
+受保护安装器为新装策略写入每小时 100 次上游请求上限，缺少 `requests_per_hour` 的旧策略仍为 24。每次最多 768,000 字节请求体与 64,000 个输出 token，上游超时 180 秒。协调配置中更低的限制继续生效。Sol、Terra 和 Luna 共用此配额，服务配额跨重启保留。最多并发三次上游请求，状态查询走独立管道。管理员可在受保护的 `%ProgramFiles%\AiRuleSolBroker\state\audit.jsonl` 查看时间、操作、结果和状态码。日志定长轮换，只记录调用元数据。
+
+### 启用 Luna API
+
+普通用户从已有 Sol broker 开始。首次安装 broker 按本机设置完成，再按下列命令预览并应用启用 Luna。应用会请求 UAC，保留原密钥、账户、项目、既有 Terra 策略和滚动配额。Terra 和 Luna 各用自己的启用命令。
+
+```powershell
+& ($solSource.Setup) -ExpectedRevision $solSource.Revision -EnableLunaApi
+# 核对预览后应用
+& ($solSource.Setup) -ExpectedRevision $solSource.Revision -EnableLunaApi -Apply
+```
+
+若服务正在运行，需要等待在途工作结束，在已授权的短维护窗口内为 apply 加 `-AllowBriefRestart`。若服务原来停止，升级保留该状态，服务按原方式运行时再核验。服务停止且普通账户无法读策略时，预览会显示额度未知，提升后的安装器根据实际策略处理。预览、升级和只读状态都不发送模型请求。
+
+如果已有 `sol-coordinator` 注册仍指向旧固定工作树，等活动任务取得终态后，使用新工作树和原配置路径按普通用户注册步骤更新入口，并重新加载宿主。目标机已启用的 broker 沿用现有凭据。 [本机设置](#本机设置)
 
 ### API 配额
 
@@ -105,7 +119,7 @@ $brokerExe = Join-Path ([Environment]::GetFolderPath('ProgramFiles')) 'AiRuleSol
 
 运行中的服务需在在途调用结束后显式加 `-AllowBriefRestart`，只进行一次短维护窗口停服；默认不停服。成功后用只读 `status` 核对 `requests_per_hour` 为 100；滚动记录和审计文件不会被重置。 [详细配额与 Terra 入口](../skills/multi-agent-dispatch/references/terra-api.md#共享配额与显式升级)
 
-Terra API 固定使用 `bridges/terra/protected.mjs` 与 `bridges/terra/cli.mjs`，上游只经同一 `bridges/sol/broker.mjs` 的 `brokerCall`。模型 `gpt-6.1-terra`、max；只执行项目预注册的有限动作。本仓库现有的只读验收动作 `inspect_contract` 不是通用桌面、CUA 或图像驱动；缺少对应动作时报告不可用。
+Terra 直接专家入口使用 `bridges/terra/protected.mjs` 和 `bridges/terra/cli.mjs`，模型为 `gpt-6.1-terra` 和 `max`。此入口只运行项目预注册的有限动作。直接专家入口和三模型协作的 API 调用都经同一 `bridges/sol/broker.mjs` 转发。 [Terra 受保护入口](terra-api.md)
 
 ## 验证和切换
 
@@ -127,7 +141,10 @@ $registeredSol = & {
     [pscustomobject]@{ Command = $transport.command; Client = $solCli; Config = $arguments[2] }
 }
 & ($registeredSol.Command) $registeredSol.Client broker-status --config $registeredSol.Config
+& ($registeredSol.Command) $registeredSol.Client luna-status --config $registeredSol.Config
 ```
+
+`luna-status` 使用原协调配置。就绪时应返回 `ready:true`、`model:gpt-6-luna`、`reasoning_effort:max` 及 `confirm_luna_api`、`delegate_work`、`finish_coordination`。在实际宿主里用 `get_sol_coordinator_mode` 核对 `peer_api.luna`、`peer_api.terra` 和 `delegate_peer_available`。这些字段证明本机入口状态。
 
 在实际 Codex 会话中说“本会话 Sol 主控切到 API”或“本会话 Sol 主控切回订阅”可设置当前来源。正在进行的任务继续由原协调来源和执行后端负责。选定入口不可用时按实际调用结果报告受阻的环节。
 
@@ -135,11 +152,35 @@ $registeredSol = & {
 
 ```powershell
 & ($registeredSol.Command) $registeredSol.Client verify-api --config $registeredSol.Config --accept-api-charges
+# 对获准的 Luna 诊断
+& ($registeredSol.Command) $registeredSol.Client verify-luna-api --config $registeredSol.Config --accept-luna-charges
 ```
 
 代理向官方 Responses 提交获准的任务和相关执行结果，使用 `store: false`。协调器保留模型、档位、响应与执行任务 ID 和可确认的用量。按原任务键查询回执。 [凭据路径审计](implementation.md#api-sol-凭据路径)
 
 独立 API 请求使用所配置 API 项目的额度。ChatGPT 赠送 API 额度的资格和扣减规则以 OpenAI 说明及实际 API 账单为准。协调配置的 `max_total_tokens` 根据已返回的用量决定是否继续下一轮，最后一轮可能使合计超过阈值。可配的请求数、输出和时间限制约束此协调任务。 [API 赠额](https://help.openai.com/en/articles/20001626-api-credits-benefit-for-eligible-chatgpt-subscriptions) · [API 账单](https://platform.openai.com/account/billing/overview)
+
+## Sol 调用 Terra 或 Luna
+
+订阅来源由 Sol 自己使用宿主实际提供的 Terra 或 Luna 代理，交接父任务权限并等待原 agent ID。原生宿主适配代码中，`dispatchLayeredTask` 把 `delegatePeer` 交给 Sol 的 `coordinate`。它调用宿主提供的 `nativeTerra.dispatch` 或 `nativeLuna.dispatch`，二者按传入的父任务权限、`signal` 和截止时间执行并等待，返回实际 `status`、模型、档位与 `agent_id` 或 `task_id`，供父结果保存。
+
+API 普通任务示例。在已授权付费协作时向当前根的 `run_sol_coordination` 传入下列字段。
+
+```json
+{
+  "context": "<host-issued sol-coordinator context_ref>",
+  "idempotencyKey": "<new stable task key>",
+  "coordinatorMode": "api",
+  "goal": "核对已有分析。由 Sol 把边界情况交给 Luna 检查，并验收整体结论。",
+  "cwd": "<absolute approved project directory>",
+  "permissionMode": "read-only",
+  "capability": "workspace-read",
+  "acceptance": "报告核对的输入、边界情况及可复核的结论。",
+  "acceptPeerCharges": true
+}
+```
+
+Sol 自己调用 `delegate_peer`，传 `peer`（`terra` 或 `luna`）、`goal`、`acceptance` 和 `contextSummary`。调用在原协调任务内等待，子任务可用父任务的实际执行入口、同样的读写、命令与剩余预算，原模型和执行归属按回执保留。Sol 依据协作结果验收父任务，`peer_results` 记录实际结果，Responses 和可计量用量随父任务保存。旧 broker 可继续普通 Sol 工作，新协作要等目标模型与工具就绪。
 
 ## WorkBuddy DSF
 

@@ -25,14 +25,17 @@ param(
     [switch]$SetKey,
     [Parameter(Mandatory, ParameterSetName = 'SetKey')][switch]$ValidateExisting,
     [Parameter(Mandatory, ParameterSetName = 'EnableTerraApi')][switch]$EnableTerraApi,
+    [Parameter(Mandatory, ParameterSetName = 'EnableLunaApi')][switch]$EnableLunaApi,
+    [Parameter(ParameterSetName = 'EnableLunaApi')]
     [Parameter(ParameterSetName = 'EnableTerraApi')][ValidateRange(1, 1000)][int]$RequestsPerHour,
+    [Parameter(ParameterSetName = 'EnableLunaApi')]
     [Parameter(ParameterSetName = 'EnableTerraApi')][switch]$AllowBriefRestart
 )
 
 Set-StrictMode -Version Latest
 $ErrorActionPreference = 'Stop'
-if ($AllowBriefRestart -and -not $EnableTerraApi) {
-    throw '-AllowBriefRestart is accepted only for the -EnableTerraApi installed-broker quota upgrade.'
+if ($PSCmdlet.ParameterSetName -in @('EnableTerraApi', 'EnableLunaApi') -and -not ($EnableTerraApi -or $EnableLunaApi)) {
+    throw 'Select the installed broker role to enable.'
 }
 $quotaRequested = $PSBoundParameters.ContainsKey('RequestsPerHour')
 $env:PSModulePath = [IO.Path]::Combine($PSHOME, 'Modules')
@@ -141,7 +144,7 @@ function Confirm-ProtectedItem([string]$Location, [switch]$Directory, [string[]]
 Confirm-ProtectedItem $programs -Directory
 $root = Join-Path $programs 'AiRuleSolBroker'
 $exe = Join-Path $root 'SolBroker.exe'
-if ($Install -or $EnableTerraApi) {
+if ($Install -or $EnableTerraApi -or $EnableLunaApi) {
     $verifiedBundle = Read-VerifiedBrokerBundle
     $files = $verifiedBundle.Files
     $stage = New-ProtectedBrokerStage
@@ -160,7 +163,7 @@ if ($Install -or $EnableTerraApi) {
             if ($OrganizationId) { $parameters.OrganizationId = $OrganizationId }
             & (Join-Path $stage 'install.ps1') @parameters
         } else {
-            $parameters = @{ EnableTerraApi = $true }
+            $parameters = if ($EnableLunaApi) { @{ EnableLunaApi = $true } } else { @{ EnableTerraApi = $true } }
             if ($quotaRequested) { $parameters.RequestsPerHour = $RequestsPerHour }
             if ($AllowBriefRestart) { $parameters.AllowBriefRestart = $true }
             & (Join-Path $stage 'install.ps1') @parameters

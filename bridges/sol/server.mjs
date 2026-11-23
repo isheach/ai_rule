@@ -19,6 +19,7 @@ const handoff = {
   ...task, coordinatorMode: source, backend: choices(...EXECUTION_BACKENDS), purpose: choices(...PURPOSES), goal: text, cwd: text,
   permissionMode: choices(...EXECUTION_PERMISSIONS), authorizationNote: text, constraints: text, contextSummary: text,
   acceptance: text, acceptTerraCharges: { type: 'boolean', description: 'Explicit billing consent for a specialist API Terra task. Required before the protected Terra client sends a response.' },
+  acceptPeerCharges: { type: 'boolean', description: 'Explicit billing consent for Sol to call available Terra or Luna collaborators when this API coordination needs one. No calls are made merely by enabling consent.' },
   timeoutMs: { type: 'integer', minimum: DSH_TIMEOUT_MS.minimum, maximum: DSH_TIMEOUT_MS.maximum,
     description: 'Total coordination budget. The local API Sol configuration can impose a lower maximum and defines the default.' },
   capability: choices('default', 'text-only', 'workspace-read', 'workspace-write'),

@@ -1,7 +1,9 @@
-<!-- ai-rule-managed: 2026-11-23.astra-handoff-r1 -->
+<!-- ai-rule-managed: 2026-11-23.luna-peer-api-r1 -->
 # Terra 专家入口
 
 Terra 用于用户明确交给 GPT-6.1 Terra Max 的专家任务：主机操作/验收、写作、绘图或图像生成与识别。Terra 使用与 Sol 相同的已选中间来源；不得因 Terra 不可用自动改走 DSF、Sol 或另一来源。
+
+此页记录直接专家入口。Sol 调用 Terra 协作的步骤和继承边界见 [调度 Skill](../SKILL.md#由-sol-调用-terra-或-luna)。
 
 ## 订阅来源
 
@@ -24,7 +26,7 @@ Terra 用于用户明确交给 GPT-6.1 Terra Max 的专家任务：主机操作/
 
 ## 共享配额与显式升级
 
-Sol API 与 Terra API 共用同一 Windows 项目、broker 和每小时配额。新装策略写入 `requests_per_hour: 100`；缺少该字段的旧策略仍按 24；已有显式值（如 96）保留，高于 100 的值不降低。只有用户授权并显式运行受保护升级才把低于 100 的值提高，不会静默迁移，也不重置 `rate.bin` 或审计记录。
+Sol、Terra 和 Luna API 共用同一 Windows 项目、broker 和每小时配额。新装策略写入 `requests_per_hour: 100`，缺少该字段的旧策略仍按 24。已有显式值保留，高于 100 的值不降低。提高配额需要用户授权和显式执行受保护升级。升级保留 `rate.bin` 和审计记录。
 
 ```powershell
 $setup = Join-Path $sourceRoot 'scripts\setup-sol.ps1'

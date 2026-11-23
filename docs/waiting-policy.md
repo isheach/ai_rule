@@ -8,7 +8,7 @@
 | `waitMs` | 一次异步等待的窗口，任务结束可提前返回 | 默认 25000 ms，上限 60000 ms |
 | `tool_timeout_sec` | 注册中的单次宿主工具期限 | 安装器示例 3700 秒，使用本机实际生效值 |
 
-Astra 等待接手的 Sol 或 Terra，对订阅代理使用宿主原生 agent ID，对 API 使用 `sol-coordinator` 的协调任务，直接专家工具使用其实际入口。Astra 按接手者的明确完成回报收尾。Sol 等待并验收自己派出的下游任务，沿用原任务回执。DSH `run_dsh_task` 和 `run_pool_task` 在服务内循环等待，收到终态后返回。WorkBuddy 的生命周期取决于实际加载的接口。
+Astra 等待接手的 Sol 或 Terra，对订阅代理使用宿主原生 agent ID，对 API 使用 `sol-coordinator` 的协调任务，直接专家工具使用其实际入口。Astra 按接手者的明确完成回报收尾。Sol 等待并验收自己派出的下游任务，包括 Terra 或 Luna 协作。协作沿用父任务的截止预算，终态随父任务返回。DSH `run_dsh_task` 和 `run_pool_task` 在服务内循环等待，收到终态后返回。WorkBuddy 的生命周期取决于实际加载的接口。
 
 ## 排障
 

@@ -4,6 +4,8 @@
 
 API 协议和固定模型/工具契约在 [`client.mjs`](../bridges/terra/client.mjs)：`gpt-6.1-terra`、`reasoning.effort=max`、`confirm_terra_api`、`terra_action`、`finish_terra`。受保护入口构造并返回真实的 `TerraClient`，没有另行实现一套模型协议。
 
+这里的工具契约用于直接 Terra 专家任务。由 API Sol 发起协作时，Terra 还可使用父任务授权的 `delegate_work` 和 `finish_coordination`。 [Sol 协作](sol-coordinator.md#sol-调用-terra-或-luna)
+
 ## 固定来源与边界
 
 - 普通用户不能覆盖 URL、API key 或凭据来源、模型、推理档位、transport 或 broker。生产工厂只接受 `actions`、`allowWrite`、`limits`；其它键在发出任何 broker 请求前抛出 `TERRA_OPTIONS_FORBIDDEN`。
@@ -172,7 +174,7 @@ $repo = (Get-Location).Path
 & (Join-Path $repo 'scripts\setup-sol.ps1') -ExpectedRevision '<reviewed-40-char-sha>' -EnableTerraApi -AllowBriefRestart -Apply
 ```
 
-`-AllowBriefRestart` 只与 `-EnableTerraApi -Apply` 组合有效；不能从配置、默认值、交互提示或其它开关推导。它不会进入普通 Sol 安装或普通 `elevation`，也不会传给非受保护源码。
+本段 Terra 升级在显式提供 `-EnableTerraApi -Apply -AllowBriefRestart` 时才允许短暂停服。 [Luna 的对应流程](sol-coordinator.md#启用-luna-api)
 
 受保护链为：普通入口 → 固定提交源码 bundle（`sol-setup.mjs` 校验并冻结 `install.ps1`/`build.ps1`/C#/bootstrap）→ UAC 提权引导 → 受保护暂存目录中的 `install.ps1 -EnableTerraApi [-AllowBriefRestart]`。安装器先编译候选、备份旧 exe/policy、校验策略字段，再做本机门槛：核对服务注册的固定映像路径和服务账号、稳定的 Running/Stopped 状态及 PID。Running 且无 consent 时拒绝；Running 且有 consent 时，以数次短间隔只读采样受保护 `SolBroker.exe` client 进程，任何忙、路径/身份不清或状态/PID 变化都拒绝，且不杀调用者、不强制停依赖服务。仅在最终复核后短暂停服一次，替换后按原状态启动一次。
 
@@ -186,8 +188,8 @@ $repo = (Get-Location).Path
 
 既有机器遵循以下规则：
 
-- `policy.json` 有显式 `requests_per_hour` 时（例如之前选择的 `96`，或更高的机器限额），普通重跑、刷新和没有显式改额度的 Terra 升级都会保留该值；预览的 `requests_per_hour.current` 报告实际值，不会把旧服务显示成 100。
-- 旧策略完全没有该字段时，broker 和预览仍按历史契约解释为 `24`；预览标记 `current_source=legacy-missing-field`。只有真正执行下面的显式升级并成功替换受保护的 `SolBroker.exe` 和 `policy.json` 后，旧机器才会变成 `100`。
+- 显式 `requests_per_hour`（如先前选择的 `96` 或更高值）在普通重跑、刷新及未显式改额度的角色升级中保留。服务运行时，预览可从 broker 的只读状态读取当前值。服务停止且保护 ACL 阻止普通用户读取策略时，预览显示当前额度未知，提升后的安装器依据实际策略核验并保留原额度。
+- 旧策略缺少该字段时，broker 仍按历史值 `24` 处理。预览能读取旧策略时标记 `current_source=legacy-missing-field`。显式申请升到 `100` 并成功应用后才使用新值。
 - 安装器只接受提高，拒绝降低；若既有显式值高于 `100`，请求 `100` 会被拒绝并保留原值。仅预览、仅改配置、仅改策略文本都不算生效；必须走受保护安装器并验证真实只读 `status`。
 
 在仓库根目录先做只读预览（不写策略、不停服、不调用模型）：
@@ -210,7 +212,7 @@ $repo = (Get-Location).Path
 & (Join-Path $repo 'scripts\setup-sol.ps1') -ExpectedRevision '<reviewed-40-char-sha>' -EnableTerraApi -RequestsPerHour 100 -AllowBriefRestart -Apply
 ```
 
-`<reviewed-40-char-sha>` 必须是包含这些源码改动的已审核提交；未提交或未审核的源码不会被固定提交校验接受。`-RequestsPerHour` 只与 `-EnableTerraApi` 一起使用。只写 `-EnableTerraApi` 不会自动把旧机器的 `24`（或既有的 `96`、更高值）改成 `100`；升级到 `100` 必须显式请求。`96` 只作为既有安装可能保留的先前值示例，不再是新安装默认值。
+`<reviewed-40-char-sha>` 必须是包含这些源码改动的已审核提交。Terra 和 Luna 启用命令都支持显式传入 `-RequestsPerHour`。省略时沿用既有额度，包括缺少字段的旧策略 `24` 或显式的 `96`、更高值。
 
 受保护升级在编译候选、备份、策略字段和固定服务/身份/状态校验通过后，替换 `SolBroker.exe` 与 `policy.json`，再按原先 Running/Stopped 状态处理；不会初始化、清空或改写 `state\rate.bin`、`audit.jsonl`、凭据或滚动窗口记录。滚动窗口跨重启保留，满一小时后释放较早记录。
 

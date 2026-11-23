@@ -5,6 +5,7 @@ import os from 'node:os';
 import path from 'node:path';
 import { fileURLToPath } from 'node:url';
 import { parseArgs } from 'node:util';
+import { gzipSync } from 'node:zlib';
 import { redact } from '../bridges/dsh/core.mjs';
 import { discardLegacyEnvironment } from '../bridges/sol/config.mjs';
 import { ResponsesClient } from '../bridges/sol/responses.mjs';
@@ -141,13 +142,15 @@ export function prepareElevation(sources, options) {
   const bundle = brokerBundle(sources);
   let args;
   let switches;
-  if (options.enableTerraApi) {
-    if (options.action || options.setKey) throw Error('The Terra API upgrade is a separate elevation action.');
+  if (options.enableTerraApi && options.enableLunaApi) throw Error('Enable one broker role per upgrade.');
+  if (options.enableTerraApi || options.enableLunaApi) {
+    if (options.action || options.setKey) throw Error('An API role upgrade is a separate elevation action.');
     args = { BundlePath: options.bundlePath, BundleSha256: hash(bundle) };
+    const enable = options.enableLunaApi ? '-EnableLunaApi' : '-EnableTerraApi';
     const quota = options.requestsPerHour === undefined ? '' : ` -RequestsPerHour ${options.requestsPerHour}`;
-    switches = `-EnableTerraApi${quota}${options.allowBriefRestart === true ? ' -AllowBriefRestart' : ''}`;
+    switches = `${enable}${quota}${options.allowBriefRestart === true ? ' -AllowBriefRestart' : ''}`;
   } else {
-    if (options.allowBriefRestart) throw Error('-AllowBriefRestart is accepted only for the reviewed Terra API elevation.');
+    if (options.allowBriefRestart) throw Error('-AllowBriefRestart is accepted only for the reviewed API role elevation.');
     if (options.requestsPerHour !== undefined) throw Error('-RequestsPerHour is accepted only for the reviewed installed-broker quota elevation.');
     args = { BundlePath: options.bundlePath, BundleSha256: hash(bundle), ClientSid: options.clientSid,
       Model: options.model, ReasoningEffort: options.effort };
@@ -158,11 +161,18 @@ export function prepareElevation(sources, options) {
       options.action === 'Enroll' ? '-ValidateExisting' : ''].filter(Boolean).join(' ');
   }
   const values = Object.entries(args).map(([name, value]) => `-${name} ${quotePowerShell(value)}`).join(' ');
-  const script = sources.get(bootstrapPath).toString('utf8').replace(/^\uFEFF/, '');
+  // Keep the reviewed bootstrap inside the elevation command with room for Windows paths and CRLF checkouts.
+  const script = gzipSync(sources.get(bootstrapPath)).toString('base64');
   const invocation = `${values} ${switches}`.trim();
-  const command = `try { & {
-${script}
-} ${invocation} } catch {
+  const command = `try {
+    $bytes = [Convert]::FromBase64String('${script}')
+    $stream = [IO.MemoryStream]::new($bytes, $false)
+    $gzip = [IO.Compression.GZipStream]::new($stream, [IO.Compression.CompressionMode]::Decompress)
+    $reader = [IO.StreamReader]::new($gzip)
+    try { $bootstrap = [ScriptBlock]::Create($reader.ReadToEnd()) }
+    finally { $reader.Dispose() }
+    & $bootstrap ${invocation}
+} catch {
     [Console]::Error.WriteLine($_.Exception.Message)
     if ([Environment]::UserInteractive -and -not [Console]::IsInputRedirected -and -not [Console]::IsOutputRedirected -and
         [Environment]::GetCommandLineArgs() -notcontains '-NonInteractive') {
@@ -189,48 +199,51 @@ async function main(args) {
   }
   if (Number(process.versions.node.split('.')[0]) < 22) throw Error('Windows Sol setup requires Node.js 22 or later.');
   const { values: opts, positionals: [mode, ...extra] } = parseArgs({ args, options, allowPositionals: true });
-  const terraModes = ['terra-plan', 'terra-elevation'];
-  if (extra.length || !['plan', 'elevation', 'apply', ...terraModes].includes(mode)) {
+  const upgrade = /^(terra|luna)-(plan|elevation)$/.exec(mode ?? '');
+  if (extra.length || (!upgrade && !['plan', 'elevation', 'apply'].includes(mode))) {
     throw Error('Use the reviewed scripts/setup-sol.ps1 entry point.');
   }
-  if (opts['allow-brief-restart'] === true && mode !== 'terra-elevation') {
-    throw Error('-AllowBriefRestart is accepted only with the reviewed Terra API elevation; it is not part of plan, normal elevation, apply or install.');
+  if (opts['allow-brief-restart'] === true && upgrade?.[2] !== 'elevation') {
+    throw Error('-AllowBriefRestart is accepted only with the reviewed API role elevation.');
   }
   const requestsPerHour = parseRequestsPerHour(opts['requests-per-hour']);
-  if (requestsPerHour !== undefined && !terraModes.includes(mode)) {
-    throw Error('-RequestsPerHour is accepted only with the reviewed Terra API elevation; it is not part of plan, normal elevation, apply or install.');
+  if (requestsPerHour !== undefined && !upgrade) {
+    throw Error('-RequestsPerHour is accepted only with a reviewed API role upgrade.');
   }
-  if (terraModes.includes(mode)) {
+  if (upgrade) {
+    const [, role, action] = upgrade;
+    const operation = role === 'luna' ? 'EnableLunaApi' : 'EnableTerraApi';
     for (const name of ['codex-home', 'config', 'workspace', 'model', 'effort', 'dsh-entry', 'fingerprint',
       'client-sid', 'project', 'organization', 'action']) {
-      if (opts[name] !== undefined) throw Error(`The Terra API upgrade does not accept --${name}.`);
+      if (opts[name] !== undefined) throw Error(`The API role upgrade does not accept --${name}.`);
     }
     if (!path.isAbsolute(opts['program-files'] ?? '')) throw Error('The target Windows Program Files directory is unavailable.');
-    if (mode === 'terra-plan' && opts['bundle-path'] !== undefined) throw Error('The Terra API preview does not write a source bundle.');
-    if (mode === 'terra-elevation' && !path.isAbsolute(opts['bundle-path'] ?? '')) {
-      throw Error('The Terra API elevation requires an absolute protected transfer path.');
+    if (action === 'plan' && opts['bundle-path'] !== undefined) throw Error('The API role preview does not write a source bundle.');
+    if (action === 'elevation' && !path.isAbsolute(opts['bundle-path'] ?? '')) {
+      throw Error('The API role elevation requires an absolute protected transfer path.');
     }
     const { revision, sources } = verifyCheckout(opts.revision, opts.git);
-    if (mode === 'terra-plan') {
+    if (action === 'plan') {
       const bundle = brokerBundle(sources);
       console.log(printableJson({ status: {
-        operation: 'EnableTerraApi', revision, install_root: path.join(opts['program-files'], 'AiRuleSolBroker'),
+        operation, revision, install_root: path.join(opts['program-files'], 'AiRuleSolBroker'),
         source_bundle_sha256: hash(bundle), source_files: brokerFiles,
         changed_files: ['SolBroker.exe', 'policy.json'], service_registration_changed: false,
         credential_accessed: false, state_accessed: false, preview_side_effects: false,
-        brief_restart: { supported: true, consent_switch: '-AllowBriefRestart', accepted_only_with: '-EnableTerraApi -Apply',
+        brief_restart: { supported: true, consent_switch: '-AllowBriefRestart', accepted_only_with: `-${operation} -Apply`,
           default: 'refuse-running-service', no_atomic_drain: true, maintenance_window_required: true },
         quota: {
           requested: requestsPerHour ?? null,
           ...installQuotaPreview(), maximum: maxRequestsPerHour, increases_only: true
         },
-        preserves: ['caller_sid', 'model', 'reasoning_effort', 'project', 'organization'],
-        adds: { allow_terra_api: true, ...(requestsPerHour === undefined ? {} : { requests_per_hour: requestsPerHour }) }
+        preserves: ['caller_sid', 'model', 'reasoning_effort', 'project', 'organization',
+          role === 'luna' ? 'allow_terra_api' : 'allow_luna_api'],
+        adds: { [`allow_${role}_api`]: true, ...(requestsPerHour === undefined ? {} : { requests_per_hour: requestsPerHour }) }
       } }, 2));
       return;
     }
     const { bundle, encodedCommand } = prepareElevation(sources, {
-      bundlePath: opts['bundle-path'], enableTerraApi: true, requestsPerHour,
+      bundlePath: opts['bundle-path'], enableTerraApi: role === 'terra', enableLunaApi: role === 'luna', requestsPerHour,
       allowBriefRestart: opts['allow-brief-restart'] === true
     });
     fs.writeFileSync(opts['bundle-path'], bundle, { flag: 'wx' });

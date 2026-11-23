@@ -215,17 +215,20 @@ namespace AiRule.Sol.Windows
         private static readonly Regex ModelPattern = new Regex(@"\A[a-z0-9][a-z0-9_.:-]{0,99}\z", RegexOptions.CultureInvariant);
         private static readonly Regex HeaderPattern = new Regex(@"\A[A-Za-z0-9_.:@/-]{1,160}\z", RegexOptions.CultureInvariant);
         private static readonly string[] Efforts = { "none", "minimal", "low", "medium", "high", "xhigh", "max" };
-        private static readonly string[] SolTools = { "confirm_sol_api", "delegate_work", "finish_coordination" };
-        // Terra is the optional second role in the same API project and shared quota.
-        private static readonly string[] TerraTools = { "confirm_terra_api", "terra_action", "finish_terra" };
+        private static readonly string[] SolTools = { "confirm_sol_api", "delegate_work", "delegate_peer", "finish_coordination" };
+        private static readonly string[] TerraTools = { "confirm_terra_api", "terra_action", "finish_terra", "delegate_work", "finish_coordination" };
+        private static readonly string[] LunaTools = { "confirm_luna_api", "delegate_work", "finish_coordination" };
         internal const string TerraModel = "gpt-6.1-terra";
         internal const string TerraEffort = "max";
+        internal const string LunaModel = "gpt-6-luna";
+        internal const string LunaEffort = "max";
         internal SecurityIdentifier Caller { get; private set; }
         internal string Model { get; private set; }
         internal string Effort { get; private set; }
         internal string Project { get; private set; }
         internal string Organization { get; private set; }
         internal bool TerraEnabled { get; private set; }
+        internal bool LunaEnabled { get; private set; }
         internal int RequestsPerHour { get; private set; }
 
         internal static Policy Load(byte[] json)
@@ -233,21 +236,17 @@ namespace AiRule.Sol.Windows
             if (json.Length > 4096) throw new InvalidDataException();
             var value = Protocol.Parse(json);
             Protocol.Fields(value, new[] { "caller_sid", "model", "reasoning_effort" },
-                "project", "organization", "allow_terra_api", "requests_per_hour");
+                "project", "organization", "allow_terra_api", "allow_luna_api", "requests_per_hour");
             var sid = new SecurityIdentifier((string)value["caller_sid"]);
             string model = value["model"] as string;
             string effort = value["reasoning_effort"] as string;
             if ((!sid.IsAccountSid() && !sid.Value.StartsWith("S-1-12-1-", StringComparison.Ordinal)) || sid.Equals(WindowsPipe.ServiceSid) ||
                 model == null || !ModelPattern.IsMatch(model) || !Efforts.Contains(effort)) throw new InvalidDataException();
-            bool terraEnabled = false;
-            if (value.ContainsKey("allow_terra_api"))
-            {
-                object allowed = value["allow_terra_api"];
-                if (!(allowed is bool)) throw new InvalidDataException();
-                terraEnabled = (bool)allowed;
-            }
-            // Role selection is by the two fixed models. The same model cannot name both roles.
-            if (terraEnabled && TerraModel.Equals(model, StringComparison.Ordinal)) throw new InvalidDataException();
+            bool terraEnabled = Enabled(value, "allow_terra_api");
+            bool lunaEnabled = Enabled(value, "allow_luna_api");
+            // A model may select only one role's tool policy.
+            if ((terraEnabled && TerraModel.Equals(model, StringComparison.Ordinal)) ||
+                (lunaEnabled && LunaModel.Equals(model, StringComparison.Ordinal))) throw new InvalidDataException();
             int requestsPerHour = Protocol.CallsPerHour;
             if (value.ContainsKey("requests_per_hour"))
             {
@@ -256,8 +255,16 @@ namespace AiRule.Sol.Windows
                     throw new InvalidDataException();
                 requestsPerHour = (int)quota;
             }
-            return new Policy { Caller = sid, Model = model, Effort = effort, TerraEnabled = terraEnabled,
+            return new Policy { Caller = sid, Model = model, Effort = effort, TerraEnabled = terraEnabled, LunaEnabled = lunaEnabled,
                 RequestsPerHour = requestsPerHour, Project = Header(value, "project"), Organization = Header(value, "organization") };
+        }
+
+        private static bool Enabled(Dictionary<string, object> value, string name)
+        {
+            object field;
+            if (!value.TryGetValue(name, out field)) return false;
+            if (!(field is bool)) throw new InvalidDataException();
+            return (bool)field;
         }
 
         private static string Header(Dictionary<string, object> value, string name)
@@ -270,7 +277,7 @@ namespace AiRule.Sol.Windows
 
         internal object Status(bool ready)
         {
-            if (!TerraEnabled)
+            if (!TerraEnabled && !LunaEnabled)
                 return new { ready = ready, model = Model, reasoning_effort = Effort, requests_per_hour = RequestsPerHour,
                     max_input_bytes = Protocol.MaxInputBytes, max_output_tokens = Protocol.MaxOutputTokens,
                     api_timeout_ms = Protocol.ApiTimeoutMs };
@@ -282,10 +289,21 @@ namespace AiRule.Sol.Windows
                 { "api_timeout_ms", Protocol.ApiTimeoutMs }
             };
             // Policy capability only. The top-level ready flag remains the runtime credential check.
-            status.Add("terra_enabled", true);
-            status.Add("terra_model", TerraModel);
-            status.Add("terra_reasoning_effort", TerraEffort);
-            status.Add("terra_tools", TerraTools.ToArray());
+            status.Add("sol_tools", SolTools.ToArray());
+            if (TerraEnabled)
+            {
+                status.Add("terra_enabled", true);
+                status.Add("terra_model", TerraModel);
+                status.Add("terra_reasoning_effort", TerraEffort);
+                status.Add("terra_tools", TerraTools.ToArray());
+            }
+            if (LunaEnabled)
+            {
+                status.Add("luna_enabled", true);
+                status.Add("luna_model", LunaModel);
+                status.Add("luna_reasoning_effort", LunaEffort);
+                status.Add("luna_tools", LunaTools.ToArray());
+            }
             return status;
         }
 
@@ -300,8 +318,9 @@ namespace AiRule.Sol.Windows
             string model = body["model"] as string;
             bool sol = Model.Equals(model);
             bool terra = TerraEnabled && TerraModel.Equals(model, StringComparison.Ordinal);
-            string[] allowedTools = sol ? SolTools : terra ? TerraTools : null;
-            string effort = sol ? Effort : terra ? TerraEffort : null;
+            bool luna = LunaEnabled && LunaModel.Equals(model, StringComparison.Ordinal);
+            string[] allowedTools = sol ? SolTools : terra ? TerraTools : luna ? LunaTools : null;
+            string effort = sol ? Effort : terra ? TerraEffort : luna ? LunaEffort : null;
             if (allowedTools == null || !effort.Equals(reasoning["effort"]) || !false.Equals(body["store"]) ||
                 !false.Equals(body["parallel_tool_calls"]) || !"required".Equals(body["tool_choice"]) ||
                 include.Length != 1 || !"reasoning.encrypted_content".Equals(include[0]) || !(body["max_output_tokens"] is int))

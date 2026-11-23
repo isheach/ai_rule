@@ -1,4 +1,4 @@
-<!-- ai-rule-managed: 2026-11-23.astra-handoff-r1 -->
+<!-- ai-rule-managed: 2026-11-23.luna-peer-api-r1 -->
 # HY4 与预准入回退
 
 HY4 是显式保留入口，不是全新默认底层。已有 HY4 选择、模式 3 或原任务所有者继续有效，不因新默认被迁移。
