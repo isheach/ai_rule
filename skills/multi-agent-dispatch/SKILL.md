@@ -1,12 +1,12 @@
 ---
 name: multi-agent-dispatch
-description: Hand off tasks from Astra to GPT-6.2 Sol Max or GPT-6.1 Terra Max and report the owner's result. Covers subscription or protected Responses API, default DSH/OpenCode Go DSF execution, and explicit WorkBuddy DSF, native A, or HY4 alternatives.
+description: Coordinate Astra handoffs, direct Terra specialist work, and GPT-6.2 Sol Max collaboration with GPT-6.1 Terra Max or GPT-6 Luna Max. Covers subscription and protected Responses API, default DSH execution, and explicit WorkBuddy DSF, native A, or HY4 alternatives.
 ---
-<!-- ai-rule-managed: 2026-11-23.astra-handoff-r1 -->
+<!-- ai-rule-managed: 2026-11-23.luna-peer-api-r1 -->
 
 # 多代理调度
 
-以当前生效的 AGENTS 为规则。全新独立会话默认订阅 GPT-6.2 Sol Max → DSH/OpenCode Go DSF；WorkBuddy DSF 是显式底层替代（既有模式 2 峰时交接除外）。主机操作/验收、写作、绘图或图像生成与识别交 GPT-6.1 Terra Max，来源与 Sol 相同。按需读取 [DSH 与峰谷设置](references/dsh.md)、[WorkBuddy DSF](references/workbuddy.md)、[HY4](references/hy4.md)、[模式 2 峰时交接](references/workbuddy-peak.md) 或 [Terra 专家入口](references/terra-api.md)。
+以当前生效的 AGENTS 为规则。全新独立会话默认订阅 GPT-6.2 Sol Max → DSH/OpenCode Go DSF。WorkBuddy DSF 是显式底层替代（既有模式 2 峰时交接除外）。纯主机操作/验收、写作、绘图或图像生成与识别任务按专家路由交 GPT-6.1 Terra Max。Sol 也可按工作需要调用 Terra 或 GPT-6 Luna Max，三者沿用当前所选的同一来源。按需读取 [DSH 与峰谷设置](references/dsh.md)、[WorkBuddy DSF](references/workbuddy.md)、[HY4](references/hy4.md)、[模式 2 峰时交接](references/workbuddy-peak.md) 或 [Terra 专家入口](references/terra-api.md)。
 
 ## 1. 恢复选择并核实目标
 
@@ -54,7 +54,7 @@ Astra 根据用户指令和已有上下文，明确交付目标、范围、授�
 | 一般编码、研究、工作 | GPT-6.2 Sol Max | DSH/OpenCode Go DSF；显式 WorkBuddy DSF 替代 |
 | 主机操作/验收、写作、绘图或图像生成与识别 | GPT-6.1 Terra Max | 仅实际提供的 CUA/主机/图像工具；API Terra 仅有限预注册动作 |
 
-- A 模式由原生 Sol 规划、执行、分析和自审，是显式保留的原生模式，不套用默认两层；只有 Sol 自己执行且确需额外智能监守时才使用 Luna Max。需要 Terra 专家时由用户明确选择，不静默改派。
+- A 模式由原生 Sol 规划、执行、分析和自审，按工作需要使用 Terra 或 Luna 协作，也可在 Sol 自行执行且确有必要时由 Luna 辅助监守。外部模式的 Harness 负责其原任务执行和监守，Terra 或 Luna 只接手 Sol 交办的独立协作子任务。
 - Terra 专家任务不默认改走 DSF 或 WorkBuddy，也不在订阅和 API 间自动回退。订阅来源只用宿主实际提供并已核对的 Terra 代理、CUA/主机工具或图像工具；未提供时报告能力不可用。
 - 纯写作可直接返回文本，不要求工具动作。主机操作/验收、图像生成或识别只通过实际提供的 CUA/图像工具或项目预注册动作；证据取本地回执或调用记录，不取模型自述。限定范围的 CUA 工作完成、失败或取消后关闭该范围，不影响无关窗口、进程或任务。
 - API Terra 固定使用 [Terra 专家入口](references/terra-api.md) 的 `bridges/terra/protected.mjs` 与 `bridges/terra/cli.mjs`。上游只经 `bridges/sol/broker.mjs` 的 `brokerCall` 到已安装 Windows 凭据代理；模型 `gpt-6.1-terra`、`reasoning.effort=max`。只调用宿主实际提供并已预注册的有限动作，模型只选动作名，不能传路径、命令、脚本或插件，`allowWrite` 默认关闭。不得声称有通用桌面、CUA 或图像驱动；未提供相应动作时报告不可用。
@@ -81,7 +81,7 @@ node bridges/dispatch/cli.mjs resolve --source subscription --purpose writing
 
 订阅来源的 `dsh-root-pool` 的 `start_pool_task`/`run_pool_task` 对专家任务返回 `native_handoff`，不伪造任务 ID、不调用模型；`resolve_layer_dispatch` 只返回解析计划，宿主据此启动真实的原生 `gpt-6.1-terra`/max。API 来源才由受保护 Terra client 执行。
 
-API 入口使用 `start_sol_coordination` 或 `run_sol_coordination`，两者共享 handoff；`context` 必填，另有必填 `idempotencyKey`、`goal`、`cwd`、`permissionMode`、`acceptance`。可选字段包括 `coordinatorMode`（`subscription|api`）、`backend`、`purpose`、`authorizationNote`、`constraints`、`contextSummary`、`timeoutMs`、`capability`（`default|text-only|workspace-read|workspace-write`）、`writeScopes`、`writes`、`commands`、`acceptTerraCharges`。`start` 返回 `task_id`；用原 `idempotencyKey` 和该 `taskId` 调用 `wait_sol_coordination`；`run` 在单次调用内等待。`context` 必须来自实际宿主的 `node bridges/sol/cli.mjs context --config <ABS>` 的 `context_ref`；服务按父链、服务 purpose 和 TTL 重新核实，手填根、线程、lease 或标签无效。
+API 入口使用 `start_sol_coordination` 或 `run_sol_coordination`，两者共享 handoff；`context` 必填，另有必填 `idempotencyKey`、`goal`、`cwd`、`permissionMode`、`acceptance`。可选字段包括 `coordinatorMode`（`subscription|api`）、`backend`、`purpose`、`authorizationNote`、`constraints`、`contextSummary`、`timeoutMs`、`capability`（`default|text-only|workspace-read|workspace-write`）、`writeScopes`、`writes`、`commands`、`acceptTerraCharges`、`acceptPeerCharges`。`start` 返回 `task_id`；用原 `idempotencyKey` 和该 `taskId` 调用 `wait_sol_coordination`；`run` 在单次调用内等待。`context` 必须来自实际宿主的 `node bridges/sol/cli.mjs context --config <ABS>` 的 `context_ref`；服务按父链、服务 purpose 和 TTL 重新核实，手填根、线程、lease 或标签无效。
 
 `run_sol_coordination` 示例（`start_sol_coordination` 使用相同的 handoff）：
 
@@ -117,6 +117,13 @@ API 的 `purpose:"writing"` 不要求 host capability，由受保护 Terra clien
 2. DSH 首次转入另一个根池前，读取 `get_sol_schedule`。和当前会话已授权的选择不同时，通过 `set_sol_schedule` 应用该选择。两条链共用同根池且模式一致时直接派单。来源开关本身只设置协调来源。
 3. 可用同步 `run_sol_coordination` 时由 Astra 等待结果。需要尽早取得协调 ID 或调用超时不足时，用 `start_sol_coordination` 及 `wait_sol_coordination`。查询、等待或取消使用 `get/wait/cancel_sol_coordination` 和原键，附所返回的 `taskId`。一般/协调 purpose 的 API Sol 在工具循环中实际派发、核对下游结果和使用受支持的原会话修订；专家 purpose 不走该 Sol 工具循环，而按上文的 Terra 路径执行。保留 Responses ID、返回模型、推理档位、用量及真实执行回执。
 
+### 由 Sol 调用 Terra 或 Luna
+
+1. Sol 只交接协作目标、验收条件和相关可共享上下文。协作继承同一父任务的 `cwd`、`permissionMode`、`capability`、`writeScopes`、`writes`、`commands`、授权说明、约束与预算。三者执行已批准的读写和命令时使用同一权限边界。受理后使用原子任务 ID 与键恢复，协作代理自身不再派发模型协作。
+2. 订阅来源由 Sol 自己在真实宿主 spawn `gpt-6.1-terra` 或 `gpt-6-luna`，档位为 `max`，沿用父任务权限，用原生 wait 等待原 agent ID。记录实际返回的模型、档位、ID 和任务结果。宿主未加载该代理或相应操作能力时报告受阻。
+3. 在使用 `dispatchLayeredTask` 的订阅适配宿主，Sol 的 `coordinate` 接收 `delegatePeer({ peer, goal, acceptance, contextSummary, idempotencyKey })`。宿主按原授权调用对应的 `nativeTerra.dispatch` 或 `nativeLuna.dispatch` 并等待实际终态。同一个子键重用原工作，变更工作使用新键。回执随父结果的 `peer_results` 返回。
+4. API 来源在已授权的父 handoff 传 `acceptPeerCharges:true`。用 `get_sol_coordinator_mode` 查看 `delegate_peer_available` 和 `peer_api.terra`、`peer_api.luna`。API Sol 在自己的 Responses 循环调用 `delegate_peer({ peer, goal, acceptance, contextSummary })`，等待结果返回并继续负责整体验收。需要实际执行时，协作模型通过同一个已授权的 DSH 或 WorkBuddy DSF 入口调用 `delegate_work`。检查父回执的 `peer_results`、Responses、执行记录及合计 `usage`。缺授权、缺能力或未知状态按实际结果报告。
+
 ### Terra 专家任务
 
 1. 订阅来源：按宿主实际提供的 Terra 代理或专家入口核对模型、档位和工具；不要把 `gpt-6.1-terra` 的 API 入口当成订阅代理，也不要把任务分配当成工具已就绪。纯写作返回文本即可；动作任务先核对 CUA/图像工具的实际能力和批准范围，完成后关闭限定范围。
@@ -142,7 +149,7 @@ API 的 `purpose:"writing"` 不要求 host capability，由受保护 Terra clien
 - Sol 依据原验收条件核对实际变更、命令与退出码及结果。DSH 的 `completed` 需要退出码 0 和 `final.reason.kind=completed`，业务验收还需任务证据。验证不足时，Sol 将必要修订交回原执行者。A 模式由 Sol 自审。可在原范围解决的事项由 Sol 推进。收尾时向 Astra 明确报告完成结论，或报告具体阻塞、待决事项和已完成的部分。
 - Terra 负责核对实际模型、工具与结果，向 Astra 报告完成或阻塞。纯写作以实际返回文本为结果。动作任务以本地动作回执或调用记录为证据。限定范围 CUA 未关闭时报告未完成。关闭时确认未影响无关工作。API Terra 另保留真实 Responses 回执、动作回执和 usage。
 - 接手者按任务范围分别记录源码或规则验证、目标机的结构检查、实际宿主工具与代理就绪，以及获准的真实调用。普通 PowerShell 的代理状态只覆盖该 Windows 调用身份，API 计费验收以真实 Responses 回执及账单为准。
-- 各层保留其所属任务的最小调用证据。订阅来源记录真实 Sol/Terra ID、宿主模型/档位和实际 MCP 调用归属，API 记录协调及 Responses 回执。执行层保留任务 ID、根或实例、原键、实际后端和终态。宿主调用记录证明发起方，配置和报价目录分别作为路由及准入证据，实际计费查账单。
-- Sol API 与 Terra API 共用同一 Windows 项目、broker 和每小时配额：新装 100，缺少 `requests_per_hour` 的旧策略为 24，已有显式值（如 96）保留，高于 100 的值不降低。只有用户授权并显式运行受保护升级才把低于 100 的值提高到 100，不会静默迁移，也不重置滚动记录。
+- 各层保留其所属任务的最小调用证据。订阅来源记录真实模型代理 ID、宿主模型/档位和实际 MCP 调用归属，API 记录协调及 Responses 回执。执行层保留任务 ID、根或实例、原键、实际后端和终态。宿主调用记录证明发起方，配置和报价目录分别作为路由及准入证据，实际计费查账单。
+- Sol、Terra 和 Luna API 共用同一 Windows 项目、broker 和每小时配额。新装为 100，缺少 `requests_per_hour` 的旧策略为 24，已有显式值（如 96）保留，高于 100 的值不降低。只有用户授权并显式运行受保护升级才把低于 100 的值提高到 100。升级沿用原滚动记录。
 - 结果未知、找不到任务或发生断连时，各层沿自己交接的原入口核实回执和归属，由原执行所有者核实下游进程。取消按授权交给原所有者并核对终态。保留锁和原进程，未核实旧任务前避免相冲突的新派单。
 - 发现旧任务经 Astra 越级派发时，保留有效成果与原运行环境。停止新的越级派发，优先恢复原协调者。Astra 交接真实任务 ID、原键、cwd、回执、范围和带时间的状态。原协调者可安全访问时接续查询与验收，进程所有权无法接续时保留原进程等待并报告限制。下一项正常任务核对真实发起者。

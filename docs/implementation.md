@@ -6,7 +6,8 @@
 |---|---|
 | `bridges/dsh/` | stdio MCP 管理本机 DSH 子进程、回执、锁、预算和日历。调用已安装的 DSH headless。 |
 | `bridges/pool/` | 为经宿主证据确认的根会话配置 worker、路由和容量，保留本根会话与任务归属。 |
-| `bridges/sol/` | 本机协调 MCP、Responses 工具循环及执行结果验收。由当前根选定 API 协调来源后才提交新的 API 任务。 |
+| `bridges/sol/` | 本机协调 MCP、Responses 工具循环及执行结果验收。Sol 可按父任务授权调用 Terra 或 Luna，三者共用受保护代理。 |
+| `bridges/dispatch/native-peer.mjs` | 订阅 Sol 的宿主适配入口。冻结父任务范围，在同一来源调用实际 Terra 或 Luna 并保存子任务回执。 |
 | `bridges/workbuddy/` | 模式 2 交接记录及可选 DSF 项目入口。后者使用锁定的 Tencent Agent SDK 与本机 WorkBuddy 脚本。 |
 | `bridges/hy4/` | 按本机 manifest 启动已配置的 CodeBuddy ACP，核实 `hy4free` 目录、权限及任务事件。 |
 

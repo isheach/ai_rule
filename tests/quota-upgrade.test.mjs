@@ -73,13 +73,13 @@ test('existing-machine preview reports the real policy value and never treats mi
   assert.doesNotMatch(setup, /\$installedRequestsPerHour = 100/);
 });
 
-test('ordinary rerun and no-quota Terra upgrade preserve explicit limits instead of applying 100', () => {
+test('ordinary rerun and role enablement preserve explicit limits instead of applying 100', () => {
   assert.match(install, /\$changeQuota = \$SetQuota -and \(\$RequestsPerHour -ne \$currentPolicy\.RequestsPerHour\)/);
-  assert.match(install, /if \(-not \$enableTerra -and -not \$changeQuota\) \{/);
+  assert.match(install, /if \(-not \$enableField -and -not \$changeQuota\) \{/);
   assert.match(install, /No production file was written and the service was not stopped or started/);
   assert.match(install, /if \(\$SetQuota -and \$RequestsPerHour -lt \$currentPolicy\.RequestsPerHour\)/);
   assert.match(install, /This operation only raises the bound/);
-  assert.match(setup, /\$quotaChange = \$installed -and \$quotaRequested -and \(\$RequestsPerHour -ne \$installedRequestsPerHour\)/);
+  assert.match(setup, /\$installed -and \$quotaRequested -and \(\$RequestsPerHour -ne \$installedRequestsPerHour\)/);
   assert.match(setup, /if \(\$quotaRequested\) \{ \$previewArguments \+= @\('--requests-per-hour'/);
   assert.doesNotMatch(setup, /\$RequestsPerHour = 100/);
   const upgradeWriter = install.slice(install.indexOf('function New-BrokerUpgradePolicy'), install.indexOf('function Get-BrokerServiceSnapshot'));
@@ -90,20 +90,18 @@ test('ordinary rerun and no-quota Terra upgrade preserve explicit limits instead
 test('96 or legacy 24 to 100 is carried through the reviewed elevation into guarded replacement', () => {
   assert.match(setup, /--requests-per-hour/);
   assert.match(setup, /-RequestsPerHour \{0\}/);
-  assert.match(setup, /-EnableTerraApi\{2\} -Apply/);
+  assert.match(setup, /\{2\}\{3\} -Apply/);
   assert.match(helper, /-RequestsPerHour \$\{options\.requestsPerHour\}/);
   assert.match(elevated, /\$parameters\.RequestsPerHour = \$RequestsPerHour/);
-  assert.match(install, /Invoke-BrokerUpgrade -SetQuota:\$quotaRequested -RequestsPerHour \$RequestsPerHour/);
-  assert.match(install, /New-BrokerUpgradePolicy \$currentPolicy \$enableTerra \$changeQuota \$RequestsPerHour/);
-  const upgrade = install.indexOf('Invoke-BrokerUpgrade -SetQuota:$quotaRequested -RequestsPerHour $RequestsPerHour');
-  const policy = install.indexOf('New-BrokerUpgradePolicy $currentPolicy $enableTerra $changeQuota $RequestsPerHour');
+  const upgrade = install.indexOf('Invoke-BrokerUpgrade -Role $role -SetQuota:$quotaRequested -RequestsPerHour $RequestsPerHour');
+  const policy = install.indexOf('New-BrokerUpgradePolicy $currentPolicy $enableField $changeQuota $RequestsPerHour');
   const replace = install.indexOf('[IO.File]::Replace($candidatePolicy, $policyFile');
   assert.ok(upgrade >= 0 && policy >= 0 && replace > policy,
     'the explicit value must reach the guarded policy candidate replacement');
 });
 
 test('quota upgrade reuses the guarded executable and policy replacement transaction', () => {
-  assert.match(install, /New-BrokerUpgradePolicy \$currentPolicy \$enableTerra \$changeQuota \$RequestsPerHour/);
+  assert.match(install, /New-BrokerUpgradePolicy \$currentPolicy \$enableField \$changeQuota \$RequestsPerHour/);
   assert.match(install, /requests_per_hour_before = \$currentPolicy\.RequestsPerHour/);
   assert.match(install, /requests_per_hour_after =/);
   assert.match(install, /\[IO\.File\]::Replace\(\$candidateExe, \$exe/);

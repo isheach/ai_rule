@@ -1,4 +1,4 @@
-<!-- ai-rule-managed: 2026-11-23.astra-handoff-r1 -->
+<!-- ai-rule-managed: 2026-11-23.luna-peer-api-r1 -->
 # WorkBuddy DSF
 
 WorkBuddy DSF 是底层显式替代，不是全新默认；默认底层是 DSH/OpenCode Go `deepseek-v4.1-flash`。这里固定使用 `deepseek-v4-flash`，不要与 OpenCode Go 的路由混用。只有用户明确选择 WorkBuddy DSF，或既有模式 2 的实际峰时交接，才进入本入口；Terra 专家任务不因本入口可用而改派 WorkBuddy。

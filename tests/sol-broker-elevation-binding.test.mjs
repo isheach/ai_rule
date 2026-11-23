@@ -64,6 +64,9 @@ function bind(invocation) {
     '    SetKey = [bool]$SetKey',
     '    ValidateExisting = [bool]$ValidateExisting',
     '    EnableTerraApi = [bool]$EnableTerraApi',
+    '    EnableLunaApi = [bool]$EnableLunaApi',
+    '    RequestsPerHour = $RequestsPerHour',
+    '    AllowBriefRestart = [bool]$AllowBriefRestart',
     '}',
     '$result | ConvertTo-Json -Compress',
     ''
@@ -100,19 +103,26 @@ test('existing-broker elevation omits -Install and selects its set explicitly', 
   assert.match(install, /ParameterSetName = 'Install'\)/);
 });
 
-test('Windows PowerShell binds the real existing and fresh elevation call shapes', (t) => {
+test('Windows PowerShell binds existing, fresh and Luna upgrade elevation call shapes', (t) => {
   if (!hasWindowsPowerShell) {
     t.skip('Windows PowerShell 5.1 is not available on this host.');
     return;
   }
+  const empty = { Install: false, SetKey: false, ValidateExisting: false, EnableTerraApi: false,
+    EnableLunaApi: false, RequestsPerHour: 0, AllowBriefRestart: false };
+  const luna = prepareElevation(sources(), {
+    bundlePath: 'C:\\Temp\\broker-source.json', enableLunaApi: true, requestsPerHour: 96, allowBriefRestart: true
+  });
   for (const [name, request, expected] of [
-    ['existing', elevation('Enroll'), { ParameterSetName: 'SetKey', Install: false, SetKey: true, ValidateExisting: true, EnableTerraApi: false }],
-    ['fresh with enrollment', elevation('Install'), { ParameterSetName: 'Install', Install: true, SetKey: true, ValidateExisting: false, EnableTerraApi: false }],
-    ['fresh install only', elevation('Install', false), { ParameterSetName: 'Install', Install: true, SetKey: false, ValidateExisting: false, EnableTerraApi: false }]
+    ['existing', elevation('Enroll'), { ParameterSetName: 'SetKey', SetKey: true, ValidateExisting: true }],
+    ['fresh with enrollment', elevation('Install'), { ParameterSetName: 'Install', Install: true, SetKey: true }],
+    ['fresh install only', elevation('Install', false), { ParameterSetName: 'Install', Install: true }],
+    ['Luna upgrade', luna, { ParameterSetName: 'EnableLunaApi', EnableLunaApi: true,
+      RequestsPerHour: 96, AllowBriefRestart: true }]
   ]) {
     const result = bind(request.invocation);
     assert.equal(result.error, undefined, `${name}: ${result.error?.message ?? ''}`);
     assert.equal(result.status, 0, `${name}: ${result.stderr || result.stdout}`);
-    assert.deepEqual(JSON.parse(result.stdout.trim()), expected, name);
+    assert.deepEqual(JSON.parse(result.stdout.trim()), { ...empty, ...expected }, name);
   }
 });

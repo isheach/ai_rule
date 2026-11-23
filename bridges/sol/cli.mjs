@@ -7,9 +7,11 @@ import { ResponsesClient } from './responses.mjs';
 let responses;
 try {
   const [command, flag, filename, ...extra] = process.argv.slice(2);
-  if (flag !== '--config' || !['context', 'broker-status', 'verify-api'].includes(command)
-    || (command === 'verify-api' ? extra.length !== 1 || extra[0] !== '--accept-api-charges' : extra.length !== 0)) {
-    throw Error('Use context or broker-status --config ABS for offline checks. verify-api --config ABS --accept-api-charges sends a billable model request.');
+  const probe = { 'verify-api': '--accept-api-charges', 'verify-luna-api': '--accept-luna-charges' };
+  const consent = Object.hasOwn(probe, command) ? probe[command] : null;
+  if (flag !== '--config' || !['context', 'broker-status', 'luna-status', 'verify-api', 'verify-luna-api'].includes(command)
+    || (consent ? extra.length !== 1 || extra[0] !== consent : extra.length !== 0)) {
+    throw Error('Use context, broker-status, or luna-status --config ABS for offline checks. verify-api --config ABS --accept-api-charges and verify-luna-api --config ABS --accept-luna-charges send a billable model request.');
   }
   const config = loadSolConfig(filename);
   discardLegacyEnvironment(config);
@@ -17,9 +19,10 @@ try {
   if (command === 'context') result = issueContext({ config: config.contextConfig, purpose: SERVICE });
   else {
     responses = new ResponsesClient({ config });
+    if (command === 'luna-status' || command === 'verify-luna-api') responses = responses.forPeer('luna');
     result = await responses.readiness();
     if (!result.ready) process.exitCode = 1;
-    else if (command === 'verify-api') result = await responses.verify();
+    else if (consent) result = await responses.verify();
   }
   process.stdout.write(JSON.stringify(result) + '\n');
 } catch (error) {

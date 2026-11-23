@@ -14,15 +14,18 @@ param(
     [ValidatePattern('\Aorg[-_][A-Za-z0-9_-]{1,140}\z')][string]$OrganizationId,
     [Parameter(Mandatory, ParameterSetName = 'Uninstall')][switch]$Uninstall,
     [Parameter(Mandatory, ParameterSetName = 'EnableTerraApi')][switch]$EnableTerraApi,
+    [Parameter(Mandatory, ParameterSetName = 'EnableLunaApi')][switch]$EnableLunaApi,
+    [Parameter(ParameterSetName = 'EnableLunaApi')]
     [Parameter(ParameterSetName = 'EnableTerraApi')][ValidateRange(1, 1000)][int]$RequestsPerHour,
+    [Parameter(ParameterSetName = 'EnableLunaApi')]
     [Parameter(ParameterSetName = 'EnableTerraApi')][switch]$AllowBriefRestart
 )
 
 Set-StrictMode -Version Latest
 $ErrorActionPreference = 'Stop'
 if (-not [Environment]::Is64BitProcess) { throw 'Use a 64-bit PowerShell process.' }
-if ($AllowBriefRestart -and -not $EnableTerraApi) {
-    throw '-AllowBriefRestart is accepted only for the -EnableTerraApi installed-broker quota upgrade.'
+if ($PSCmdlet.ParameterSetName -in @('EnableTerraApi', 'EnableLunaApi') -and -not ($EnableTerraApi -or $EnableLunaApi)) {
+    throw 'Select the installed broker role to enable.'
 }
 $quotaRequested = $PSBoundParameters.ContainsKey('RequestsPerHour')
 $name = 'AiRuleSolBroker'
@@ -177,11 +180,11 @@ function Read-InstalledBrokerPolicy {
     if ($null -eq $value -or $value -is [array]) { throw 'The installed broker policy must be one JSON object.' }
     $names = @($value.PSObject.Properties.Name)
     foreach ($name in @('caller_sid', 'model', 'reasoning_effort')) {
-        if ($names -notcontains $name) { throw 'The installed broker policy is missing a required field.' }
+        if ($names -cnotcontains $name) { throw 'The installed broker policy is missing a required field.' }
     }
-    $allowed = @('caller_sid', 'model', 'reasoning_effort', 'project', 'organization', 'allow_terra_api', 'requests_per_hour')
+    $allowed = @('caller_sid', 'model', 'reasoning_effort', 'project', 'organization', 'allow_terra_api', 'allow_luna_api', 'requests_per_hour')
     foreach ($name in $names) {
-        if ($allowed -notcontains $name) { throw 'The installed broker policy has an unexpected field.' }
+        if ($allowed -cnotcontains $name) { throw 'The installed broker policy has an unexpected field.' }
     }
     try { $caller = [Security.Principal.SecurityIdentifier]::new([string]$value.caller_sid) }
     catch { throw 'The installed broker policy has an invalid caller SID.' }
@@ -189,7 +192,7 @@ function Read-InstalledBrokerPolicy {
         throw 'The installed broker policy has an invalid caller SID.'
     }
     if ($value.model -isnot [string] -or -not $policyModelPattern.IsMatch($value.model) -or
-        [string]::Equals($value.model, 'gpt-6.1-terra', [StringComparison]::Ordinal)) {
+        $value.model -cin @('gpt-6.1-terra', 'gpt-6-luna')) {
         throw 'The installed broker policy has an invalid Sol model.'
     }
     if ($value.reasoning_effort -isnot [string] -or $policyEfforts -notcontains $value.reasoning_effort) {
@@ -202,11 +205,11 @@ function Read-InstalledBrokerPolicy {
             throw 'The installed broker policy has an invalid project or organization header.'
         }
     }
-    $allowTerraApi = $false
-    if ($names -contains 'allow_terra_api') {
-        $allowed = $value.PSObject.Properties['allow_terra_api'].Value
-        if ($allowed -isnot [bool]) { throw 'The installed broker policy has a non-boolean allow_terra_api field.' }
-        $allowTerraApi = [bool]$allowed
+    foreach ($name in @('allow_terra_api', 'allow_luna_api')) {
+        $property = $value.PSObject.Properties[$name]
+        if ($null -ne $property -and $property.Value -isnot [bool]) {
+            throw ('The installed broker policy has a non-boolean {0} field.' -f $name)
+        }
     }
     $requestsPerHour = 24
     if ($names -contains 'requests_per_hour') {
@@ -219,7 +222,7 @@ function Read-InstalledBrokerPolicy {
         }
         $requestsPerHour = [int]$quota
     }
-    return [pscustomobject]@{ Value = $value; AllowTerraApi = $allowTerraApi; RequestsPerHour = $requestsPerHour }
+    return [pscustomobject]@{ Value = $value; RequestsPerHour = $requestsPerHour }
 }
 
 function New-InstallBrokerPolicy([string]$CallerSid, [string]$Model, [string]$Effort, [string]$Project, [string]$Organization) {
@@ -237,28 +240,28 @@ function New-InstallBrokerPolicy([string]$CallerSid, [string]$Model, [string]$Ef
     return $policy
 }
 
-function New-BrokerUpgradePolicy([object]$Policy, [bool]$EnableTerra, [bool]$SetQuota, [int]$RequestsPerHour) {
+function New-BrokerUpgradePolicy([object]$Policy, [string]$EnableField, [bool]$SetQuota, [int]$RequestsPerHour) {
     $ordered = [ordered]@{}
     foreach ($property in $Policy.Value.PSObject.Properties) {
-        if ($EnableTerra -and $property.Name -ceq 'allow_terra_api') { continue }
+        if ($property.Name -ceq $EnableField) { continue }
         if ($SetQuota -and $property.Name -ceq 'requests_per_hour') { continue }
         $ordered[$property.Name] = $property.Value
     }
-    if ($EnableTerra) { $ordered['allow_terra_api'] = $true }
+    if ($EnableField) { $ordered[$EnableField] = $true }
     if ($SetQuota) { $ordered['requests_per_hour'] = $RequestsPerHour }
     $json = $ordered | ConvertTo-Json -Compress -Depth 4
     try { $parsed = ConvertFrom-Json -InputObject $json -ErrorAction Stop } catch { throw 'The new broker policy is not valid JSON.' }
     if ($null -eq $parsed -or $parsed -is [array]) { throw 'The new broker policy must be one JSON object.' }
     foreach ($property in $Policy.Value.PSObject.Properties) {
-        if ($EnableTerra -and $property.Name -ceq 'allow_terra_api') { continue }
+        if ($property.Name -ceq $EnableField) { continue }
         if ($SetQuota -and $property.Name -ceq 'requests_per_hour') { continue }
         $after = $parsed.PSObject.Properties[$property.Name]
         if ($null -eq $after -or [string]$after.Value -cne [string]$property.Value) {
             throw 'The new broker policy changed an existing field.'
         }
     }
-    if ($EnableTerra -and $parsed.PSObject.Properties['allow_terra_api'].Value -ne $true) {
-        throw 'The new broker policy did not enable allow_terra_api.'
+    if ($EnableField -and $parsed.PSObject.Properties[$EnableField].Value -ne $true) {
+        throw ('The new broker policy did not enable {0}.' -f $EnableField)
     }
     if ($SetQuota -and [int]$parsed.PSObject.Properties['requests_per_hour'].Value -ne $RequestsPerHour) {
         throw 'The new broker policy did not set the requested hourly quota.'
@@ -277,7 +280,7 @@ function Get-BrokerServiceSnapshot {
     try { $state = [string]$service.Status }
     finally { $service.Dispose() }
     if ($state -cnotin @('Running', 'Stopped')) {
-        throw ("The AiRuleSolBroker service is {0}. The broker quota/Terra upgrade requires a stable Running or Stopped service. No production file was changed." -f $state)
+        throw ("The AiRuleSolBroker service is {0}. The broker API role upgrade requires a stable Running or Stopped service. No production file was changed." -f $state)
     }
     try { $registered = Get-CimInstance -ClassName Win32_Service -Filter ("Name='{0}'" -f $name) -ErrorAction Stop }
     catch { throw 'The fixed AiRuleSolBroker service state cannot be read; the upgrade is refused without changing production files.' }
@@ -310,7 +313,7 @@ function Assert-BrokerUpgradeGate([object]$Before, [bool]$AllowBriefRestart) {
     }
     if ($current.State -eq 'Stopped') { return $current }
     if (-not $AllowBriefRestart) {
-        throw ("The installed AiRuleSolBroker service is Running (PID {0}). This command does not stop a running service by default. Wait for a short maintenance window, let in-flight Sol calls finish, and rerun the same upgrade with -AllowBriefRestart. The old service has no atomic drain or refusal barrier, so even with that explicit consent a caller can start between the final check and the stop. No production file was replaced and the service was not stopped." -f $current.ProcessId)
+        throw ("The installed AiRuleSolBroker service is Running (PID {0}). This command does not stop a running service by default. Wait for a short maintenance window, let in-flight API calls finish, and rerun the same upgrade with -AllowBriefRestart. The old service has no atomic drain or refusal barrier, so even with that explicit consent a caller can start between the final check and the stop. No production file was replaced and the service was not stopped." -f $current.ProcessId)
     }
     return $current
 }
@@ -349,7 +352,7 @@ function Wait-ForIdleBrokerClients([object]$Snapshot) {
         }
         $clients = @(Get-ProtectedBrokerClientProcessIds $current.ProcessId)
         if ($clients.Count -gt 0) {
-            throw ("Detected {0} protected SolBroker.exe client process(es) (PID {1}). The service was not stopped and no caller was terminated. Wait for in-flight Sol calls to finish and retry in a maintenance window." -f
+            throw ("Detected {0} protected SolBroker.exe client process(es) (PID {1}). The service was not stopped and no caller was terminated. Wait for in-flight API calls to finish and retry in a maintenance window." -f
                 $clients.Count, ($clients -join ', '))
         }
     }
@@ -453,7 +456,7 @@ function Remove-KnownFiles {
     [IO.Directory]::Delete($root, $false)
 }
 
-function Invoke-BrokerUpgrade([switch]$SetQuota, [int]$RequestsPerHour) {
+function Invoke-BrokerUpgrade([ValidateSet('Terra', 'Luna')][string]$Role, [switch]$SetQuota, [int]$RequestsPerHour) {
     $setupMutex = $null
     $ownsSetupMutex = $false
     try {
@@ -470,19 +473,21 @@ function Invoke-BrokerUpgrade([switch]$SetQuota, [int]$RequestsPerHour) {
         Assert-ProtectedPath $policyFile
         $serviceBefore = Get-BrokerServiceSnapshot
         $currentPolicy = Read-InstalledBrokerPolicy
-        $enableTerra = -not $currentPolicy.AllowTerraApi
+        $policyField = 'allow_{0}_api' -f $Role.ToLowerInvariant()
+        $property = $currentPolicy.Value.PSObject.Properties[$policyField]
+        $enableField = if ($null -eq $property -or $property.Value -eq $false) { $policyField } else { '' }
         $changeQuota = $SetQuota -and ($RequestsPerHour -ne $currentPolicy.RequestsPerHour)
         if ($SetQuota -and $RequestsPerHour -lt $currentPolicy.RequestsPerHour) {
             throw ("The requested hourly quota {0} is below the installed quota {1}. This operation only raises the bound; no production file was written and the service was not stopped or started." -f
                 $RequestsPerHour, $currentPolicy.RequestsPerHour)
         }
-        if (-not $enableTerra -and -not $changeQuota) {
-            Write-Output ("The installed broker already has Terra API {0} and requests_per_hour {1}. No production file was written and the service was not stopped or started (state: {2}, PID {3})." -f
-                $(if ($currentPolicy.AllowTerraApi) { 'enabled' } else { 'disabled' }), $currentPolicy.RequestsPerHour,
+        if (-not $enableField -and -not $changeQuota) {
+            Write-Output ("The installed broker already has {0} API enabled and requests_per_hour {1}. No production file was written and the service was not stopped or started (state: {2}, PID {3})." -f
+                $Role, $currentPolicy.RequestsPerHour,
                 $serviceBefore.State, $serviceBefore.ProcessId)
             return
         }
-        $operation = if ($enableTerra -and $changeQuota) { 'Terra API and hourly quota' } elseif ($enableTerra) { 'Terra API' } else { 'hourly quota' }
+        $operation = if ($enableField -and $changeQuota) { "$Role API and hourly quota" } elseif ($enableField) { "$Role API" } else { 'hourly quota' }
 
         $upgradeDirectory = Join-Path $parent ('AiRuleSolBroker-upgrade-' + [Guid]::NewGuid().ToString('N'))
         $backupDirectory = Join-Path $upgradeDirectory 'backup'
@@ -538,7 +543,7 @@ function Invoke-BrokerUpgrade([switch]$SetQuota, [int]$RequestsPerHour) {
             Assert-ProtectedPath $candidateExe
             $candidateExeHash = Get-BrokerFileHash $candidateExe
 
-            $newPolicy = New-BrokerUpgradePolicy $currentPolicy $enableTerra $changeQuota $RequestsPerHour
+            $newPolicy = New-BrokerUpgradePolicy $currentPolicy $enableField $changeQuota $RequestsPerHour
             [IO.File]::WriteAllText($candidatePolicy, $newPolicy.Json, [Text.UTF8Encoding]::new($false))
             Protect-InstalledFile $candidatePolicy $false
             Assert-ProtectedPath $candidatePolicy
@@ -555,7 +560,7 @@ function Invoke-BrokerUpgrade([switch]$SetQuota, [int]$RequestsPerHour) {
                 service_state_before = $originalState
                 service_pid_before = $originalServicePid
                 operation = $operation
-                enable_terra_api = $enableTerra
+                enabled_policy_field = $enableField
                 requests_per_hour_before = $currentPolicy.RequestsPerHour
                 requests_per_hour_after = $(if ($changeQuota) { $RequestsPerHour } else { $currentPolicy.RequestsPerHour })
                 allow_brief_restart = [bool]$AllowBriefRestart
@@ -615,8 +620,8 @@ function Invoke-BrokerUpgrade([switch]$SetQuota, [int]$RequestsPerHour) {
                 throw 'The replaced broker files failed their SHA-256 check.'
             }
             $after = Read-InstalledBrokerPolicy
-            if ($enableTerra -and -not $after.AllowTerraApi) {
-                throw 'The installed policy does not enable Terra API after replacement.'
+            if ($after.Value.PSObject.Properties[$policyField].Value -ne $true) {
+                throw ("The installed policy does not enable {0} API after replacement." -f $Role)
             }
             $expectedQuota = if ($changeQuota) { $RequestsPerHour } else { $currentPolicy.RequestsPerHour }
             if ($after.RequestsPerHour -ne $expectedQuota) {
@@ -654,7 +659,7 @@ function Invoke-BrokerUpgrade([switch]$SetQuota, [int]$RequestsPerHour) {
             $filesTouched = $exeReplaced -or $policyReplaced
             $recoveryNeeded = $stopRequested -or $filesTouched
             if (-not $recoveryNeeded) {
-                throw ("The broker quota/Terra upgrade stopped before any service stop or production replacement. Cause: {0}. The service was not stopped and no production file was replaced." -f $failure)
+                throw ("The broker API role upgrade stopped before any service stop or production replacement. Cause: {0}. The service was not stopped and no production file was replaced." -f $failure)
             }
             $rollbackErrors = New-Object 'System.Collections.Generic.List[string]'
             $actualState = 'unknown'
@@ -735,7 +740,7 @@ function Invoke-BrokerUpgrade([switch]$SetQuota, [int]$RequestsPerHour) {
                 $preserveForRecovery = $true
                 $failureFile = Join-Path $backupDirectory 'ROLLBACK-FAILED.txt'
                 $failureText = @(
-                    ('Broker quota/Terra upgrade failed: {0}' -f $failure),
+                    ('Broker API role upgrade failed: {0}' -f $failure),
                     ('Rollback errors: {0}' -f ($rollbackErrors -join '; ')),
                     ('Original service state: {0} (PID {1})' -f $originalState, $originalServicePid),
                     ('Actual service state: {0}' -f $actualState),
@@ -747,13 +752,13 @@ function Invoke-BrokerUpgrade([switch]$SetQuota, [int]$RequestsPerHour) {
                     'Do not start the service until the original exe and policy are restored and checked. No caller or dependent service was terminated, and no force stop was attempted.'
                 ) -join "`r`n"
                 try { [IO.File]::WriteAllText($failureFile, $failureText, [Text.UTF8Encoding]::new($false)) } catch { }
-                throw ("Broker quota/Terra upgrade failed: {0}. Rollback was incomplete: {1}. Actual service state: {2}. Original files restored: {3}. Recovery material is preserved at {4}. Do not start the service until the original exe and policy are restored and checked." -f
+                throw ("Broker API role upgrade failed: {0}. Rollback was incomplete: {1}. Actual service state: {2}. Original files restored: {3}. Recovery material is preserved at {4}. Do not start the service until the original exe and policy are restored and checked." -f
                     $failure, ($rollbackErrors -join '; '), $actualState, $filesRestored, $upgradeDirectory)
             }
             if ($originalState -eq 'Running') {
-                throw ("Broker quota/Terra upgrade failed: {0}. The original exe and policy were restored, and the service was returned to its original Running state. No state, credential, rolling rate record or audit file was reset or edited. The upgrade scratch directory and its backups are removed after this clean rollback." -f $failure)
+                throw ("Broker API role upgrade failed: {0}. The original exe and policy were restored, and the service was returned to its original Running state. No state, credential, rolling rate record or audit file was reset or edited. The upgrade scratch directory and its backups are removed after this clean rollback." -f $failure)
             }
-            throw ("Broker quota/Terra upgrade failed: {0}. The original exe and policy were restored, and the service remains Stopped as it was before the transaction. No state, credential, rolling rate record or audit file was reset or edited. The upgrade scratch directory and its backups are removed after this clean rollback." -f $failure)
+            throw ("Broker API role upgrade failed: {0}. The original exe and policy were restored, and the service remains Stopped as it was before the transaction. No state, credential, rolling rate record or audit file was reset or edited. The upgrade scratch directory and its backups are removed after this clean rollback." -f $failure)
         }
         finally {
             if (-not $preserveForRecovery) {
@@ -772,8 +777,9 @@ function Invoke-BrokerUpgrade([switch]$SetQuota, [int]$RequestsPerHour) {
 }
 
 Require-RealDirectory $parent
-if ($EnableTerraApi) {
-    Invoke-BrokerUpgrade -SetQuota:$quotaRequested -RequestsPerHour $RequestsPerHour
+if ($EnableTerraApi -or $EnableLunaApi) {
+    $role = if ($EnableLunaApi) { 'Luna' } else { 'Terra' }
+    Invoke-BrokerUpgrade -Role $role -SetQuota:$quotaRequested -RequestsPerHour $RequestsPerHour
     return
 }
 if ($Uninstall) {

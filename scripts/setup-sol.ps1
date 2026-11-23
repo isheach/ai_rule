@@ -3,6 +3,7 @@
 param(
     [Parameter(Mandatory)][ValidatePattern('\A[0-9a-f]{40}\z')][string]$ExpectedRevision,
     [switch]$EnableTerraApi,
+    [switch]$EnableLunaApi,
     [ValidateRange(1, 1000)][int]$RequestsPerHour,
     [switch]$AllowBriefRestart,
     [switch]$Apply,
@@ -19,11 +20,15 @@ param(
 Set-StrictMode -Version Latest
 $ErrorActionPreference = 'Stop'
 $quotaRequested = $PSBoundParameters.ContainsKey('RequestsPerHour')
-if ($quotaRequested -and -not $EnableTerraApi) {
-    throw '-RequestsPerHour is accepted only with -EnableTerraApi. It is an explicit opt-in for the installed Sol broker quota upgrade; it is not part of normal Sol installation.'
+if ($EnableTerraApi -and $EnableLunaApi) {
+    throw 'Enable one broker role per upgrade. The other role keeps its existing setting.'
 }
-if ($AllowBriefRestart -and (-not $EnableTerraApi -or -not $Apply)) {
-    throw '-AllowBriefRestart is accepted only with -EnableTerraApi -Apply. It is an explicit consent switch for one brief stop of the installed Sol service during a maintenance window; it is not part of normal Sol installation.'
+$upgradeRequested = $EnableTerraApi -or $EnableLunaApi
+if ($quotaRequested -and -not $upgradeRequested) {
+    throw '-RequestsPerHour is accepted only with -EnableTerraApi or -EnableLunaApi for the installed broker.'
+}
+if ($AllowBriefRestart -and (-not $upgradeRequested -or -not $Apply)) {
+    throw '-AllowBriefRestart is accepted only with -Apply and either -EnableTerraApi or -EnableLunaApi for one brief stop during a maintenance window.'
 }
 $os = [Environment]::OSVersion.VersionString
 if ([Environment]::OSVersion.Platform -ne [PlatformID]::Win32NT -or -not [Environment]::Is64BitProcess) {
@@ -54,20 +59,25 @@ $serviceRegistry = "HKLM:\SYSTEM\CurrentControlSet\Services\$brokerName"
 $serviceAccount = "NT SERVICE\$brokerName"
 $expectedImage = '"{0}" service' -f $brokerExe
 
-if ($EnableTerraApi) {
+if ($upgradeRequested) {
+    $role = if ($EnableLunaApi) { 'Luna' } else { 'Terra' }
+    $operation = 'Enable{0}Api' -f $role
+    $enableArgument = '-' + $operation
+    $roleKey = $role.ToLowerInvariant()
+    $policyFieldName = 'allow_{0}_api' -f $roleKey
     if ($SolCoordinatorConfig -or $SolWorkspaceRoot -or $SolModel -or $SolReasoningEffort -or $DshEntry -or $CodexHome -or
         $ProjectId -or $OrganizationId) {
-        throw 'The Terra API upgrade is a separate installed-broker operation. Do not combine it with coordinator, workspace, model, project, organization, DSH or Codex options.'
+        throw 'The API role upgrade applies only to the installed broker. Coordinator, workspace, model, project, organization, DSH and Codex settings are managed separately.'
     }
-    $previewArguments = @('terra-plan', '--revision', $ExpectedRevision, '--git', $git, '--program-files', $programs)
+    $previewArguments = @("${roleKey}-plan", '--revision', $ExpectedRevision, '--git', $git, '--program-files', $programs)
     if ($quotaRequested) { $previewArguments += @('--requests-per-hour', [string]$RequestsPerHour) }
     $previewOutput = & $node $helper @previewArguments
-    if ($LASTEXITCODE -ne 0) { throw 'The fixed-revision Terra API preview could not be verified.' }
+    if ($LASTEXITCODE -ne 0) { throw 'The fixed-revision API role preview could not be verified.' }
     try { $sourcePlan = ($previewOutput -join "`n") | ConvertFrom-Json }
-    catch { throw 'The Terra API preview returned invalid source status.' }
-    if ($sourcePlan.status.revision -ne $ExpectedRevision.ToLowerInvariant() -or
+    catch { throw 'The API role preview returned invalid source status.' }
+    if ($sourcePlan.status.operation -cne $operation -or $sourcePlan.status.revision -ne $ExpectedRevision.ToLowerInvariant() -or
         $sourcePlan.status.source_bundle_sha256 -notmatch '\A[0-9a-f]{64}\z') {
-        throw 'The Terra API preview did not identify the reviewed revision and source bundle.'
+        throw 'The API role preview did not identify the reviewed operation, revision and source bundle.'
     }
 
     $service = Get-Service -Name $brokerName -ErrorAction SilentlyContinue
@@ -89,23 +99,40 @@ if ($EnableTerraApi) {
         $registeredAccount = [string]$registration.ObjectName
         $registrationState = if ($registeredImage -eq $expectedImage -and $registeredAccount -eq $serviceAccount) { 'matches' } else { 'mismatch' }
     }
-    $installedFiles = (Test-Path -LiteralPath $brokerExe -PathType Leaf) -and (Test-Path -LiteralPath $brokerPolicy -PathType Leaf)
-    foreach ($leaf in @($brokerRoot, $brokerExe, $brokerPolicy)) {
+    foreach ($leaf in @($brokerRoot, $brokerExe)) {
         if (-not (Test-Path -LiteralPath $leaf)) { continue }
         $item = Get-Item -LiteralPath $leaf -Force
         if (($item.Attributes -band [IO.FileAttributes]::ReparsePoint) -ne 0) {
             throw 'The installed broker path contains a reparse point. The upgrade is refused without changing production files.'
         }
     }
+    $policyItem = if (Test-Path -LiteralPath $brokerRoot -PathType Container) {
+        Get-ChildItem -LiteralPath $brokerRoot -Filter 'policy.json' -File -Force
+    }
+    if ($null -ne $policyItem -and ($policyItem.Attributes -band [IO.FileAttributes]::ReparsePoint) -ne 0) {
+        throw 'The installed broker policy is a reparse point. The upgrade is refused without changing production files.'
+    }
+    $installedFiles = (Test-Path -LiteralPath $brokerExe -PathType Leaf) -and ($null -ne $policyItem)
     $installed = $installedFiles -and ($null -ne $service) -and ($registrationState -eq 'matches')
-    $terraAlreadyEnabled = $false
+    $roleAlreadyEnabled = $null
     $installedRequestsPerHour = $null
     $installedQuotaSource = 'not-installed'
-    $legacyQuotaField = $false
+    $legacyQuotaField = $null
     if ($installedFiles) {
-        $installedQuotaSource = 'policy'
+        $policyReadable = $false
         try {
-            $installedPolicy = Get-Content -LiteralPath $brokerPolicy -Raw -ErrorAction Stop | ConvertFrom-Json -ErrorAction Stop
+            $policyText = Get-Content -LiteralPath $brokerPolicy -Raw -ErrorAction Stop
+            $policyReadable = $true
+        }
+        catch {
+            if ($_.CategoryInfo.Category -ne [System.Management.Automation.ErrorCategory]::PermissionDenied -and
+                $_.Exception -isnot [UnauthorizedAccessException]) { throw }
+            $installedQuotaSource = 'protected-policy-unreadable'
+        }
+        if ($policyReadable) {
+            $installedQuotaSource = 'policy'
+            $legacyQuotaField = $false
+            $installedPolicy = ConvertFrom-Json -InputObject $policyText -ErrorAction Stop
             if ($null -eq $installedPolicy -or $installedPolicy -is [array] -or $installedPolicy -isnot [pscustomobject]) {
                 throw 'The installed broker policy must be one JSON object.'
             }
@@ -114,8 +141,12 @@ if ($EnableTerraApi) {
                     throw ('The installed broker policy is missing the required field {0}.' -f $requiredField)
                 }
             }
-            $policyField = $installedPolicy.PSObject.Properties['allow_terra_api']
-            if ($null -ne $policyField -and $policyField.Value -eq $true) { $terraAlreadyEnabled = $true }
+            $policyField = $installedPolicy.PSObject.Properties[$policyFieldName]
+            $roleAlreadyEnabled = $false
+            if ($null -ne $policyField) {
+                if ($policyField.Value -isnot [bool]) { throw ('The installed broker policy has a non-boolean {0} field.' -f $policyFieldName) }
+                $roleAlreadyEnabled = $policyField.Value
+            }
             $quotaField = $installedPolicy.PSObject.Properties['requests_per_hour']
             if ($null -eq $quotaField) {
                 # Compatibility only for policies written before the quota field existed.
@@ -132,36 +163,65 @@ if ($EnableTerraApi) {
                 $installedRequestsPerHour = [int]$quotaField.Value
             }
         }
-        catch {
-            throw ('The installed broker policy could not be read or validated ({0}). The preview does not report an effective quota and no upgrade was prepared.' -f $_.Exception.Message)
+        elseif ($installed -and $serviceState -eq 'Running') {
+            # The caller can use the status pipe without reading the protected policy file.
+            $brokerStatus = $null
+            try {
+                $statusOutput = '{"op":"status"}' | & $brokerExe client
+                if ($LASTEXITCODE -eq 0) {
+                    $envelope = ($statusOutput -join "`n") | ConvertFrom-Json -ErrorAction Stop
+                    if ($envelope.ok -eq $true -and $envelope.status -eq 200) { $brokerStatus = $envelope.body }
+                }
+            }
+            catch { $brokerStatus = $null }
+            if ($null -ne $brokerStatus) {
+                $roleProperty = $brokerStatus.PSObject.Properties[('{0}_enabled' -f $roleKey)]
+                $roleAlreadyEnabled = $null -ne $roleProperty -and $roleProperty.Value -eq $true
+                $quotaProperty = $brokerStatus.PSObject.Properties['requests_per_hour']
+                if ($null -ne $quotaProperty) {
+                    $value = $quotaProperty.Value
+                    if (($value -is [int] -or $value -is [long]) -and $value -ge 1 -and $value -le 1000) {
+                        $installedRequestsPerHour = [int]$value
+                        $installedQuotaSource = 'broker-status'
+                    }
+                }
+            }
         }
     }
-    $quotaChange = $installed -and $quotaRequested -and ($RequestsPerHour -ne $installedRequestsPerHour)
-    if ($installed -and $quotaRequested -and $RequestsPerHour -lt $installedRequestsPerHour) {
+    $quotaChange = if ($installed -and $quotaRequested -and $null -eq $installedRequestsPerHour) {
+        $null
+    } else {
+        $installed -and $quotaRequested -and ($RequestsPerHour -ne $installedRequestsPerHour)
+    }
+    if ($installed -and $quotaRequested -and $null -ne $installedRequestsPerHour -and $RequestsPerHour -lt $installedRequestsPerHour) {
         throw ("The requested hourly quota {0} is below the installed quota {1}. This operation only raises the bound. Nothing was changed." -f $RequestsPerHour, $installedRequestsPerHour)
     }
-    $needsChange = (-not $terraAlreadyEnabled) -or $quotaChange
+    $needsChange = if ($null -ne $roleAlreadyEnabled -and $null -ne $quotaChange) {
+        (-not $roleAlreadyEnabled) -or $quotaChange
+    }
     $applyState = if (-not $installed) {
         'unavailable: no complete installed broker was found'
-    } elseif (-not $needsChange) {
-        ('no-op: allow_terra_api is already true and requests_per_hour is already {0}; apply verifies the installed policy and does not stop or start the service' -f $installedRequestsPerHour)
+    } elseif ($needsChange -eq $false) {
+        ('no-op: {0} is already true and requests_per_hour is already {1}. Apply verifies the installed policy and leaves the service in its current state' -f $policyFieldName, $installedRequestsPerHour)
     } elseif ($serviceState -eq 'Running') {
         if ($AllowBriefRestart) {
             'conditional: -AllowBriefRestart requests one brief stop after compilation, backup, policy validation and repeated read-only client sampling; busy, unclear or changing state still refuses'
-        } else {
+        } elseif ($needsChange -eq $true) {
             'blocked by default: the running service is not stopped without explicit -AllowBriefRestart; stop it at a maintenance point or rerun with that consent switch'
+        } else {
+            'conditional: elevation verifies whether a change is needed. A Running service can only stop with explicit -AllowBriefRestart consent'
         }
     } elseif ($serviceState -eq 'Stopped') {
         'available after UAC verification; the service remains Stopped and is not started'
     } else {
         ('blocked: the service is {0}; it must be stable Running or Stopped before the protected upgrade can proceed' -f $serviceState)
     }
-    $quotedEntry = '"{0}"' -f $PSCommandPath
+    $quotedEntry = "'{0}'" -f $PSCommandPath.Replace("'", "''")
     $quotaArgument = if ($quotaRequested) { ' -RequestsPerHour {0}' -f $RequestsPerHour } else { '' }
-    $applyCommand = ('{0} -ExpectedRevision {1} -EnableTerraApi{2} -Apply' -f $quotedEntry, $ExpectedRevision, $quotaArgument)
-    $applyCommandBriefRestart = ('{0} -ExpectedRevision {1} -EnableTerraApi -AllowBriefRestart -Apply{2}' -f $quotedEntry, $ExpectedRevision, $quotaArgument)
+    $applyCommand = ('& {0} -ExpectedRevision {1} {2}{3} -Apply' -f $quotedEntry, $ExpectedRevision, $enableArgument, $quotaArgument)
+    $applyCommandBriefRestart = ('& {0} -ExpectedRevision {1} {2}{3} -AllowBriefRestart -Apply' -f $quotedEntry, $ExpectedRevision, $enableArgument, $quotaArgument)
     $preview = [ordered]@{
-        operation = 'EnableTerraApi'
+        operation = $operation
         expected_revision = $sourcePlan.status.revision
         source_bundle_sha256 = $sourcePlan.status.source_bundle_sha256
         source_files = $sourcePlan.status.source_files
@@ -174,24 +234,24 @@ if ($EnableTerraApi) {
         requests_per_hour = [ordered]@{
             current = $installedRequestsPerHour
             current_source = $installedQuotaSource
-            legacy_missing_field = [bool]$legacyQuotaField
+            legacy_missing_field = $legacyQuotaField
             new_protected_install = 100
             legacy_fallback = 24
             requested = $(if ($quotaRequested) { $RequestsPerHour } else { $null })
-            change = [bool]$quotaChange
+            change = $quotaChange
             maximum = 1000
             field = 'requests_per_hour'
             increases_only = $true
         }
-        policy_change = 'Preserve caller_sid, model, reasoning_effort, project and organization exactly; add allow_terra_api:true only when absent, and only change requests_per_hour when the operator explicitly supplies -RequestsPerHour. Existing explicit limits, including 96 or higher, remain unchanged without that request; an old policy without the field keeps the historical 24/hour interpretation until a real upgrade.'
+        policy_change = ('Set {0} to true and preserve the other role setting, caller_sid, model, reasoning_effort, project and organization. Change requests_per_hour only when the operator supplies -RequestsPerHour. Existing explicit limits remain in effect without that request. An old policy without a quota field keeps the historical 24/hour limit.' -f $policyFieldName)
         preserved = @('service registration and service identity', 'state directory', 'DPAPI credential', 'rolling rate records', 'audit logs', 'MCP registration', 'DSH schedule and rules')
         administrator_consent = 'A UAC prompt is requested only with -Apply and authorizes only the installed SolBroker.exe and policy.json replacement. A brief stop and restart are authorized only by the separate explicit -AllowBriefRestart consent switch.'
-        service_stop_condition = 'If a requested change is not already present, the default apply refuses to stop a Running service. -AllowBriefRestart is accepted only with -EnableTerraApi -Apply and only for a short maintenance window: the protected installer compiles, backs up and validates the policy, then checks the fixed registration, service account, stable state/PID and protected SolBroker.exe clients before one brief stop.'
+        service_stop_condition = 'The default apply refuses to stop a Running service. With explicit restart consent during a maintenance window, the protected installer compiles, backs up and validates the policy, then checks the service registration, account, stable state/PID and protected SolBroker.exe clients before one brief stop.'
         brief_restart = [ordered]@{
             requested = [bool]$AllowBriefRestart
             default = 'refuse to stop a Running service'
             consent_switch = '-AllowBriefRestart'
-            accepted_only_with = '-EnableTerraApi -Apply'
+            accepted_only_with = "$enableArgument -Apply"
             no_atomic_drain = $true
             maintenance_window_required = $true
             client_sampling = 'Five short-interval read-only samples of protected SolBroker.exe client processes. A busy, unreadable or changing service/process state refuses the upgrade; no caller is terminated.'
@@ -204,11 +264,11 @@ if ($EnableTerraApi) {
     }
     $preview | ConvertTo-Json -Depth 6
     if (-not $Apply) { return }
-    if (-not $installed) { throw 'The broker quota/Terra upgrade only applies to an existing installed Sol broker. Nothing was changed.' }
-    if ($serviceState -eq 'Running' -and -not $AllowBriefRestart -and $needsChange) {
-        throw ('The installed AiRuleSolBroker service is Running. The default broker quota/Terra upgrade does not stop it. Wait for a short maintenance window and rerun with -AllowBriefRestart only after in-flight Sol calls finish, or stop the service yourself and rerun without the switch. The old service has no atomic drain, so a caller can still race the stop even with consent. Nothing was changed.')
+    if (-not $installed) { throw 'The broker API role upgrade only applies to an existing installed Sol broker. Nothing was changed.' }
+    if ($serviceState -eq 'Running' -and -not $AllowBriefRestart -and $needsChange -eq $true) {
+        throw ('The installed AiRuleSolBroker service is Running. The default broker API role upgrade does not stop it. Wait for a short maintenance window and rerun with -AllowBriefRestart only after in-flight API calls finish, or stop the service yourself and rerun without the switch. The old service has no atomic drain, so a caller can still race the stop even with consent. Nothing was changed.')
     }
-    if (-not [Environment]::UserInteractive) { throw 'Run the broker quota/Terra upgrade in a local interactive PowerShell window for UAC.' }
+    if (-not [Environment]::UserInteractive) { throw 'Run the broker API role upgrade in a local interactive PowerShell window for UAC.' }
 
     $transfer = Join-Path ([IO.Path]::GetTempPath()) ('ai-rule-sol-upgrade-' + [Guid]::NewGuid().ToString('N'))
     $null = New-Item -Path $transfer -ItemType Directory
@@ -219,18 +279,18 @@ if ($EnableTerraApi) {
         $admins = [Security.Principal.SecurityIdentifier]::new('S-1-5-32-544')
         $acl.AddAccessRule([Security.AccessControl.FileSystemAccessRule]::new($admins, 'ReadAndExecute', 'ContainerInherit, ObjectInherit', 'None', 'Allow'))
         Set-Acl -LiteralPath $transfer -AclObject $acl
-        $elevationArguments = @('terra-elevation', '--revision', $ExpectedRevision, '--git', $git,
+        $elevationArguments = @("${roleKey}-elevation", '--revision', $ExpectedRevision, '--git', $git,
             '--program-files', $programs, '--bundle-path', $bundle)
         if ($AllowBriefRestart) { $elevationArguments += '--allow-brief-restart' }
         if ($quotaRequested) { $elevationArguments += @('--requests-per-hour', [string]$RequestsPerHour) }
         $encoded = & $node $helper @elevationArguments
         if ($LASTEXITCODE -ne 0 -or $encoded -notmatch '\A[A-Za-z0-9+/]+={0,2}\z') {
-            throw 'The reviewed broker quota/Terra elevation command could not be prepared.'
+            throw 'The reviewed broker API role elevation command could not be prepared.'
         }
         $lock = [IO.File]::Open($bundle, 'Open', 'Read', 'Read')
         $powershell = Join-Path ([Environment]::SystemDirectory) 'WindowsPowerShell\v1.0\powershell.exe'
-        if ($AllowBriefRestart -and $serviceState -eq 'Running' -and $needsChange) {
-            Write-Host 'Approve UAC for the reviewed broker quota/Terra upgrade. The protected installer compiles, backs up and validates first, then refuses if a protected SolBroker.exe client is busy or the service state/PID changes. Only an idle service is stopped once and restarted once. No caller is terminated; the old service still has no atomic drain.'
+        if ($AllowBriefRestart -and $serviceState -eq 'Running' -and $needsChange -ne $false) {
+            Write-Host 'Approve UAC for the reviewed broker API role upgrade. The protected installer compiles, backs up and validates first, then refuses if a protected SolBroker.exe client is busy or the service state/PID changes. Only an idle service is stopped once and restarted once. No caller is terminated; the old service still has no atomic drain.'
         }
         else {
             Write-Host 'Approve UAC to replace only SolBroker.exe and policy.json. No credential, state, audit, rate record, MCP or schedule file is in this operation.'
@@ -239,7 +299,7 @@ if ($EnableTerraApi) {
             -ArgumentList @('-NoLogo', '-NoProfile', '-EncodedCommand', $encoded) -Verb RunAs -PassThru -Wait
         try {
             if ($elevated.ExitCode -ne 0) {
-                throw 'The elevated broker quota/Terra upgrade did not complete. Review its local message; no partial success is assumed.'
+                throw 'The elevated broker API role upgrade did not complete. Review its local message; no partial success is assumed.'
             }
         }
         finally { $elevated.Dispose() }
@@ -249,7 +309,7 @@ if ($EnableTerraApi) {
         [IO.File]::Delete($bundle)
         [IO.Directory]::Delete($transfer, $false)
     }
-    Write-Host 'The elevated broker quota/Terra upgrade exited successfully. Verify the installed policy, effective requests_per_hour and service on the target machine before reporting it as active.'
+    Write-Host 'The elevated broker API role upgrade exited successfully. Verify the installed policy, effective requests_per_hour and service on the target machine before reporting it as active.'
     return
 }
 

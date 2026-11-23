@@ -45,7 +45,25 @@ test('Terra elevation carries explicit consent through the fixed bootstrap only'
   assert.throws(() => prepareElevation(sources(), {
     bundlePath: 'C:\\Temp\\broker-source.json', clientSid: 'S-1-5-21-1-2-3-4', model: 'gpt-6.2-sol', effort: 'max',
     action: 'Install', allowBriefRestart: true
-  }), /only for the reviewed Terra API elevation/);
+  }), /only for the reviewed API role elevation/);
+});
+
+test('Luna elevation selects one protected role and preserves operator choices', () => {
+  const bundlePath = "C:\\Temp\\owner's broker-source.json";
+  const normal = prepareElevation(sources(), { bundlePath, enableLunaApi: true });
+  assert.match(normal.invocation, /-EnableLunaApi$/);
+  assert.match(normal.invocation, /owner''s broker-source/);
+  assert.doesNotMatch(normal.invocation, /EnableTerraApi|SetKey|ClientSid|ProjectId|RequestsPerHour|AllowBriefRestart/);
+  assert.ok(Buffer.from(normal.encodedCommand, 'base64').toString('utf16le').includes(normal.invocation));
+
+  const maintenance = prepareElevation(sources(), {
+    bundlePath, enableLunaApi: true, requestsPerHour: 100, allowBriefRestart: true
+  });
+  assert.match(maintenance.invocation, /-EnableLunaApi -RequestsPerHour 100 -AllowBriefRestart$/);
+  assert.throws(() => prepareElevation(sources(), { bundlePath, enableLunaApi: true, enableTerraApi: true }),
+    /Enable one broker role/);
+  assert.throws(() => prepareElevation(sources(), { bundlePath, enableLunaApi: true, action: 'Enroll' }),
+    /separate elevation action/);
 });
 
 test('explicit 100/hour opt-in is bounded and carried through the fixed elevation', () => {
@@ -93,17 +111,17 @@ test('explicit 100/hour opt-in is bounded and carried through the fixed elevatio
   assert.match(elevated, /\$parameters\.RequestsPerHour = \$RequestsPerHour/);
 });
 
-test('ordinary entry accepts -AllowBriefRestart only with -EnableTerraApi -Apply', () => {
+test('ordinary entry accepts -AllowBriefRestart only for an applied API role upgrade', () => {
   assert.match(setup, /\[switch\]\$AllowBriefRestart/);
-  assert.match(setup, /if \(\$AllowBriefRestart -and \(-not \$EnableTerraApi -or -not \$Apply\)\)/);
+  assert.match(setup, /if \(\$AllowBriefRestart -and \(-not \$upgradeRequested -or -not \$Apply\)\)/);
   assert.match(setup, /--allow-brief-restart/);
-  assert.match(setup, /-EnableTerraApi -AllowBriefRestart -Apply/);
+  assert.match(setup, /\{2\}\{3\} -AllowBriefRestart -Apply/);
   assert.match(setup, /apply_command_with_brief_restart/);
   assert.match(setup, /no_atomic_drain = \$true/);
   assert.match(setup, /residual_race = 'The old service has no atomic drain/);
   assert.match(setup, /client_sampling = 'Five short-interval read-only samples/);
   assert.match(helper, /'allow-brief-restart': \{ type: 'boolean' \}/);
-  assert.match(helper, /mode !== 'terra-elevation'/);
+  assert.match(helper, /upgrade\?\.\[2\] !== 'elevation'/);
   assert.match(helper, /allowBriefRestart: opts\['allow-brief-restart'\] === true/);
   assert.match(elevated, /\[switch\]\$AllowBriefRestart/);
   assert.match(elevated, /\$parameters\.AllowBriefRestart = \$true/);
@@ -112,7 +130,7 @@ test('ordinary entry accepts -AllowBriefRestart only with -EnableTerraApi -Apply
 
 test('the protected gate follows compile, exact backup and policy preparation', () => {
   const build = install.indexOf("& (Join-Path $PSScriptRoot 'build.ps1') -OutputPath $candidateExe");
-  const policy = install.indexOf('$newPolicy = New-BrokerUpgradePolicy $currentPolicy $enableTerra $changeQuota $RequestsPerHour');
+  const policy = install.indexOf('$newPolicy = New-BrokerUpgradePolicy $currentPolicy $enableField $changeQuota $RequestsPerHour');
   const backup = install.indexOf('Copy-ExactBrokerFile $exe $backupExe');
   const transaction = install.indexOf('[IO.File]::WriteAllText($transactionFile');
   const gate = install.indexOf('# Phase 2: authoritative local gate');

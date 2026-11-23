@@ -49,7 +49,8 @@ namespace AiRule.Sol.Windows
             try
             {
                 TestPolicy();
-                TestTerraPolicy(args[1]);
+                TestTerraPolicy();
+                TestLunaPolicy(args[1]);
                 TestQuota(args[1]);
                 TestUpstream().GetAwaiter().GetResult();
                 TestRate(args[1]);
@@ -88,10 +89,11 @@ namespace AiRule.Sol.Windows
                 allow_terra_api = true, project = "proj_example", organization = "org-example" }));
         }
 
-        private static Policy LoadPolicy(string effort, string terraField)
+        private static Policy LoadPolicy(string effort, string terraField, string lunaField = null)
         {
             string json = "{\"caller_sid\":\"" + Caller + "\",\"model\":\"gpt-6.2-sol\",\"reasoning_effort\":\"" + effort + "\"" +
-                (terraField == null ? "" : ",\"allow_terra_api\":" + terraField) + "}";
+                (terraField == null ? "" : ",\"allow_terra_api\":" + terraField) +
+                (lunaField == null ? "" : ",\"allow_luna_api\":" + lunaField) + "}";
             return Policy.Load(Protocol.Utf8.GetBytes(json));
         }
 
@@ -108,6 +110,11 @@ namespace AiRule.Sol.Windows
                 .Replace("\"name\":\"delegate_work\"", "\"name\":\"terra_action\"");
         }
 
+        private static string LunaBody()
+        {
+            return Body.Replace("\"model\":\"gpt-6.2-sol\"", "\"model\":\"" + Policy.LunaModel + "\"");
+        }
+
         private static void CheckLegacyStatus(Policy policy, string label)
         {
             var status = Protocol.Parse(Protocol.Encode(policy.Status(true)));
@@ -119,7 +126,7 @@ namespace AiRule.Sol.Windows
                 label + " must retain the exact legacy status fields and values, including the default quota.");
         }
 
-        private static void TestTerraPolicy(string directory)
+        private static void TestTerraPolicy()
         {
             CheckLegacyStatus(LoadPolicy("max", null), "A policy without allow_terra_api");
             CheckLegacyStatus(LoadPolicy("max", "false"), "A policy with allow_terra_api=false");
@@ -140,15 +147,16 @@ namespace AiRule.Sol.Windows
             Check(terra.TerraEnabled, "Explicit true must enable the Terra role.");
             Check(terra.ValidateRequest(Parse(TerraBody())).Length > 0, "The Terra role must accept its fixed model, effort and tools.");
             Check(terra.ValidateRequest(Parse(Body)).Length > 0, "Enabling Terra must not change the Sol route.");
-            foreach (string name in new[] { "confirm_terra_api", "terra_action", "finish_terra" })
+            foreach (string name in new[] { "confirm_terra_api", "terra_action", "finish_terra", "delegate_work", "finish_coordination" })
                 Check(terra.ValidateRequest(Parse(TerraBody().Replace("terra_action", name))).Length > 0, "Each Terra tool name must be accepted.");
             foreach (string name in new[] { "confirm_sol_api", "delegate_work", "finish_coordination" })
                 Check(TestRoute().ValidateRequest(Parse(Body.Replace("delegate_work", name))).Length > 0, "Each original Sol tool name must remain accepted.");
 
             Reject(() => TestRoute().ValidateRequest(Parse(TerraBody())), "Sol must reject the Terra model and tools.");
-            Reject(() => terra.ValidateRequest(Parse(TerraBody().Replace("terra_action", "delegate_work"))), "Terra must reject Sol names in tools and history.");
+            Reject(() => terra.ValidateRequest(Parse(TerraBody().Replace("terra_action", "delegate_peer"))), "Terra must reject recursive peer calls.");
             Reject(() => TestRoute().ValidateRequest(Parse(Body.Replace("delegate_work", "terra_action"))), "Sol must reject Terra names in tools and history.");
-            Reject(() => terra.ValidateRequest(Parse(Body.Replace("gpt-6.2-sol", Policy.TerraModel))), "Terra must reject a Sol tool set even with the Terra model.");
+            Reject(() => terra.ValidateRequest(Parse(Body.Replace("gpt-6.2-sol", Policy.TerraModel).Replace("delegate_work", "confirm_sol_api"))),
+                "Terra must reject a Sol-specific tool even with the Terra model.");
 
             var unknownToolBody = Parse(TerraBody());
             var unknownTool = Protocol.Object(Protocol.Parse(Protocol.Encode(((object[])Parse(TerraBody())["tools"])[0])));
@@ -160,7 +168,7 @@ namespace AiRule.Sol.Windows
             Reject(() => terra.ValidateRequest(unknownInputBody), "Terra history must reject an unknown function name.");
 
             var mixed = Parse(TerraBody());
-            var solTool = Protocol.Object(Protocol.Parse(Protocol.Encode(((object[])Parse(Body)["tools"])[0])));
+            var solTool = Protocol.Object(Protocol.Array(Parse(Body.Replace("delegate_work", "confirm_sol_api"))["tools"])[0]);
             var mixedTools = new List<object>((object[])mixed["tools"]) { solTool };
             mixed["tools"] = mixedTools.ToArray();
             Reject(() => terra.ValidateRequest(mixed), "Terra must reject a mixed Sol/Terra tool list.");
@@ -169,7 +177,7 @@ namespace AiRule.Sol.Windows
             Protocol.Object(Protocol.Array(inputCross["input"])[3])["name"] = "terra_action";
             Reject(() => TestRoute().ValidateRequest(inputCross), "Sol history must reject a Terra function name even with Sol tools.");
             var terraInputCross = Parse(TerraBody());
-            Protocol.Object(Protocol.Array(terraInputCross["input"])[3])["name"] = "delegate_work";
+            Protocol.Object(Protocol.Array(terraInputCross["input"])[3])["name"] = "delegate_peer";
             Reject(() => terra.ValidateRequest(terraInputCross), "Terra history must reject a Sol function name even with Terra tools.");
 
             var strict = TerraBody().Replace("\"strict\":true", "\"strict\":false");
@@ -193,23 +201,76 @@ namespace AiRule.Sol.Windows
                 status["api_timeout_ms"].Equals(Protocol.ApiTimeoutMs), "Terra status must retain the legacy fields and values, including the effective quota.");
             Check(status["terra_enabled"].Equals(true) && status["terra_model"].Equals(Policy.TerraModel) &&
                 status["terra_reasoning_effort"].Equals(Policy.TerraEffort) &&
-                ((object[])status["terra_tools"]).Cast<string>().SequenceEqual(new[] { "confirm_terra_api", "terra_action", "finish_terra" }),
+                Protocol.Array(status["terra_tools"]).Cast<string>().SequenceEqual(
+                    new[] { "confirm_terra_api", "terra_action", "finish_terra", "delegate_work", "finish_coordination" }),
                 "Explicit opt-in must expose deterministic Terra capability fields.");
             Check(!status.ContainsKey("terra_ready") && !status.ContainsKey("terra_available"), "Status must not claim runtime Terra availability.");
+        }
 
-            string quotaDirectory = Path.Combine(directory, "terra-quota");
+        private static void TestLunaPolicy(string directory)
+        {
+            var legacy = LoadPolicy("max", null);
+            var disabled = LoadPolicy("max", null, "false");
+            CheckLegacyStatus(disabled, "A policy with allow_luna_api=false");
+            Reject(() => legacy.ValidateRequest(Parse(LunaBody())), "A legacy policy must not authorize Luna.");
+            Reject(() => disabled.ValidateRequest(Parse(LunaBody())), "Explicit false must not authorize Luna.");
+            foreach (string invalid in new[] { "\"true\"", "1", "null", "{}" })
+                Reject(() => LoadPolicy("max", null, invalid), "Only a boolean allow_luna_api may be accepted.");
+            Reject(() => Policy.Load(Protocol.Encode(new { caller_sid = Caller, model = Policy.LunaModel,
+                reasoning_effort = "max", allow_luna_api = true })), "Luna cannot also be the configured Sol model.");
+
+            var lunaOnly = LoadPolicy("max", null, "true");
+            var lunaOnlyStatus = Protocol.Parse(Protocol.Encode(lunaOnly.Status(true)));
+            Check(!lunaOnlyStatus.ContainsKey("terra_enabled"), "Enabling Luna must keep absent Terra authorization absent.");
+            Reject(() => lunaOnly.ValidateRequest(Parse(TerraBody())), "Enabling Luna must not authorize Terra.");
+
+            var policy = LoadPolicy("high", "true", "true");
+            Check(policy.TerraEnabled && policy.LunaEnabled, "Both API peers can share one Sol broker policy.");
+            string[] lunaTools = { "confirm_luna_api", "delegate_work", "finish_coordination" };
+            foreach (string name in lunaTools)
+                Check(policy.ValidateRequest(Parse(LunaBody().Replace("delegate_work", name))).Length > 0,
+                    "Luna must accept its confirmation, shared execution and finish tools.");
+            foreach (string name in new[] { "delegate_peer", "confirm_sol_api", "confirm_terra_api", "terra_action", "finish_terra" })
+                Reject(() => policy.ValidateRequest(Parse(LunaBody().Replace("delegate_work", name))), "Luna must reject cross-role and recursive peer tools.");
+            Reject(() => policy.ValidateRequest(Parse(LunaBody().Replace("\"max\"", "\"high\""))),
+                "Luna must keep its fixed effort when Sol uses another effort.");
+            Reject(() => policy.ValidateRequest(Parse(LunaBody().Replace("\"store\":false", "\"store\":true"))),
+                "Luna must keep provider storage disabled.");
+            Reject(() => policy.ValidateRequest(Parse(TerraBody().Replace("terra_action", "confirm_luna_api"))),
+                "Terra must reject Luna-specific tools.");
+            string solBody = Body.Replace("\"max\"", "\"high\"").Replace("delegate_work", "delegate_peer");
+            Check(policy.ValidateRequest(Parse(solBody)).Length > 0, "Sol may delegate to a peer.");
+            Reject(() => policy.ValidateRequest(Parse(solBody.Replace("delegate_peer", "confirm_luna_api"))),
+                "Sol must reject Luna-specific tools.");
+            var recursiveHistory = Parse(LunaBody());
+            Protocol.Object(Protocol.Array(recursiveHistory["input"])[3])["name"] = "delegate_peer";
+            Reject(() => policy.ValidateRequest(recursiveHistory), "Luna history must reject recursive peer calls.");
+
+            var status = Protocol.Parse(Protocol.Encode(policy.Status(false)));
+            Check(status["ready"].Equals(false) && status["luna_enabled"].Equals(true) &&
+                status["luna_model"].Equals(Policy.LunaModel) && status["luna_reasoning_effort"].Equals(Policy.LunaEffort) &&
+                Protocol.Array(status["luna_tools"]).Cast<string>().SequenceEqual(lunaTools) &&
+                Protocol.Array(status["sol_tools"]).Cast<string>().Contains("delegate_peer") && status["terra_enabled"].Equals(true),
+                "Status must advertise all configured tools without claiming credential readiness.");
+
+            string quotaDirectory = Path.Combine(directory, "sol-terra-luna-quota");
             Directory.CreateDirectory(quotaDirectory);
             try
             {
                 var state = new BrokerState(quotaDirectory);
                 var clock = new DateTime(2026, 11, 21, 0, 0, 0, DateTimeKind.Utc);
-                for (int index = 0; index < Protocol.CallsPerHour; index++)
+                string[] requests = { solBody, TerraBody(), LunaBody() };
+                for (int index = 0; index < policy.RequestsPerHour; index++)
                 {
-                    Policy role = index % 2 == 0 ? TestRoute() : terra;
-                    role.ValidateRequest(Parse(index % 2 == 0 ? Body : TerraBody()));
-                    Check(state.Reserve(clock, Protocol.CallsPerHour), "Every role-validated call must draw from the shared quota.");
+                    policy.ValidateRequest(Parse(requests[index % requests.Length]));
+                    Check(state.Reserve(clock, policy.RequestsPerHour), "Every role-validated call must draw from the shared quota.");
                 }
-                Check(!state.Reserve(clock, Protocol.CallsPerHour), "Terra must not receive a separate quota from Sol.");
+                foreach (string request in requests)
+                {
+                    policy.ValidateRequest(Parse(request));
+                    Check(!new BrokerState(quotaDirectory).Reserve(clock, policy.RequestsPerHour),
+                        "All three models must remain capped by the same persisted quota after restart.");
+                }
             }
             finally { Directory.Delete(quotaDirectory, true); }
         }
