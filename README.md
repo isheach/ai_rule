@@ -1,6 +1,6 @@
 # ai_rule
 
-在 Codex 中保留三项按会话选择的设置，由实际 Sol 协调者完成派发和验收。全新独立会话默认由订阅的 GPT-6.2 Sol Max 协调，底层用 DSH/OpenCode Go DSF；主机操作/验收、写作、绘图/图像生成与识别由同一来源的 GPT-6.1 Terra Max 承担。规则见 [AGENTS.md](AGENTS.md)，安装后随附 [multi-agent dispatch Skill](skills/multi-agent-dispatch/SKILL.md)。
+在 Codex 中，Astra 明确目标、授权范围和验收条件后交接任务，等待所属 Sol 或 Terra 的完成确认后据此向用户汇报。全新独立会话默认由订阅的 GPT-6.2 Sol Max 规划、派发和验收，底层用 DSH/OpenCode Go DSF。主机操作/验收、写作、绘图/图像生成与识别由同一来源的 GPT-6.1 Terra Max 承担。规则见 [AGENTS.md](AGENTS.md) 和随附的 [multi-agent dispatch Skill](skills/multi-agent-dispatch/SKILL.md)。
 
 | 会话设置 | 全新会话默认 | 可选项 |
 |---|---|---|

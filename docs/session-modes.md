@@ -29,7 +29,7 @@
 
 可在旧会话发送：
 
-> 请 Astra 和原 Sol 重读当前生效的 AGENTS 和 multi-agent-dispatch Skill，恢复之前的会话设置和已批准范围。继续用原入口处理当前任务，先按原任务回执核实状态。
+> 请 Astra 和原 Sol 重读当前生效的 AGENTS 和 multi-agent-dispatch Skill，恢复之前的会话设置和已批准范围。Astra 等待原 Sol 的任务结果，原 Sol 按已有回执从原入口继续负责本项工作。
 
 已有越级派单的任务按 Skill 的验收与交接步骤处理。保留已有成果及运行环境。Astra 移交原 ID、幂等键、归属、cwd、授权和已知状态，真实 Sol 在能安全访问时继续查询与验收。无法接续进程所有权时，由原入口完成。 [安全交接步骤](../skills/multi-agent-dispatch/SKILL.md#4-验收恢复与交接)
 
