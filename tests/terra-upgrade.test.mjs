@@ -3,6 +3,7 @@ import assert from 'node:assert/strict';
 import fs from 'node:fs';
 import path from 'node:path';
 import { fileURLToPath } from 'node:url';
+import { gunzipSync } from 'node:zlib';
 import { prepareElevation } from '../scripts/sol-setup.mjs';
 
 const repo = path.resolve(path.dirname(fileURLToPath(import.meta.url)), '..');
@@ -64,6 +65,36 @@ test('Luna elevation selects one protected role and preserves operator choices',
     /Enable one broker role/);
   assert.throws(() => prepareElevation(sources(), { bundlePath, enableLunaApi: true, action: 'Enroll' }),
     /separate elevation action/);
+});
+
+test('reviewed elevation fits Windows command limits with CRLF and long paths', () => {
+  const reviewed = sources();
+  const lf = reviewed.get(bootstrapPath).toString('utf8').replace(/\r\n/g, '\n');
+  const bundlePath = "C:\\Users\\operator's profile\\AppData\\Local\\Temp\\" +
+    'approved-'.repeat(19) + '项目\\broker-source.json';
+  const route = { clientSid: 'S-1-5-21-1200-1300-1400-1500', model: 'gpt-6.2-sol', effort: 'max',
+    project: 'proj_' + 'p'.repeat(140), organization: 'org-' + 'o'.repeat(140) };
+  const modes = [
+    [{ ...route, action: 'Install', setKey: true }, /-Install -SetKey$/],
+    [{ ...route, action: 'Enroll' }, /-SetKey -ValidateExisting$/],
+    [{ enableTerraApi: true, requestsPerHour: 100, allowBriefRestart: true }, /-EnableTerraApi -RequestsPerHour 100 -AllowBriefRestart$/],
+    [{ enableLunaApi: true, requestsPerHour: 96, allowBriefRestart: true }, /-EnableLunaApi -RequestsPerHour 96 -AllowBriefRestart$/]
+  ];
+  for (const script of [lf, lf.replace(/\n/g, '\r\n')]) {
+    const bytes = Buffer.from(script, 'utf8');
+    reviewed.set(bootstrapPath, bytes);
+    for (const [options, expected] of modes) {
+      const result = prepareElevation(reviewed, { bundlePath, ...options });
+      assert.ok(result.encodedCommand.length <= 30000);
+      const command = Buffer.from(result.encodedCommand, 'base64').toString('utf16le');
+      const payload = /FromBase64String\('([A-Za-z0-9+/=]+)'\)/.exec(command);
+      assert.ok(payload, 'Reviewed bootstrap must be present in the encoded command.');
+      assert.deepEqual(gunzipSync(Buffer.from(payload[1], 'base64')), bytes);
+      assert.ok(command.includes(result.invocation));
+      assert.match(result.invocation, expected);
+    }
+  }
+  assert.throws(() => prepareElevation(reviewed, { bundlePath: 'x'.repeat(12000), enableLunaApi: true }), /exceeds its size limit/);
 });
 
 test('explicit 100/hour opt-in is bounded and carried through the fixed elevation', () => {

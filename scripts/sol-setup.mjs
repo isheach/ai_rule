@@ -5,6 +5,7 @@ import os from 'node:os';
 import path from 'node:path';
 import { fileURLToPath } from 'node:url';
 import { parseArgs } from 'node:util';
+import { gzipSync } from 'node:zlib';
 import { redact } from '../bridges/dsh/core.mjs';
 import { discardLegacyEnvironment } from '../bridges/sol/config.mjs';
 import { ResponsesClient } from '../bridges/sol/responses.mjs';
@@ -160,11 +161,18 @@ export function prepareElevation(sources, options) {
       options.action === 'Enroll' ? '-ValidateExisting' : ''].filter(Boolean).join(' ');
   }
   const values = Object.entries(args).map(([name, value]) => `-${name} ${quotePowerShell(value)}`).join(' ');
-  const script = sources.get(bootstrapPath).toString('utf8').replace(/^\uFEFF/, '');
+  // Keep the reviewed bootstrap inside the elevation command with room for Windows paths and CRLF checkouts.
+  const script = gzipSync(sources.get(bootstrapPath)).toString('base64');
   const invocation = `${values} ${switches}`.trim();
-  const command = `try { & {
-${script}
-} ${invocation} } catch {
+  const command = `try {
+    $bytes = [Convert]::FromBase64String('${script}')
+    $stream = [IO.MemoryStream]::new($bytes, $false)
+    $gzip = [IO.Compression.GZipStream]::new($stream, [IO.Compression.CompressionMode]::Decompress)
+    $reader = [IO.StreamReader]::new($gzip)
+    try { $bootstrap = [ScriptBlock]::Create($reader.ReadToEnd()) }
+    finally { $reader.Dispose() }
+    & $bootstrap ${invocation}
+} catch {
     [Console]::Error.WriteLine($_.Exception.Message)
     if ([Environment]::UserInteractive -and -not [Console]::IsInputRedirected -and -not [Console]::IsOutputRedirected -and
         [Environment]::GetCommandLineArgs() -notcontains '-NonInteractive') {

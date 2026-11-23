@@ -60,7 +60,9 @@ function callResult(sequence, call, extra = {}) {
 async function fixture(t, onResponse, {
   clock = offpeak, workbuddy = false, allowWrite = false, limits = {}, rootSource = 'vscode', brokerPolicy = {}
 } = {}) {
-  const base = fs.mkdtempSync(path.join(fs.realpathSync(os.tmpdir()), 'ai-rule-sol-'));
+  // Windows runners can expose an 8.3 alias in TEMP. Use its native long path
+  // so exact write authorizations pass the real path policy.
+  const base = fs.mkdtempSync(path.join(fs.realpathSync.native(os.tmpdir()), 'ai-rule-sol-'));
   const codexHome = path.join(base, 'codex');
   const sessions = path.join(codexHome, 'sessions', '2026', '11', '16');
   fs.mkdirSync(sessions, { recursive: true });
