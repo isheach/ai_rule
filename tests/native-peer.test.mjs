@@ -103,6 +103,45 @@ test('native peers reject scope changes, stay on the selected source, and surfac
   }, { nativeTerra }), 'api');
 });
 
+test('read-only peers can overlap and shared-write peers wait for the original evidence', async t => {
+  for (const { permissionMode, firstStatus } of [
+    { permissionMode: 'read-only', firstStatus: 'completed' },
+    { permissionMode: 'workspace-write', firstStatus: 'completed' },
+    { permissionMode: 'workspace-write', firstStatus: 'unknown_after_disconnect' }
+  ]) {
+    await t.test(`${permissionMode} / ${firstStatus}`, async () => {
+      const calls = [];
+      const started = Promise.withResolvers();
+      const release = Promise.withResolvers();
+      const winner = (peer, model, status) => ({ status, agent_id: peer, model, reasoning_effort: 'max' });
+      const options = owner(async ({ delegatePeer }) => {
+        await Promise.all([delegatePeer(request('terra')), delegatePeer(request('luna'))]);
+        return { status: 'completed' };
+      }, {
+        nativeTerra: { async dispatch() {
+          calls.push('terra');
+          started.resolve();
+          await release.promise;
+          return winner('terra', TERRA_MODEL, firstStatus);
+        } },
+        nativeLuna: { dispatch() {
+          calls.push('luna');
+          return winner('luna', LUNA_MODEL, 'completed');
+        } }
+      });
+      const result = run(task({ permissionMode, capability: permissionMode === 'read-only' ? 'workspace-read' : 'workspace-write' }), options);
+      await started.promise;
+      await new Promise(resolve => setImmediate(resolve));
+      const before = [...calls];
+      release.resolve();
+      const receipt = await result;
+      assert.deepEqual(before, permissionMode === 'read-only' ? ['terra', 'luna'] : ['terra']);
+      assert.deepEqual(calls, firstStatus === 'completed' ? ['terra', 'luna'] : ['terra']);
+      if (firstStatus !== 'completed') assert.equal(receipt.peer_results[1].error_code, 'DISPATCH_NATIVE_PEER_PREDECESSOR_UNCONFIRMED');
+    });
+  }
+});
+
 test('peer evidence and coordination deadline govern completion without retrying on unknown outcomes', async () => {
   const evidence = await run(task(), owner(async ({ delegatePeer }) => {
     const wrongRoute = await delegatePeer(request('luna'));

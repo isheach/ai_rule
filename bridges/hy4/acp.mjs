@@ -550,7 +550,7 @@ export class Hy4AcpManager {
       free_catalog_description: 'x0.00 credits',
       free_catalog_sources: null,
       cwd: task.cwd, permission_mode: task.permissionMode, capability,
-      configured_model: HY4_MODEL, selected_model: null,
+      configured_model: HY4_MODEL, selected_model: null, returned_model: null,
       tools: `${CAPABILITY_TOOLS[capability] || ''}${task.commands.length ? `${CAPABILITY_TOOLS[capability] ? ',' : ''}${COMMAND_TOOL}` : ''}`,
       state: 'starting', admission: 'not_sent', status: 'starting', started_at: now(), finished_at: null,
       pid: null, session_id: null, stop_reason: null, answer: '', answer_truncated: false, tool_events: 0,
@@ -1009,6 +1009,7 @@ export class Hy4AcpManager {
       if (active.done) return;
       const observed = response?._meta?.modelId ?? response?.model?.currentValue ?? response?.model ?? response?.currentModel;
       if (typeof observed === 'string' && observed !== HY4_MODEL) return failTurn('HY4_RUNTIME_MODEL_MISMATCH');
+      if (observed === HY4_MODEL) record.returned_model = observed;
       const rawStop = typeof response?.stopReason === 'string' ? response.stopReason : 'unknown';
       const stop = SAFE_STOP_REASONS.has(rawStop) ? rawStop : 'unknown';
       record.stop_reason = stop;

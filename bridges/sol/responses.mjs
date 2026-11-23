@@ -88,11 +88,11 @@ export class ResponsesClient {
       if (reply?.ok === true && reply.status === 200 && reply.body && typeof reply.body === 'object') {
         if (this.peer) return peerReadiness(reply.body, this.peer);
         if (reply.body?.model !== this.config.model || reply.body?.reasoning_effort !== this.config.reasoning_effort) {
-          return { ready: false, code: 'SOL_BROKER_ROUTE_MISMATCH' };
+          return { ready: false, code: 'SOL_BROKER_ROUTE_MISMATCH', status_observed: true };
         }
         const peer_api = Object.fromEntries(PEER_NAMES.map(peer => [peer, peerReadiness(reply.body, peer)]));
         const delegate_peer = Array.isArray(reply.body.sol_tools) && reply.body.sol_tools.includes('delegate_peer');
-        return { ready: reply.body.ready === true, peer_api, delegate_peer,
+        return { ready: reply.body.ready === true, status_observed: true, peer_api, delegate_peer,
           ...(reply.body.ready === true ? {} : { code: 'SOL_BROKER_NOT_READY' }) };
       }
     } catch { /* unavailable or unauthenticated helper */ }

@@ -6,10 +6,14 @@ import { COORDINATOR_MODES, CoordinatorMode, SAFE_KEY } from './config.mjs';
 export const digest = value => crypto.createHash('sha256').update(value).digest('hex');
 export const now = () => new Date().toISOString();
 
-function ensureDirectory(dir) {
-  fs.mkdirSync(dir, { recursive: true, mode: 0o700 });
+function checkDirectory(dir) {
   const canonical = fs.realpathSync(dir);
   if (path.relative(dir, canonical) || !fs.lstatSync(dir).isDirectory()) throw Error('Coordinator state directory has an unexpected canonical path.');
+}
+
+function ensureDirectory(dir) {
+  fs.mkdirSync(dir, { recursive: true, mode: 0o700 });
+  checkDirectory(dir);
 }
 
 function read(file) {
@@ -44,9 +48,10 @@ export class SolJournal {
     this.directory = directory;
   }
 
-  root(rootId) {
+  root(rootId, create = false) {
     const dir = path.join(this.directory, 'root-' + digest(rootId));
-    ensureDirectory(dir);
+    if (create) ensureDirectory(dir);
+    else if (fs.lstatSync(dir, { throwIfNoEntry: false })) checkDirectory(dir);
     return dir;
   }
 
@@ -60,13 +65,13 @@ export class SolJournal {
   setMode(rootId, mode) {
     if (!COORDINATOR_MODES.includes(mode)) throw Error('Coordinator mode must be subscription or api.');
     const record = { schema: 1, root_id: rootId, coordinator_mode: mode, updated_at: now() };
-    write(path.join(this.root(rootId), 'mode.json'), record);
+    write(path.join(this.root(rootId, true), 'mode.json'), record);
     return { coordinator_mode: mode, updated_at: record.updated_at };
   }
 
-  file(rootId, key) {
+  file(rootId, key, create = false) {
     if (typeof key !== 'string' || !SAFE_KEY.test(key)) throw Error('A stable idempotencyKey of 1..100 safe ASCII characters is required.');
-    return path.join(this.root(rootId), `task-${digest(key)}.json`);
+    return path.join(this.root(rootId, create), `task-${digest(key)}.json`);
   }
 
   get(rootId, key) {
@@ -77,6 +82,6 @@ export class SolJournal {
     return record;
   }
 
-  create(record) { write(this.file(record.root_id, record.idempotency_key), record, true); }
+  create(record) { write(this.file(record.root_id, record.idempotency_key, true), record, true); }
   save(record) { write(this.file(record.root_id, record.idempotency_key), record); }
 }

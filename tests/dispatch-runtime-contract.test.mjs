@@ -454,6 +454,9 @@ test('generic dispatch requires a Sol coordinator for both sources and hands it 
   assert.equal(api.selected_backend, 'dsh');
   assert.equal(api.requested_model, DSH_MODEL);
   assert.equal(api.requested_coordinator.model, SOL_MODEL);
+  assert.equal(api.route_evidence.coordinator.actually_executed, 'unverified');
+  assert.equal(api.route_evidence.downstream.calls[0].task_id, 'dsh-real');
+  assert.equal(api.route_evidence.downstream.calls[0].returned_model, DSH_MODEL);
 
   events.length = 0;
   const subscription = await dispatchLayeredTask({
@@ -465,6 +468,12 @@ test('generic dispatch requires a Sol coordinator for both sources and hands it 
   assert.equal(subscription.model, WORKBUDDY_MODEL);
   assert.equal(subscription.reasoning_effort, WORKBUDDY_REASONING_EFFORT);
   assert.equal(subscription.selected_backend, 'workbuddy-dsf');
+
+  const routeOnly = await dispatchLayeredTask({ prompt: 'Check the route evidence.' }, {
+    dsh, coordinator: { coordinate: () => ({ status: 'completed', requested_model: SOL_MODEL }) }
+  });
+  assert.equal(routeOnly.route_evidence.coordinator.actually_executed, 'unverified');
+  assert.equal(routeOnly.route_evidence.downstream.actually_executed, 'unverified');
 });
 
 test('generic dispatch fails closed without a coordinator, selected backend, or coordinator entry', async () => {

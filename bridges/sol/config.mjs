@@ -153,13 +153,17 @@ export function validateSolConfig(value, { poolConfig } = {}) {
     throw Error('openai.credential_source must be windows-broker.');
   }
   if (openai.credential_source && reservedEnv.length) throw Error('Remove legacy OpenAI environment references from the broker configuration.');
-  const supplied = object(value.limits ?? {}, Object.keys(LIMITS), 'limits');
+  const supplied = object(value.limits ?? {}, [...Object.keys(LIMITS), 'max_repairs'], 'limits');
   const limits = Object.fromEntries(Object.entries(LIMITS).map(([key, [fallback, min, max]]) => {
     const number = supplied[key] ?? fallback;
     if (!Number.isSafeInteger(number) || number < min || number > max) throw Error(`limits.${key} must be ${min}..${max}.`);
     return [key, number];
   }));
   if (limits.max_delegations >= limits.max_responses) throw Error('limits.max_responses must leave room for acceptance after delegation.');
+  limits.max_repairs = supplied.max_repairs ?? limits.max_delegations - 1;
+  if (!Number.isSafeInteger(limits.max_repairs) || limits.max_repairs < 0 || limits.max_repairs >= limits.max_delegations) {
+    throw Error('limits.max_repairs must be nonnegative and below max_delegations.');
+  }
   const contextConfig = { ...pool, context_dir: path.join(stateDir, 'contexts') };
   return { stateDir, workspaceRoot, contextConfig, pool, openai, limits, reservedEnv, workbuddy: loadWorkBuddy(value.workbuddy, reservedEnv) };
 }

@@ -278,6 +278,8 @@ export class TaskManager {
       bridge_version: VERSION, bridge_pid: process.pid, backend: 'dsh', profile: 'headless', expected_route: ROUTE,
       active_task_id: this.active?.record.task_id || null, allow_workspace_write: this.allowWrite, max_concurrency: 1,
       runtime: this.runtime, instance_metadata_path: this.instanceMetadataPath, transport: 'stdio', starts_opencode_cli: false,
+      route_diagnostics: { bridge: { configured: true, loaded: true, evidence_source: 'local_bridge_status' },
+        headless: { configured_entry: Boolean(this.cli), ready: null, actually_executed: 'unverified' } },
       os_sandbox_attested: false, lock_present: Boolean(lock), lock_owner: lock,
       credential_contents_read_by_bridge: false, schedule: this.scheduleStatus() };
   }
