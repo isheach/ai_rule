@@ -1,4 +1,4 @@
-<!-- ai-rule-managed: 2026-11-21.layered-dispatch-r1 -->
+<!-- ai-rule-managed: 2026-11-23.astra-handoff-r1 -->
 # 模式 2 峰时 WorkBuddy DSF 交接
 
 这是模式 2 的既有显式交接路径，不是全新会话的默认底层。只有已选择模式 2 且进入实际峰段时才使用；不因全新默认或 Terra 专家任务自动启用，也不改写已受理任务的所有者。

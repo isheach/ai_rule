@@ -1,4 +1,4 @@
-<!-- ai-rule-managed: 2026-11-21.layered-dispatch-r1 -->
+<!-- ai-rule-managed: 2026-11-23.astra-handoff-r1 -->
 # Terra 专家入口
 
 Terra 用于用户明确交给 GPT-6.1 Terra Max 的专家任务：主机操作/验收、写作、绘图或图像生成与识别。Terra 使用与 Sol 相同的已选中间来源；不得因 Terra 不可用自动改走 DSF、Sol 或另一来源。
