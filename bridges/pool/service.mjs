@@ -1,5 +1,6 @@
 import fs from 'node:fs';
 import path from 'node:path';
+import { poolExecutionEvidence } from '../execution-evidence.mjs';
 import crypto from 'node:crypto';
 import { RootPool, poolInstanceName, poolRootKey } from './core.mjs';
 import { resolveContext } from './context.mjs';
@@ -381,7 +382,7 @@ export class PoolService {
   }
 
   _pack(rootId, decision, receipt) {
-    return {
+    const outcome = {
       task_id: decision?.task_id ?? null,
       backend: decision?.selected_backend ?? null,
       status: receipt?.status ?? decision?.admission_state ?? 'unknown',
@@ -389,6 +390,7 @@ export class PoolService {
       routing: routingView(decision),
       receipt: receipt ?? null
     };
+    return { ...outcome, execution_evidence: poolExecutionEvidence(outcome) };
   }
 
   async submit(rootId, args) {
@@ -711,6 +713,11 @@ export class PoolService {
         reject_if_budget_exceeds_window: schedule.reject_if_budget_exceeds_window, resume_automatically: false
       },
       write_enabled: this.allowWrite, hy4_configured: Boolean(this.manifest),
+      route_diagnostics: {
+        pool: { configured: true, loaded: true, evidence_source: 'local_pool_service_status' },
+        dsh: { configured: Boolean(this.cli), ready: null, actually_executed: 'unverified' },
+        hy4: { configured: Boolean(this.manifest), ready: null, actually_executed: 'unverified' }
+      },
       hy4_commands_enabled: Boolean(this.manifest?.allow_commands),
       context_required: true, identity_is_authentication: false
     };

@@ -6,7 +6,7 @@ import {
 } from './policy.mjs';
 
 const SCOPE_FIELDS = ['cwd', 'permissionMode', 'capability', 'writeScopes', 'writes', 'commands',
-  'authorizationNote', 'constraints', 'contextSummary', 'limits', 'timeoutMs', 'deadline', 'idempotencyKey'];
+  'authorizationNote', 'constraints', 'limits', 'timeoutMs', 'deadline', 'idempotencyKey'];
 const PEERS = Object.freeze({
   terra: { model: TERRA_MODEL, reasoning_effort: TERRA_REASONING_EFFORT },
   luna: { model: LUNA_MODEL, reasoning_effort: LUNA_REASONING_EFFORT }
@@ -16,6 +16,7 @@ const KEY = /^[A-Za-z0-9_.:-]{1,100}$/;
 const ID = /^[A-Za-z0-9_.:@/-]{1,160}$/;
 const WRITE_FIELDS = ['writeScopes', 'writes', 'commands'];
 const STATES = ['completed', 'finished', 'running', 'blocked', 'failed', 'timed_out', 'cancelled', 'unknown', 'unknown_after_disconnect'];
+const UNCONFIRMED = ['running', 'timed_out', 'unknown', 'unknown_after_disconnect'];
 
 function freezeScope(value) {
   if (!value || typeof value !== 'object' || Object.isFrozen(value)) return value;
@@ -118,6 +119,8 @@ export function nativePeerCoordinator(input, { nativeTerra, nativeLuna, signal }
   const ownerSignal = signal ? AbortSignal.any([signal, active.signal]) : active.signal;
   const requests = new Map();
   let accepting = true;
+  let writerSettled = Promise.resolve();
+  let writerUnconfirmed = false;
   return {
     delegate(value) {
       if (!accepting) throw new DispatchPolicyError('DISPATCH_NATIVE_PEER_CLOSED', 'The original Sol coordinator has already returned.');
@@ -134,7 +137,19 @@ export function nativePeerCoordinator(input, { nativeTerra, nativeLuna, signal }
       const idempotencyKey = 'peer-' + createHash('sha256')
         .update(JSON.stringify([scope.cwd, scope.idempotencyKey, request.idempotencyKey])).digest('hex');
       const adapter = request.peer === 'terra' ? nativeTerra : nativeLuna;
-      const result = Promise.resolve().then(() => runPeer({ request, scope, adapter, signal: ownerSignal, idempotencyKey }));
+      const invoke = () => runPeer({ request, scope, adapter, signal: ownerSignal, idempotencyKey });
+      let result;
+      if (scope.permissionMode === 'workspace-write') {
+        // All peers inherit the same write scope. Queue them in this
+        // coordinator until the prior result is known; readers can overlap.
+        result = writerSettled.then(() => writerUnconfirmed
+          ? Object.freeze({ peer: request.peer, idempotency_key: idempotencyKey, status: 'blocked',
+            error_code: 'DISPATCH_NATIVE_PEER_PREDECESSOR_UNCONFIRMED' })
+          : invoke());
+        writerSettled = result.then(receipt => {
+          writerUnconfirmed ||= UNCONFIRMED.includes(receipt.status) || receipt.error_code === 'DISPATCH_NATIVE_PEER_EVIDENCE';
+        });
+      } else result = Promise.resolve().then(invoke);
       requests.set(request.idempotencyKey, { fingerprint, result });
       return result;
     },

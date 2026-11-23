@@ -233,10 +233,10 @@ function previousReceipt(body) {
 test('API Sol calls real pooled DSH, inspects and revises the original session with complete usage and lineage', async t => {
   const f = await fixture(t, (index, body) => {
     if (index === 1) {
-      assert.ok(body.input[0].role === 'developer' && body.input[0].content.includes('contextSummary'));
-      const handoff = JSON.parse(body.input[1].content);
-      assert.equal(handoff.contextSummary, 'Relevant approved memory for this task');
-      assert.equal(handoff.permissionMode, 'read-only');
+      assert.ok(body.input[0].role === 'developer' && body.input[0].content.includes('Project facts'));
+      const { contract, projectFacts } = JSON.parse(body.input[1].content);
+      assert.equal(projectFacts, 'Relevant approved memory for this task');
+      assert.equal(contract.scope.permissionMode, 'read-only');
       return callResult(index, delegate('First stage has incomplete verification.'));
     }
     const receipt = previousReceipt(body);
@@ -246,11 +246,17 @@ test('API Sol calls real pooled DSH, inspects and revises the original session w
     assert.equal(receipt.actual_route, null);
     assert.equal(receipt.configured_route.model, 'deepseek-v4.1-flash');
     assert.equal(receipt.native_tool_calls, 1);
+    assert.equal(receipt.execution_evidence.checks.process_completion, 'passed');
+    assert.equal(receipt.execution_evidence.command_results, 'unverified');
     return callResult(index, index === 2 ? delegate('Run the newly required verification in the original session.') : finish());
   });
   const peer = await f.connect();
   const first = f.context(), second = f.context(rootTwo), child = f.context(childOne);
-  assert.equal((await mode(peer, first)).coordinator_mode, 'subscription');
+  const readiness = await mode(peer, first);
+  assert.equal(readiness.coordinator_mode, 'subscription');
+  assert.equal(readiness.route_diagnostics.sol_coordinator_mcp.loaded, true);
+  assert.equal(readiness.route_diagnostics.api_broker.ready, true);
+  assert.equal(readiness.route_diagnostics.api_broker.actually_executed, 'unverified');
   assert.equal((await run(peer, task(f, first, 'native'))).status, 'not_dispatched');
   assert.equal(f.requests.length, 0);
   await select(peer, first, 'api');
@@ -260,6 +266,11 @@ test('API Sol calls real pooled DSH, inspects and revises the original session w
   const result = await run(peer, args);
   assert.equal(result.status, 'completed', result.message);
   assert.equal(result.acceptance, 'accepted');
+  assert.equal(result.acceptance_evidence.mechanical_verdict, 'passed');
+  assert.equal(result.route_evidence.coordination_id, result.task_id);
+  assert.equal(result.route_evidence.coordinator.responses[0].returned_model, model);
+  assert.equal(result.route_evidence.executors[0].actually_executed, 'observed');
+  assert.equal(result.route_evidence.executors[0].returned_model, null);
   assert.equal(result.coordinator_mode, 'api');
   assert.equal(result.executor_backend, 'dsh');
   assert.equal(result.responses.length, 3);
@@ -313,18 +324,18 @@ test('API Sol calls Terra and Luna under one approved workspace scope and receiv
       return callResult(index, index === 1 ? peerCall('terra') : index === 4 ? peerCall('luna') : finish());
     }
     assert.deepEqual(body.tools.map(tool => tool.name), ['delegate_work', 'finish_coordination']);
-    const handoff = JSON.parse(body.input[1].content);
+    const { contract, projectFacts } = JSON.parse(body.input[1].content);
     const role = body.model === TERRA_MODEL ? 'terra' : 'luna';
-    assert.equal(handoff.goal, peerCall(role).args.goal);
-    assert.equal(handoff.acceptance, peerCall(role).args.acceptance);
-    assert.match(handoff.contextSummary, /Relevant approved memory[\s\S]+Specific subtask context/);
-    assert.equal(handoff.cwd, f.workspace);
-    assert.equal(handoff.permissionMode, 'workspace-write');
-    assert.equal(handoff.capability, 'workspace-write');
-    assert.equal(handoff.authorizationNote, 'User approved this fixture workspace, file and command.');
-    assert.deepEqual(handoff.writeScopes, writeScope());
-    assert.deepEqual(handoff.writes, writes());
-    assert.deepEqual(handoff.commands, commands);
+    assert.equal(contract.goal, peerCall(role).args.goal);
+    assert.equal(contract.acceptance, peerCall(role).args.acceptance);
+    assert.equal(projectFacts, 'Specific subtask context.');
+    assert.equal(contract.scope.cwd, f.workspace);
+    assert.equal(contract.scope.permissionMode, 'workspace-write');
+    assert.equal(contract.scope.capability, 'workspace-write');
+    assert.equal(contract.authorization.note, 'User approved this fixture workspace, file and command.');
+    assert.deepEqual(contract.authorization.writeScopes, writeScope());
+    assert.deepEqual(contract.authorization.writes, writes());
+    assert.deepEqual(contract.authorization.commands, commands);
     if (index === 2 || index === 5) return callResult(index, delegate(), { model: body.model });
     const executor = previousReceipt(body);
     assert.equal(executor.status, 'completed');
@@ -356,6 +367,44 @@ test('API Sol calls Terra and Luna under one approved workspace scope and receiv
   assert.equal((await run(connection, args)).replayed, true);
   await assert.rejects(run(connection, { ...args, acceptPeerCharges: false }), /different frozen handoff/);
   assert.equal(f.requests.length, 7);
+});
+
+test('Host file verification distinguishes exit zero from acceptance and bounds same-session repair', async t => {
+  for (const { variant, maxRepairs, errorCode } of [
+    { variant: 'premature acceptance', maxRepairs: 1, errorCode: 'SOL_MECHANICAL_EVIDENCE_FAILED' },
+    { variant: 'repair budget exhausted', maxRepairs: 0, errorCode: 'SOL_REPAIR_LIMIT' },
+    { variant: 'in-scope repair', maxRepairs: 1, errorCode: undefined }
+  ]) {
+    await t.test(variant, async t => {
+      const f = await fixture(t, (index, body) => {
+        if (index === 1) return callResult(index, delegate('fixture-write:pending'));
+        const receipt = previousReceipt(body);
+        assert.equal(receipt.status, 'completed');
+        assert.equal(receipt.exit_code, 0);
+        assert.equal(receipt.host_verification.checks[0].status, index === 2 ? 'failed' : 'passed');
+        return callResult(index, index === 2 && variant !== 'premature acceptance' ? delegate('fixture-write:verified') : finish());
+      }, { allowWrite: true, limits: { max_repairs: maxRepairs } });
+      const connection = await f.connect({ SOL_TEST_HOST_CHECKS: '1' });
+      const context = f.context();
+      await select(connection, context, 'api');
+      const approved = path.join(f.workspace, 'public-control.txt');
+      const result = await run(connection, task(f, context, 'host-mechanical-check', {
+        permissionMode: 'workspace-write', capability: 'workspace-write', constraints: 'Edit only public-control.txt.',
+        authorizationNote: 'The fixture authorizes editing the test file.',
+        writes: [{ path: approved, mode: 'edit', content_sha256: null }], acceptance: 'The host file check passes.'
+      }));
+      assert.equal(result.error_code, errorCode, result.message);
+      assert.equal(result.status, errorCode ? 'blocked' : 'completed', result.message);
+      assert.equal(result.steps[0].mechanical_verdict, 'failed');
+      assert.equal(countRuns(f.dshRuns).length, errorCode ? 1 : 2);
+      assert.equal(fs.readFileSync(approved, 'utf8'), errorCode ? 'pending' : 'verified');
+      if (!errorCode) {
+        assert.equal(result.steps[1].continuation_of.task_id, result.steps[0].receipt.task_id);
+        assert.equal(result.steps[1].receipt.session_id, result.steps[0].receipt.session_id);
+        assert.equal(result.steps[1].mechanical_verdict, 'passed');
+      }
+    });
+  }
 });
 
 test('API collaboration rejects unconsented, unadvertised or out-of-scope peer calls before dispatch', async t => {
@@ -612,6 +661,9 @@ test('Cancellation belongs to the original coordinator and a disconnected owner 
   const observed = await find(replacement, context, 'disconnect', disconnected.task_id);
   assert.equal(observed.status, 'unknown_after_disconnect');
   assert.equal(observed.owner, false);
+  assert.equal(observed.recovery.coordination_id, disconnected.task_id);
+  assert.equal(observed.recovery.idempotency_key, 'disconnect');
+  assert.ok(observed.recovery.downstream_task_id);
   assert.equal((await run(replacement, args)).replayed, true);
   assert.equal((await cancel(replacement, context, 'disconnect', disconnected.task_id)).cancel_requested, false);
   assert.equal(f.requests.length, 2);
@@ -630,6 +682,9 @@ test('Missing credentials and disrupted HTTP never guess usage, switch source or
   const args = task(f, ctx, 'network');
   const result = await run(peer, args);
   assert.equal(result.error_code, 'OPENAI_RESPONSE_UNKNOWN');
+  assert.equal(result.status, 'unknown_after_disconnect');
+  assert.equal(result.recovery.coordination_id, result.task_id);
+  assert.equal(result.route_evidence.coordinator.actually_executed, 'unverified');
   assert.equal(result.usage_unknown, true);
   assert.equal(result.usage.total_tokens, null);
   assert.equal((await mode(peer, ctx)).coordinator_mode, 'api');

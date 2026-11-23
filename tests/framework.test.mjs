@@ -78,27 +78,46 @@ test('installer applies and verifies the Skill with locally resolvable reference
   assert.equal(fs.existsSync(skill), false);
   assert.equal(run('--apply').status, 0);
   assert.match(run('--apply').stdout, /already up to date/);
-  const links = [...fs.readFileSync(path.join(skill, 'SKILL.md'), 'utf8').matchAll(/\]\((references\/[^)]+\.md)\)/g)]
-    .map(match => path.join(skill, match[1]));
-  assert.ok(links.length > 0);
-  for (const link of links) assert.ok(fs.statSync(link).isFile(), link);
+  const sourceReferences = path.join(root, 'skills', 'multi-agent-dispatch', 'references');
+  const references = fs.readdirSync(sourceReferences).filter(name => name.endsWith('.md')).sort();
+  const installedFiles = [path.join(skill, 'SKILL.md'), ...references.map(name => path.join(skill, 'references', name))];
+  const linked = new Set();
+  for (const file of installedFiles) {
+    assert.ok(fs.statSync(file).isFile(), file);
+    const contents = fs.readFileSync(file, 'utf8');
+    for (const match of contents.matchAll(/\]\(([^)#]+\.md)(?:#[^)]+)?\)/g)) {
+      const link = path.resolve(path.dirname(file), match[1]);
+      assert.ok(!path.relative(skill, link).startsWith('..'), `Link escapes installed Skill: ${link}`);
+      assert.ok(fs.statSync(link).isFile(), link);
+      linked.add(link);
+    }
+  }
+  assert.ok(linked.has(path.join(skill, 'references', 'latex-minimal.md')));
+  assert.ok(linked.has(path.join(skill, 'references', 'research-reproducibility.md')));
   const verification = run('--verify');
   assert.equal(verification.status, 0, verification.stderr || verification.stdout);
   assert.equal(JSON.parse(verification.stdout).rules_current, true);
 
   const backups = path.join(home, '.codex', 'ai-rule-backups');
   const manifest = path.join(backups, fs.readdirSync(backups)[0], 'manifest.json');
-  const originalReference = fs.readFileSync(links[0]);
-  fs.appendFileSync(links[0], '\nA local edit\n');
+  const reference = path.join(skill, 'references', 'research-reproducibility.md');
+  const originalReference = fs.readFileSync(reference);
+  fs.appendFileSync(reference, '\nA local edit\n');
   const changed = run('--verify');
   assert.equal(changed.status, 1);
   assert.equal(JSON.parse(changed.stdout).rules_current, false);
   assert.match(run('--rollback', manifest).stderr, /Changed since installation/);
-  fs.writeFileSync(links[0], originalReference);
+  fs.writeFileSync(reference, originalReference);
+  const missingReference = path.join(skill, 'references', 'latex-minimal.md');
+  const originalMissingReference = fs.readFileSync(missingReference);
+  fs.rmSync(missingReference);
+  const missing = run('--verify');
+  assert.equal(missing.status, 1);
+  assert.equal(JSON.parse(missing.stdout).rules_current, false);
+  fs.writeFileSync(missingReference, originalMissingReference);
   assert.equal(run('--rollback', manifest).status, 0);
   assert.equal(fs.existsSync(agents), false);
-  assert.equal(fs.existsSync(path.join(skill, 'SKILL.md')), false);
-  for (const link of links) assert.equal(fs.existsSync(link), false, link);
+  for (const file of installedFiles) assert.equal(fs.existsSync(file), false, file);
 });
 test('installer protects existing Skill reference files and rejects a redirected reference directory', t => {
   const home = temp(), target = temp();

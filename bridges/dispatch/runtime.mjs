@@ -21,6 +21,7 @@ import {
 import { createProtectedTerraClient } from '../terra/protected.mjs';
 import { ACTION_TOOL, CONFIRM_TOOL, FINISH_TOOL } from '../terra/client.mjs';
 import { nativePeerCoordinator } from './native-peer.mjs';
+import { redact } from '../dsh/core.mjs';
 
 const MAX_PROMPT_BYTES = 60000;
 const ACTION_NAMES = Object.freeze({
@@ -450,7 +451,11 @@ function solCoordinatorFor(options) {
   return candidate;
 }
 
-function executorFor(plan, options) {
+function evidenceId(value) {
+  return typeof value === 'string' && /^[A-Za-z0-9_.:@/-]{1,200}$/.test(value) && redact(value) === value ? value : null;
+}
+
+function executorFor(plan, options, observe) {
   const name = plan.executor.backend === Backend.WORKBUDDY_DSF ? 'workbuddy' : 'dsh';
   const adapter = options[name] ?? options[plan.executor.backend];
   if (!adapter) {
@@ -468,7 +473,10 @@ function executorFor(plan, options) {
     model: plan.executor.model,
     reasoning_effort: plan.executor.reasoning_effort,
     adapter,
-    submit(request) { return call.call(adapter, request); }
+    submit(request) {
+      const outcome = call.call(adapter, request);
+      return typeof outcome?.then === 'function' ? outcome.then(observe) : observe(outcome);
+    }
   });
 }
 
@@ -482,7 +490,20 @@ async function runGeneralCoordinator(plan, input, options) {
       `The ${plan.source} general route requires a real Sol coordinator adapter; no ${plan.executor.label} execution was invoked directly.`,
       { plan, missingAdapters: ['sol_coordinator'] });
   }
-  const backend = executorFor(plan, options);
+  const calls = [];
+  const backend = executorFor(plan, options, outcome => {
+    const taskId = evidenceId(outcome?.task_id);
+    if (calls.length === 32) calls.shift();
+    calls.push({
+      task_id: taskId,
+      session_id: evidenceId(outcome?.session_id),
+      backend: evidenceId(outcome?.backend),
+      returned_model: evidenceId(outcome?.returned_model ?? outcome?.actual_route?.model ?? outcome?.model),
+      actually_executed: taskId && ['running', 'completed', 'failed'].includes(outcome?.status) ? 'observed' : 'unverified',
+      evidence_source: 'selected_backend_adapter_result'
+    });
+    return outcome;
+  });
   const peers = plan.source === DispatchSource.SUBSCRIPTION ? nativePeerCoordinator(input, options) : null;
   let result;
   let peerResults;
@@ -511,10 +532,19 @@ async function runGeneralCoordinator(plan, input, options) {
   }
   // Preserve actual producer fields. Only the requested labels are added, and
   // selected_backend is not allowed to overwrite a coordinator's actual value.
+  const coordinatorId = evidenceId(result.coordinator_receipt?.agent_id);
+  const coordinatorModel = evidenceId(result.coordinator_receipt?.returned_model);
   return {
     ...result,
     ...(peerResults?.length ? { peer_results: peerResults } : {}),
     dispatch: plan,
+    route_evidence: {
+      coordinator: { invoked: true, evidence_source: 'coordinator_adapter_invocation',
+        coordination_id: evidenceId(result.coordination_id), agent_id: coordinatorId, returned_model: coordinatorModel,
+        actually_executed: coordinatorId && coordinatorModel ? 'observed' : 'unverified' },
+      downstream: { actually_executed: calls.some(call => call.actually_executed === 'observed') ? 'observed' : 'unverified',
+        calls }
+    },
     ...(Object.hasOwn(result, 'selected_backend') ? {} : { selected_backend: plan.executor.backend }),
     requested_backend: plan.executor.backend,
     requested_model: plan.executor.model,

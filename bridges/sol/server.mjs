@@ -33,7 +33,7 @@ const tool = (name, description, properties = {}, required = [], readOnlyHint = 
   annotations: { readOnlyHint }
 });
 const TOOLS = [
-  tool('get_sol_coordinator_mode', 'Read the selected Sol source for this verified Codex root, without an API call.', {}, [], true),
+  tool('get_sol_coordinator_mode', 'Read the selected Sol source and local route readiness for this verified Codex root without a model call.', {}, [], true),
   tool('set_sol_coordinator_mode', 'Set this verified Codex root’s source for future work only, without an API call.', { mode: source }, ['mode']),
   tool('resolve_layer_dispatch', 'Resolve the layered model route for this root without a model call. Omit purpose for general/coordinating work; omit backend to use the purpose default (DSH or Terra).', {
     purpose: choices(...PURPOSES), backend: choices(...EXECUTION_BACKENDS)
@@ -77,7 +77,7 @@ export function startSolServer({ configPath, stdin = process.stdin, stdout = pro
     validate(selected, args);
     const { rootId } = resolveContext({ config: config.contextConfig, reference: args.context, purpose: SERVICE, sessionsRoot });
     const { context, idempotencyKey: key, taskId } = args;
-    if (name === 'get_sol_coordinator_mode') return service.mode(rootId);
+    if (name === 'get_sol_coordinator_mode') return service.mode(rootId, { mcpLoaded: true });
     if (name === 'set_sol_coordinator_mode') return service.setMode(rootId, args.mode);
     if (name === 'resolve_layer_dispatch') return service.resolve(rootId, {
       ...(args.purpose === undefined ? {} : { purpose: args.purpose }),
@@ -101,7 +101,7 @@ export function startSolServer({ configPath, stdin = process.stdin, stdout = pro
     finally { runs.delete(id); }
   }
 
-  async function dispatch(message) {
+  async function dispatchMessage(message) {
     const { id, method, params = {} } = message ?? {};
     if (message?.jsonrpc !== '2.0' || typeof method !== 'string') return error(id, -32600, 'Invalid MCP request.');
     if (id === undefined) {
@@ -149,7 +149,7 @@ export function startSolServer({ configPath, stdin = process.stdin, stdout = pro
       const line = input.slice(0, end);
       input = input.slice(end + 1);
       if (!line.trim()) continue;
-      try { void dispatch(JSON.parse(line)).catch(() => error(null, -32603, 'MCP request could not be completed.')); }
+      try { void dispatchMessage(JSON.parse(line)).catch(() => error(null, -32603, 'MCP request could not be completed.')); }
       catch { error(null, -32700, 'Invalid MCP JSON.'); }
     }
   });

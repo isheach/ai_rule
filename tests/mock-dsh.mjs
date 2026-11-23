@@ -1,4 +1,5 @@
 import fs from 'node:fs';
+import path from 'node:path';
 import { executorProbe } from './sol-executor-probe.mjs';
 const args = process.argv.slice(2);
 if (process.env.SOL_TEST_PROBE_ENV === '1' && Object.keys(process.env).some(name => /OPENAI_|^CODEX_API_KEY$/i.test(name))) {
@@ -18,6 +19,9 @@ if (process.env.SOL_TEST_DSH_RUNS) fs.appendFileSync(process.env.SOL_TEST_DSH_RU
     ...executorProbe(process.cwd(), prompt) }) + '\n');
 emit({ type: 'session', sessionId, cwd: process.cwd() });
 const fixtureControl = process.env.SOL_TEST_DSH_RUNS ? prompt.match(/\nCoordinator instructions:\nfixture-(hang|sleep:\d+)\n/)?.[1] : null;
+const fileControl = process.env.SOL_TEST_DSH_RUNS && args[args.indexOf('--permission-mode') + 1] === 'workspace-write'
+  ? prompt.match(/\nCoordinator instructions:\nfixture-write:(pending|verified)\n/)?.[1] : null;
+if (fileControl) fs.writeFileSync(path.join(process.cwd(), 'public-control.txt'), fileControl);
 const sleep = prompt.match(/(?:^|\n\n)sleep:(\d+)$/)?.[1] ?? fixtureControl?.match(/^sleep:(\d+)$/)?.[1];
 if (prompt === 'hang' || prompt.endsWith('\n\nhang') || fixtureControl === 'hang') { setInterval(() => {}, 1000); }
 else if (prompt === 'nofinal') { process.exit(0); }
