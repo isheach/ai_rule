@@ -66,7 +66,7 @@ const taskProperties = {
   },
   commands: { type: 'array', maxItems: 32, uniqueItems: true, items: { type: 'string' } },
   purpose: { type: 'string', enum: PURPOSES, description: 'Explicit task purpose. Omitted means general; prompt keywords never select a purpose.' },
-  backend: { type: 'string', enum: ['DSH', 'WorkBuddy DSF', 'Terra'], description: 'Explicit supported backend. Omit for the purpose default (DSH or Terra).' }
+  backend: { type: 'string', enum: ['DSH', 'WorkBuddy DSF', 'Terra', 'Antigravity'], description: 'Antigravity writing hands off to the configured text entry.' }
 };
 const tools = [
   {
@@ -87,10 +87,10 @@ const tools = [
   },
   {
     name: 'resolve_layer_dispatch',
-    description: 'Resolve the layered route for this verified root without launching a model. General work -> gpt-6.2-sol max; specialist work -> gpt-6.1-terra max.',
+    description: 'Resolve the layered route for this verified root without launching a model.',
     inputSchema: {
       type: 'object', additionalProperties: false, required: ['context'],
-      properties: { context: contextProperty, purpose: { type: 'string', enum: PURPOSES }, backend: { type: 'string', enum: ['DSH', 'WorkBuddy DSF', 'Terra'] } }
+      properties: { context: contextProperty, purpose: { type: 'string', enum: PURPOSES }, backend: { type: 'string', enum: ['DSH', 'WorkBuddy DSF', 'Terra', 'Antigravity'] } }
     },
     annotations: { readOnlyHint: true }
   },

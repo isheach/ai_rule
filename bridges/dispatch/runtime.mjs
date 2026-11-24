@@ -13,6 +13,8 @@ import {
   Backend,
   DispatchSource,
   DispatchPolicyError,
+  SOL_MODEL,
+  SOL_REASONING_EFFORT,
   TERRA_MODEL,
   TERRA_REASONING_EFFORT,
   hostHandoff,
@@ -21,6 +23,8 @@ import {
 import { createProtectedTerraClient } from '../terra/protected.mjs';
 import { ACTION_TOOL, CONFIRM_TOOL, FINISH_TOOL } from '../terra/client.mjs';
 import { nativePeerCoordinator } from './native-peer.mjs';
+import { redact } from '../dsh/core.mjs';
+import { EntryStructure } from '../entry-structure.mjs';
 
 const MAX_PROMPT_BYTES = 60000;
 const ACTION_NAMES = Object.freeze({
@@ -450,6 +454,34 @@ function solCoordinatorFor(options) {
   return candidate;
 }
 
+function evidenceId(value) {
+  return typeof value === 'string' && /^[A-Za-z0-9_.:@/-]{1,200}$/.test(value) && redact(value) === value ? value : null;
+}
+
+const ENTRY_CALLER_ROLES = new Set(['user', 'host', 'astra']);
+
+function entryCaller(adapter) {
+  const role = adapter?.identity && isObject(adapter.identity) ? adapter.identity.role : null;
+  return {
+    role: ENTRY_CALLER_ROLES.has(role) ? role : 'unverified',
+    evidence_source: ENTRY_CALLER_ROLES.has(role) ? 'trusted_adapter_identity' : null
+  };
+}
+
+function directSolReceipt(result) {
+  const receipt = isObject(result?.coordinator_receipt) ? result.coordinator_receipt : {};
+  const agent_id = evidenceId(receipt.agent_id);
+  const returned_model = evidenceId(receipt.returned_model);
+  const returned_reasoning_effort = evidenceId(receipt.returned_reasoning_effort);
+  return {
+    receipt_verified: Boolean(agent_id && returned_model === SOL_MODEL && returned_reasoning_effort === SOL_REASONING_EFFORT),
+    agent_id,
+    returned_model,
+    returned_reasoning_effort,
+    evidence_source: 'coordinator_receipt'
+  };
+}
+
 function executorFor(plan, options) {
   const name = plan.executor.backend === Backend.WORKBUDDY_DSF ? 'workbuddy' : 'dsh';
   const adapter = options[name] ?? options[plan.executor.backend];
@@ -476,7 +508,24 @@ async function runGeneralCoordinator(plan, input, options) {
   // The generic public route must invoke a real Sol coordinator adapter before
   // any DSF adapter. The coordinator receives the selected backend handle and
   // alone decides when to call it; this runtime never calls DSF directly here.
-  const coordinator = solCoordinatorFor(options);
+  const directRequested = plan.entry_structure === EntryStructure.SOL;
+  const directSubscription = directRequested && plan.source === DispatchSource.SUBSCRIPTION;
+  const coordinator = directSubscription ? options.nativeDirectSol : solCoordinatorFor(options);
+  if (directSubscription && (!isObject(coordinator) || typeof coordinator.coordinate !== 'function')) {
+    throw new DispatchBlockedError('DISPATCH_DIRECT_SOL_UNAVAILABLE',
+      'The selected subscription Sol entry requires the host’s real nativeDirectSol coordinator; no Astra coordinator or backend was substituted.',
+      { plan, missingAdapters: ['nativeDirectSol'] });
+  }
+  if (directSubscription && coordinator.identity?.role === 'astra') {
+    const error = new DispatchBlockedError('DISPATCH_DIRECT_SOL_ASTRA_CALLER',
+      'The selected direct Sol entry was invoked by a trusted Astra adapter identity; no Sol call or downstream backend was started.',
+      { plan });
+    error.entry_caller = entryCaller(coordinator);
+    error.entry_structure = plan.entry_structure;
+    error.direct_entry = { status: 'unverified', reason: 'astra_caller_observed',
+      evidence_source: 'blocked_before_native_sol_invocation' };
+    throw error;
+  }
   if (!coordinator) {
     throw new DispatchBlockedError('DISPATCH_COORDINATOR_MISSING',
       `The ${plan.source} general route requires a real Sol coordinator adapter; no ${plan.executor.label} execution was invoked directly.`,
@@ -486,6 +535,7 @@ async function runGeneralCoordinator(plan, input, options) {
   const peers = plan.source === DispatchSource.SUBSCRIPTION ? nativePeerCoordinator(input, options) : null;
   let result;
   let peerResults;
+  let directEvidence;
   try {
     result = await coordinator.coordinate({
       plan,
@@ -505,16 +555,44 @@ async function runGeneralCoordinator(plan, input, options) {
         'The Sol coordinator adapter returned no receipt; no backend result was substituted.',
         { plan });
     }
+    if (directRequested) {
+      directEvidence = directSolReceipt(result);
+      if (directSubscription && ['completed', 'finished'].includes(result.status) && !directEvidence.receipt_verified) {
+        result = {
+          ...result, status: 'blocked', error_code: 'DISPATCH_DIRECT_SOL_EVIDENCE',
+          message: 'The native Sol receipt did not verify its actual agent ID, gpt-6.2-sol model and max reasoning effort; no fallback was attempted.'
+        };
+      }
+    }
     peerResults = await peers?.collect();
   } finally {
     peers?.close();
   }
   // Preserve actual producer fields. Only the requested labels are added, and
   // selected_backend is not allowed to overwrite a coordinator's actual value.
+  const caller = entryCaller(coordinator);
+  const apiEntryCaller = plan.source === DispatchSource.API && isObject(result.entry_caller)
+    ? result.entry_caller : { role: 'unverified', evidence_source: 'api_entry_caller_unavailable' };
+  const apiDirectEntry = plan.source === DispatchSource.API && isObject(result.direct_entry)
+    ? result.direct_entry : { status: directRequested ? 'unverified' : 'not_requested',
+      model_evidence: 'unverified', evidence_source: 'api_direct_entry_receipt_unavailable' };
+  const directEntry = directRequested && plan.source === DispatchSource.API ? apiDirectEntry
+    : directRequested ? {
+      status: directEvidence.receipt_verified && ['user', 'host'].includes(caller.role) ? 'verified' : 'unverified',
+      model_evidence: directEvidence.receipt_verified ? 'verified' : 'unverified',
+      evidence_source: directEvidence.evidence_source,
+      agent_id: directEvidence.agent_id,
+      returned_model: directEvidence.returned_model,
+      returned_reasoning_effort: directEvidence.returned_reasoning_effort
+    }
+      : { status: 'not_requested', evidence_source: 'entry_structure_astra' };
   return {
     ...result,
     ...(peerResults?.length ? { peer_results: peerResults } : {}),
     dispatch: plan,
+    entry_structure: plan.entry_structure,
+    entry_caller: plan.source === DispatchSource.API ? apiEntryCaller : caller,
+    direct_entry: directEntry,
     ...(Object.hasOwn(result, 'selected_backend') ? {} : { selected_backend: plan.executor.backend }),
     requested_backend: plan.executor.backend,
     requested_model: plan.executor.model,
@@ -528,6 +606,7 @@ export async function dispatchLayeredTask(input, options = {}) {
   validatePrompt(input.prompt);
   assertNoRawMedia(input);
   assertNoRawMedia(input.task);
+  if (plan.executor.backend === Backend.ANTIGRAVITY) return hostHandoff(plan);
   if (plan.layer === 'coordinator') return runGeneralCoordinator(plan, input, options);
   if (plan.source === DispatchSource.API) {
     return runApiTerraTask({

@@ -7,11 +7,12 @@ import { loadPoolConfig, validatePoolConfig } from '../pool/service.mjs';
 import { WORKBUDDY_DSF } from '../workbuddy/dispatch.mjs';
 import { loadProjectConfig, PROJECT_CONTRACT, PROJECT_SERVER_ENTRY } from '../workbuddy/project-config.mjs';
 import { DSH_TIMEOUT_MS } from '../task-lifecycle.mjs';
+import { loadAntigravityConfig } from '../antigravity/client.mjs';
 
 export const SERVICE = 'sol-coordinator';
 export const CoordinatorMode = Object.freeze({ SUBSCRIPTION: 'subscription', API: 'api' });
 export const COORDINATOR_MODES = Object.freeze(Object.values(CoordinatorMode));
-export const EXECUTION_BACKENDS = Object.freeze(['DSH', 'WorkBuddy DSF', 'Terra', 'HY4', 'A']);
+export const EXECUTION_BACKENDS = Object.freeze(['DSH', 'WorkBuddy DSF', 'Terra', 'HY4', 'A', 'Antigravity']);
 export const EXECUTION_PERMISSIONS = Object.freeze(['read-only', 'workspace-write']);
 export const SAFE_KEY = /^[A-Za-z0-9_.:-]{1,100}$/;
 export const SAFE_ID = /^[A-Za-z0-9_.:@/-]{1,160}$/;
@@ -130,7 +131,7 @@ function loadWorkBuddy(value, reservedEnv) {
 }
 
 export function validateSolConfig(value, { poolConfig } = {}) {
-  object(value, ['state_dir', 'pool_config', 'openai', 'limits', 'workbuddy'], 'coordinator configuration');
+  object(value, ['state_dir', 'pool_config', 'openai', 'limits', 'workbuddy', 'antigravity'], 'coordinator configuration');
   const poolFilename = absolute(value.pool_config, 'pool_config');
   const pool = poolConfig ? validatePoolConfig(poolConfig) : loadPoolConfig(poolFilename);
   const workspaceRoot = existing(pool.workspace_root, 'workspace_root', 'directory');
@@ -161,7 +162,12 @@ export function validateSolConfig(value, { poolConfig } = {}) {
   }));
   if (limits.max_delegations >= limits.max_responses) throw Error('limits.max_responses must leave room for acceptance after delegation.');
   const contextConfig = { ...pool, context_dir: path.join(stateDir, 'contexts') };
-  return { stateDir, workspaceRoot, contextConfig, pool, openai, limits, reservedEnv, workbuddy: loadWorkBuddy(value.workbuddy, reservedEnv) };
+  const antigravity = loadAntigravityConfig(value.antigravity, [...protectedPaths, stateDir]);
+  const workbuddy = loadWorkBuddy(value.workbuddy, reservedEnv);
+  if (antigravity?.credentialSource === 'gemini-api-key' && workbuddy?.envVars.includes('GEMINI_API_KEY')) {
+    throw Error('The Antigravity Gemini key cannot be forwarded to WorkBuddy.');
+  }
+  return { stateDir, workspaceRoot, contextConfig, pool, openai, limits, reservedEnv, antigravity, workbuddy };
 }
 
 export function loadSolConfig(filename) {

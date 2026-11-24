@@ -4,17 +4,17 @@
 import { pathToFileURL } from 'node:url';
 import { resolveDispatch } from '../dispatch.mjs';
 
-const USAGE = 'Usage: node bridges/dispatch/cli.mjs resolve [--source subscription|api] [--purpose <purpose>] [--backend <backend>]';
+const USAGE = 'Usage: node bridges/dispatch/cli.mjs resolve [--source subscription|api] [--purpose <purpose>] [--backend <backend>] [--entry-structure astra|sol]';
 
 function parse(argv) {
   if (!Array.isArray(argv) || argv[0] !== 'resolve') throw Error(USAGE);
   const options = {};
   for (let index = 1; index < argv.length; index++) {
     const flag = argv[index];
-    if (!['--source', '--purpose', '--backend'].includes(flag)) throw Error(USAGE);
+    if (!['--source', '--purpose', '--backend', '--entry-structure'].includes(flag)) throw Error(USAGE);
     const value = argv[++index];
     if (!value || value.startsWith('--')) throw Error(USAGE);
-    const key = flag.slice(2);
+    const key = flag === '--entry-structure' ? 'entryStructure' : flag.slice(2);
     if (options[key] !== undefined) throw Error(USAGE);
     options[key] = value;
   }

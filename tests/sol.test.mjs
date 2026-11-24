@@ -12,6 +12,7 @@ import { setTimeout as delay } from 'node:timers/promises';
 import { issueContext } from '../bridges/pool/context.mjs';
 import { LUNA_MODEL, TERRA_MODEL } from '../bridges/dispatch/policy.mjs';
 import { loadSolConfig } from '../bridges/sol/config.mjs';
+import { SolJournal } from '../bridges/sol/journal.mjs';
 import { ResponsesClient } from '../bridges/sol/responses.mjs';
 
 const repo = path.resolve(path.dirname(fileURLToPath(import.meta.url)), '..');
@@ -229,6 +230,110 @@ function previousReceipt(body) {
   assert.match(body.input.at(-4).encrypted_content, /^opaque-reasoning-/);
   return JSON.parse(response.output);
 }
+
+test('entry structure is root-scoped, independent, and frozen on accepted Sol work', async t => {
+  const planning = Promise.withResolvers();
+  t.after(() => planning.resolve());
+  const f = await fixture(t, async (index, body) => {
+    if (index === 1) await planning.promise;
+    if (index === 3 || index === 7) assert.match(body.input[0].content, /You are the entry coordinator/);
+    if (index === 1 || index === 5) assert.doesNotMatch(body.input[0].content, /You are the entry coordinator/);
+    return callResult(index, index % 2 ? delegate() : finish());
+  });
+  const host = await f.connect({ SOL_TEST_ENTRY_CALLER: 'host' });
+  const context = f.context(), child = f.context(childOne), other = f.context(rootTwo);
+  const readEntry = (connection = host, ref = context) => connection.call('get_sol_entry_structure', { context: ref });
+  const setEntry = entryStructure => host.call('set_sol_entry_structure', { context, entryStructure });
+  assert.equal((await readEntry()).entry_structure, 'astra');
+  assert.equal((await readEntry()).entry_structure_source, 'default');
+  assert.equal((await readEntry()).entry_caller.role, 'host');
+  assert.equal((await readEntry(host, child)).entry_caller.thread_kind, 'child');
+  await select(host, context, 'api');
+  assert.equal((await schedule(host, context, 2)).mode, 2);
+  const original = await start(host, task(f, context, 'old-structure'));
+  await until(() => f.requests.length === 1);
+  try {
+    assert.equal(original.entry_structure, 'astra');
+    assert.equal((await setEntry('sol')).entry_structure, 'sol');
+    assert.equal((await readEntry(host, child)).entry_structure, 'sol');
+    assert.equal((await readEntry(host, other)).entry_structure, 'astra');
+    assert.equal((await mode(host, context)).coordinator_mode, 'api');
+    assert.equal((await host.call('get_sol_schedule', { context })).mode, 2);
+    const inspected = await find(host, child, 'old-structure', original.task_id);
+    assert.equal(inspected.status, 'running');
+    assert.equal(inspected.entry_structure, 'astra');
+    assert.equal(inspected.direct_entry.status, 'not_requested');
+  } finally { planning.resolve(); }
+  const completed = await wait(host, context, 'old-structure', original.task_id);
+  assert.equal(completed.status, 'completed', completed.message);
+  assert.equal(completed.entry_structure, 'astra');
+
+  // Old receipts had the same ASTRA fingerprint and no entry fields.
+  const legacy = new SolJournal(f.config.state_dir).file(rootOne, 'old-structure');
+  const contents = JSON.parse(fs.readFileSync(legacy, 'utf8'));
+  for (const key of ['entry_structure', 'entry_structure_source', 'entry_caller']) delete contents[key];
+  fs.writeFileSync(legacy, JSON.stringify(contents));
+  const replay = await run(host, task(f, context, 'old-structure', { entryStructure: 'sol' }));
+  assert.equal(replay.task_id, original.task_id);
+  assert.equal(replay.replayed, true);
+  assert.equal(replay.entry_structure_source, 'legacy_default');
+  assert.equal(replay.entry_structure, 'astra');
+  assert.equal(f.requests.length, 2);
+
+  const direct = await run(host, task(f, context, 'direct'));
+  assert.equal(direct.status, 'completed', direct.message);
+  assert.equal(direct.entry_structure, 'sol');
+  assert.equal(direct.entry_structure_source, 'session');
+  assert.equal(direct.entry_caller.thread_id, rootOne);
+  assert.equal(direct.direct_entry.status, 'verified');
+  assert.equal(direct.direct_entry.response_id, 'resp_3');
+  assert.equal(direct.steps[0].receipt.backend, 'dsh');
+  const override = await run(host, task(f, context, 'one-shot-astra', { entryStructure: 'astra' }));
+  assert.equal(override.entry_structure, 'astra');
+  assert.equal(override.entry_structure_source, 'task_override');
+  assert.equal((await readEntry()).entry_structure, 'sol');
+  const plan = await host.call('resolve_layer_dispatch', { context, entryStructure: 'astra' });
+  assert.equal(plan.entry_structure, 'astra');
+  assert.equal(plan.source, 'api');
+  assert.equal(plan.executor.backend, 'dsh');
+
+  const unknown = await f.connect();
+  const unverified = await run(unknown, task(f, context, 'unverified-caller'));
+  assert.equal(unverified.status, 'completed', unverified.message);
+  assert.equal(unverified.entry_caller.role, 'unverified');
+  assert.equal(unverified.direct_entry.status, 'unverified');
+  assert.equal(unverified.direct_entry.reason, 'caller_role_unverified');
+  assert.equal(unverified.direct_entry.coordinator_evidence, 'protected_broker_response');
+  const astra = await f.connect({ SOL_TEST_ENTRY_CALLER: 'astra' });
+  const blocked = await run(astra, task(f, context, 'astra-cannot-label-direct'));
+  assert.equal(blocked.error_code, 'DIRECT_SOL_ASTRA_CALLER');
+  assert.equal(blocked.entry_caller.role, 'astra');
+  await assert.rejects(run(unknown, task(f, context, 'caller-spoof', { entry_caller: { role: 'user' } })), /unsupported field/);
+  await select(host, context, 'subscription');
+  const nativeRequired = await run(host, task(f, context, 'native-handoff'));
+  assert.equal(nativeRequired.error_code, 'DIRECT_SOL_NATIVE_ENTRY_REQUIRED');
+  assert.equal(nativeRequired.dispatch.entry_structure, 'sol');
+  assert.equal(f.requests.length, 8);
+  assert.equal(countRuns(f.dshRuns).length, 4);
+  await assert.rejects(setEntry('astra-and-sol'), /Invalid entryStructure/);
+});
+
+test('entry CLI uses the verified host root without contacting the broker', async t => {
+  const f = await fixture(t, () => assert.fail('Structure settings must not send a Responses request.'));
+  const cli = (command, extra, id) => spawnSync(process.execPath,
+    [path.join(repo, 'bridges', 'sol', 'cli.mjs'), command, '--config', f.configPath, ...extra],
+    { env: { ...process.env, CODEX_HOME: f.codexHome, CODEX_THREAD_ID: id }, encoding: 'utf8' });
+  const before = cli('entry-structure-status', [], rootOne);
+  assert.equal(before.status, 0, before.stderr);
+  assert.equal(JSON.parse(before.stdout).entry_structure, 'astra');
+  const updated = cli('set-entry-structure', ['sol'], childOne);
+  assert.equal(updated.status, 0, updated.stderr);
+  assert.equal(JSON.parse(updated.stdout).entry_caller.thread_kind, 'child');
+  assert.equal(JSON.parse(cli('entry-structure-status', [], rootOne).stdout).entry_structure, 'sol');
+  assert.equal(JSON.parse(cli('entry-structure-status', [], rootTwo).stdout).entry_structure, 'astra');
+  assert.match(cli('entry-structure-status', [], '').stderr, /refusing to guess a root/);
+  assert.equal(f.requests.length, 0);
+});
 
 test('API Sol calls real pooled DSH, inspects and revises the original session with complete usage and lineage', async t => {
   const f = await fixture(t, (index, body) => {
