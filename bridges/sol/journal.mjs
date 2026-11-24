@@ -2,6 +2,7 @@ import fs from 'node:fs';
 import path from 'node:path';
 import crypto from 'node:crypto';
 import { COORDINATOR_MODES, CoordinatorMode, SAFE_KEY } from './config.mjs';
+import { ENTRY_STRUCTURES, EntryStructure, normalizeEntryStructure } from '../entry-structure.mjs';
 
 export const digest = value => crypto.createHash('sha256').update(value).digest('hex');
 export const now = () => new Date().toISOString();
@@ -67,6 +68,24 @@ export class SolJournal {
     const record = { schema: 1, root_id: rootId, coordinator_mode: mode, updated_at: now() };
     write(path.join(this.root(rootId, true), 'mode.json'), record);
     return { coordinator_mode: mode, updated_at: record.updated_at };
+  }
+
+  entryStructure(rootId) {
+    const record = read(path.join(this.root(rootId), 'entry-structure.json'));
+    if (!record) return { entry_structure: EntryStructure.ASTRA, entry_structure_source: 'default', entry_structure_updated_at: null };
+    if (record.schema !== 1 || record.root_id !== rootId || !ENTRY_STRUCTURES.includes(record.entry_structure)) {
+      throw Error('Invalid recorded entry structure.');
+    }
+    return { entry_structure: record.entry_structure, entry_structure_source: 'session', entry_structure_updated_at: record.updated_at };
+  }
+
+  setEntryStructure(rootId, value) {
+    if (value === undefined) throw Error('An explicit entryStructure is required.');
+    const entryStructure = normalizeEntryStructure(value);
+    const updatedAt = now();
+    write(path.join(this.root(rootId, true), 'entry-structure.json'),
+      { schema: 1, root_id: rootId, entry_structure: entryStructure, updated_at: updatedAt });
+    return { entry_structure: entryStructure, entry_structure_source: 'session', entry_structure_updated_at: updatedAt };
   }
 
   file(rootId, key, create = false) {

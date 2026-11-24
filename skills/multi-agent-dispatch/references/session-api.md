@@ -5,11 +5,11 @@
 
 ## 设置协调来源
 
-- 源的设置工具由 Astra 使用。在装有 `sol-coordinator` 的宿主中，按下方方法取得 `context`，以 `get_sol_coordinator_mode` 读回当前根。用户明确要在会话内切换时调用 `set_sol_coordinator_mode`，传 `mode: "api"` 或 `mode: "subscription"`。一次性 API 选择在本次的 `start_sol_coordination` 或 `run_sol_coordination` 传 `coordinatorMode: "api"`，一次性订阅选择直接走原生调度。
+- 来源设置工具由当前结构中实际可用的宿主或获授权接手者使用；`astra` 入口可由 Astra 操作。在装有 `sol-coordinator` 的宿主中，按下方方法取得 `context`，以 `get_sol_coordinator_mode` 读回当前根。用户明确要在会话内切换时调用 `set_sol_coordinator_mode`，传 `mode: "api"` 或 `mode: "subscription"`。一次性 API 选择在本次的 `start_sol_coordination` 或 `run_sol_coordination` 传 `coordinatorMode: "api"`，一次性订阅选择直接走原生调度。
 
 ### 获取根会话上下文
 
-使用 `dsh-root-pool` 的订阅 Sol 或使用 `sol-coordinator` 的 Astra，在自己的 Codex 执行宿主运行已注册入口旁的辅助程序。以下是 Windows PowerShell 示例，将 `$service` 设为实际所用服务名。
+使用 `dsh-root-pool` 的订阅 Sol 或实际使用 `sol-coordinator` 的宿主，在自己的 Codex 执行宿主运行已注册入口旁的辅助程序。以下是 Windows PowerShell 示例，将 `$service` 设为实际所用服务名。
 
 ```powershell
 & {
@@ -52,7 +52,7 @@ node bridges/dispatch/cli.mjs resolve --source subscription --purpose writing
 
 订阅来源的 `dsh-root-pool` 的 `start_pool_task`/`run_pool_task` 对默认 Terra 专家任务返回 `native_handoff`；显式 Antigravity 只返回面向协调入口的 `not_dispatched` 交接，不伪造任务 ID、不调用模型。`resolve_layer_dispatch` 只返回解析计划。原生 Terra 需宿主真实提供 `gpt-6.1-terra`/max；API Terra 由受保护 Terra client 执行。
 
-协调入口（subscription 或 API 来源）使用 `start_sol_coordination` 或 `run_sol_coordination`，两者共享 handoff。`context` 必填，另有必填 `idempotencyKey`、`goal`、`cwd`、`permissionMode`、`acceptance`。可选字段包括 `coordinatorMode`（`subscription|api`）、`backend`、`purpose`、`authorizationNote`、`constraints`、`contextSummary`、`timeoutMs`、`capability`（`default|text-only|workspace-read|workspace-write`）、`writeScopes`、`writes`、`commands`、`acceptTerraCharges`、`acceptPeerCharges`、`antigravityModel`、`acceptAntigravityUsage`。`start` 返回 `task_id`。用原 `idempotencyKey` 和该 `taskId` 调用 `wait_sol_coordination`。`run` 在单次调用内等待。`context` 必须来自实际宿主的 `node bridges/sol/cli.mjs context --config <ABS>` 的 `context_ref`。服务按父链、服务 purpose 和 TTL 重新核实，手填根、线程、lease 或标签无效。
+协调入口（subscription 或 API 来源）使用 `start_sol_coordination` 或 `run_sol_coordination`，两者共享 handoff。`context` 必填，另有必填 `idempotencyKey`、`goal`、`cwd`、`permissionMode`、`acceptance`。可选字段包括 `coordinatorMode`（`subscription|api`）、`backend`、`purpose`、`authorizationNote`、`constraints`、`contextSummary`、`timeoutMs`、`capability`（`default|text-only|workspace-read|workspace-write`）、`writeScopes`、`writes`、`commands`、`acceptTerraCharges`、`acceptPeerCharges`、`antigravityModel`、`acceptAntigravityUsage`、`entryStructure`。`start` 返回 `task_id`。用原 `idempotencyKey` 和该 `taskId` 调用 `wait_sol_coordination`。`run` 在单次调用内等待。`context` 必须来自实际宿主的 `node bridges/sol/cli.mjs context --config <ABS>` 的 `context_ref`。服务按父链、服务 purpose 和 TTL 重新核实，手填根、线程、lease 或标签无效。
 
 保留的显式 Terra `run_sol_coordination` 写作示例（`start_sol_coordination` 使用相同的 handoff）：
 
@@ -76,6 +76,8 @@ API 中显式 `backend: "Terra"` 或旧安装原路由的 `purpose:"writing"` �
 `computer_operation`、`acceptance`、`image_generation`、`image_recognition` 的 API Terra 路径只使用宿主实际注册的对应 `capabilities`：runtime 为每个已提供的能力生成一个无模型参数、至多执行一次的 bounded action。缺项返回 `DISPATCH_CAPABILITY_MISSING`，不伪造 GUI、桌面或图像后端。write-effect（`computer_operation`、`image_generation`）还要求 `workspace-write`。只读项不要求。保留的 Terra `writing` 不需要这些能力，使用上述受保护 API 路径。`acceptance` 的 Terra 验收 action 与 Sol 在一般协调中复核 executor receipt 不同，后者仍由 Sol 按 receipt 作 `finish_coordination` 判定。
 
 ### OpenAI Responses API Sol
+
+以下 Astra 步骤适用于 `astra` 入口。`sol` 入口由实际宿主直接通过已获准且就绪的 `sol-coordinator` 调用 `run/start_sol_coordination` 并等待，不创建 Astra 作为前置或收尾；详细选择和能力边界见 [入口结构](entry-structure.md)。
 
 1. Astra 通过实际会话的 `sol-coordinator` 提交新任务。首次检查或入口变化时，核对 `get_sol_coordinator_mode` 返回的就绪状态及目标执行入口。按上文 handoff 传 `context`、`idempotencyKey`、`goal`、`cwd`、`permissionMode`、`acceptance` 与按需的显式 `purpose`（省略为 `general`）。一般工作省略 `backend` 得 DSH，只有明确选择才传 `backend:"WorkBuddy DSF"`。已配置 Antigravity 时新 writing 省略 backend 走其纯文本入口并传 `acceptAntigravityUsage:true`；其他专家任务和保留的 Terra 写作按 Terra 路径传 `acceptTerraCharges:true`。按需传 `constraints`、`contextSummary`、`timeoutMs` 及支持的任务能力和范围。workspace-write 任务须传 `authorizationNote`。
 2. DSH 首次转入另一个根池前，读取 `get_sol_schedule`。和当前会话已授权的选择不同时，通过 `set_sol_schedule` 应用该选择。两条链共用同根池且模式一致时直接派单。来源开关本身只设置协调来源。

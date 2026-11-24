@@ -6,20 +6,21 @@ description: Coordinate Astra handoffs, direct Terra specialist work, and GPT-6.
 
 # 多代理调度
 
-以当前生效的 AGENTS 为规则。全新独立会话默认订阅 GPT-6.2 Sol Max → DSH/OpenCode Go DSF。WorkBuddy DSF 是显式底层替代（既有模式 2 峰时交接除外）。纯主机操作/验收、绘图或图像生成与识别交 GPT-6.1 Terra Max。已配置 Antigravity 的 `sol-coordinator` 新 writing 默认走其纯文本入口；未配置的旧安装及显式 Terra 写作沿原路径。Sol 可按需调用 Terra 或 GPT-6 Luna Max，三者沿用当前所选的同一来源。获准的一般任务还可交给 Antigravity 做独立文本协作，其 Google 身份与计费单独核实。
+以当前生效的 AGENTS 为规则。全新独立会话默认 `entryStructure: "astra"`，使用订阅 GPT-6.2 Sol Max → DSH/OpenCode Go DSF。WorkBuddy DSF 是显式底层替代（既有模式 2 峰时交接除外）。纯主机操作/验收、绘图或图像生成与识别交 GPT-6.1 Terra Max。已配置 Antigravity 的 `sol-coordinator` 新 writing 默认走其纯文本入口；未配置的旧安装及显式 Terra 写作沿原路径。Sol 可按需调用 Terra 或 GPT-6 Luna Max，三者沿用当前所选的同一来源。获准的一般任务还可交给 Antigravity 做独立文本协作，其 Google 身份与计费单独核实。
 
-按需查阅：[Antigravity 纯文本路由](references/antigravity-text.md)、[会话上下文、路由与 API](references/session-api.md)、[安装前置与验收](references/installation.md)、[DSH 与峰谷设置](references/dsh.md)、[WorkBuddy DSF](references/workbuddy.md)、[HY4](references/hy4.md)、[模式 2 峰时交接](references/workbuddy-peak.md)、[Terra 专家入口及共享配额](references/terra-api.md)。LaTeX 工作读取 [LaTeX 最小改动](references/latex-minimal.md)。科研、实验或量化工作读取 [科研与量化可复现性](references/research-reproducibility.md)。
+按需查阅：[会话入口结构](references/entry-structure.md)、[Antigravity 纯文本路由](references/antigravity-text.md)、[会话上下文、路由与 API](references/session-api.md)、[安装前置与验收](references/installation.md)、[DSH 与峰谷设置](references/dsh.md)、[WorkBuddy DSF](references/workbuddy.md)、[HY4](references/hy4.md)、[模式 2 峰时交接](references/workbuddy-peak.md)、[Terra 专家入口及共享配额](references/terra-api.md)。LaTeX 工作读取 [LaTeX 最小改动](references/latex-minimal.md)。科研、实验或量化工作读取 [科研与量化可复现性](references/research-reproducibility.md)。
 
 ## 1. 恢复选择并核实目标
 
-- 从当前会话、可信交接或已验证根的持久记录恢复 `coordinator_mode`、`session_mode`、`scheduleMode` 及活动任务。独立新会话采用 AGENTS 的默认值。已有 A/外部模式、当前 `scheduleMode`（含 3）、来源、已受理任务和所有者继续有效，不得被新默认改写。依 AGENTS 处理明确切换与一次性覆盖。首次选择或切换时简短确认，随后按记录执行。
+- 从当前会话、可信交接或已验证根的持久记录恢复 `entryStructure`、`coordinator_mode`、`session_mode`、`scheduleMode` 及活动任务。独立新会话采用 AGENTS 的默认值。已有入口结构、A/外部模式、当前 `scheduleMode`（含 3）、来源、已受理任务和所有者继续有效，不得被新默认改写。依 AGENTS 处理明确切换与一次性覆盖。首次选择或切换时简短确认，随后按记录执行。
+- 入口结构独立于来源、A/外部执行模式和峰谷。旧根记录缺少 `entryStructure` 时默认为 `astra`；`get_sol_entry_structure({ context })` 和 `get_sol_coordinator_mode({ context })` 读取已验证根，用户明确要求持久切换时用 `set_sol_entry_structure({ context, entryStructure })`；仅本次在 `start/run_sol_coordination` 或只读 `resolve_layer_dispatch` 传 `entryStructure`，不改持久选择。原任务受理后的结构、来源、归属、键和回执不变。[具体步骤与直接 Sol 边界](references/entry-structure.md)。
 - 恢复的选择缺乏依据时先找原记录，仍不明确再澄清。保留活动任务原所有者、协调来源、执行宿主和目标端点、实际后端、根或实例、绝对 cwd、任务 ID、原键、会话 ID 与已知状态。取得已注册根上下文、设置来源、公共字段与 API handoff 的具体步骤见 [会话上下文、路由与 API](references/session-api.md)。
-- Astra 只核实选择及交接入口所需的宿主、目标与授权。接手的 Sol 或 Terra 在自身宿主区分执行工具与操作目标，核实机器、账号或令牌、绝对路径和实际权限。沿用仍适用的证据，实际变更或失败时复核受影响项。Linux shell 只证明自身位置。以已核实的目标端点连接状态或原任务回执判断断连。
-- 所选入口无法受理时，Astra 报告入口、模型、认证或权限的具体阻塞与证据。受理后的阻塞由接手者报告。保留原来源和入口，由原所有者继续能独立完成的源码修改与离线验证。部署和接续按 [安装前置与验收](references/installation.md) 核实目标宿主、身份、修订及绝对路径。
+- `astra` 结构下 Astra 只核实选择及交接入口所需的宿主、目标与授权；`sol` 结构由实际宿主及 Sol 按授权核实。接手的 Sol 或 Terra 在自身宿主区分执行工具与操作目标，核实机器、账号或令牌、绝对路径和实际权限。沿用仍适用的证据，实际变更或失败时复核受影响项。Linux shell 只证明自身位置。以已核实的目标端点连接状态或原任务回执判断断连。
+- 所选入口无法受理时，由 `astra` 结构的 Astra 或 `sol` 结构的实际宿主报告入口、模型、认证或权限的具体阻塞与证据。受理后的阻塞由接手者报告。保留原来源和入口，由原所有者继续能独立完成的源码修改与离线验证。部署和接续按 [安装前置与验收](references/installation.md) 核实目标宿主、身份、修订及绝对路径。
 
 ## 2. 交接完整任务
 
-Astra 根据用户指令和已有上下文一次交给实际的 Sol，或按专家路由直接交给 Terra；配置 Antigravity 的新纯文本写作经 `sol-coordinator` 交接。完成交接即等待。详细研究、业务资料核对和实施规划由接手者负责。已受理任务沿用原所有者和回执。
+`entryStructure: "astra"` 时，Astra 根据用户指令和已有上下文一次交给实际的 Sol，或按专家路由直接交给 Terra；配置 Antigravity 的新纯文本写作经 `sol-coordinator` 交接。完成交接即等待。`entryStructure: "sol"` 时，一般任务由用户或真实支持的宿主直接交给 Sol，不增加 Astra 前后环节；明确专家目的仍按原 Terra 或 Antigravity 路由执行。该一般任务由 Sol 自己规划、执行或派发、等待、验收并向用户或宿主汇报。详细研究、业务资料核对和实施规划由接手者负责。已受理任务沿用原所有者和回执。
 
 交接应精简且足以执行，并将以下内容分开，避免把项目事实、任务合同和执行状态混成推测：
 
@@ -51,12 +52,14 @@ API 来源使用固定的受保护 Terra 入口与 Windows 凭据代理，先只
 
 ### 各来源的交接
 
+以下 Astra 操作适用于 `astra` 入口。`sol` 入口由真实用户/宿主直接进入原生 Sol，或经已获准的受保护协调入口直接提交 API Sol；不由 Astra 接收或转述结果。订阅宿主可用实际提供的 `options.nativeDirectSol.coordinate`。来源、执行模式和峰谷仍按各自选择；直连缺能力时报告阻塞。
+
 - **订阅 Sol**：Astra 创建或恢复与本次模型和推理档位相符的真实 Sol，核对宿主 agent ID、模型与档位。一次性覆盖只用于新派发，只有用户明确要求持续沿用才保存。Sol 核实已加载工具及目标，在 A 模式执行，在外部模式实际调用所选 MCP 提交、查询、等待、取消或修订。缺失或拒绝时回报 Astra，附执行宿主及调用结果。Astra 用原 agent ID 等待。一个 Sol 可在允许的容量内协调独立任务，分别保存回执和归属。
 - **API Sol**：Astra 通过实际会话的 `sol-coordinator` 提交，在有需要时先核实就绪、执行入口及根池的当前日程。同步 `run` 或按原协调 ID 和键 `start`/`wait`。查询、等待和取消使用原键及返回的 `taskId`。一般协调由 API Sol 实际派发和验收，专家 purpose 按实际路由执行：已配置的 writing 默认 Antigravity，其他专家动作及保留的 Terra 写作按 Terra 路径执行。OpenAI 路径保留 Responses ID、返回模型、档位、用量及真实执行回执；Antigravity 保留实际 CLI 初始化和终态证据，不虚构 Responses ID。完整字段、同意与日程步骤见 [会话上下文、路由与 API](references/session-api.md)。
 
 ## 3. 等到有结果
 
-- Astra 只等待所属 Sol、Terra 或已交接的 Antigravity 协调任务结果。宿主代理用原 agent ID，API 协调用同步返回或原协调 ID 与键等待，直接专家工具沿实际入口接收结果。Sol 在外部模式等待自己派出的原执行任务。实现、下游状态处理和验收由接手者负责。
+- `astra` 结构下 Astra 只等待所属 Sol、Terra 或已交接的 Antigravity 协调任务结果；`sol` 结构下由直接宿主及原 Sol 沿实际入口等待与验收。宿主代理用原 agent ID，API 协调用同步返回或原协调 ID 与键等待，直接专家工具沿实际入口接收结果。Sol 在外部模式等待自己派出的原执行任务。实现、下游状态处理和验收由接手者负责。
 - 有明确任务预算、无需提前取 ID 或中途介入，且已核实宿主、客户端和服务的实际单次超时覆盖预算及启动收尾余量时，Sol 优先用支持阻塞的 `run`。时长本身不能决定改用异步。执行结果返回后由 Sol 验收。
 - 需要提前取得 ID、途中观察或取消，或实际工具超时不足或未知时，用受支持的 `start` 和 `wait`。已有 `start` 任务继续用原 ID 等待。传统 DSH、根池、官方 ACP 入口和 API 协调的单次 `waitMs` 上限为 `60000`，省略为 `25000`。宿主允许时显式传 `60000`，较短限制内留通信余量并说明一次。WorkBuddy 按实际工具等待。API Terra 按客户端/CLI 的实际同步边界等待，不套用 DSH 的等待上限。
 - 正常 `running` 且无须决策时直接续等，每项任务保持一个在途 wait。等待窗口届满仍沿用原截止预算。出现完成、失败、超时、阻塞、审批请求、实质里程碑或用户询问时及时处理，遵守更高优先级更新要求。同步阻塞中的 Sol 与外部 Harness 各按实际可用机制工作。
@@ -71,9 +74,9 @@ API 来源使用固定的受保护 Terra 入口与 Windows 凭据代理，先只
 
 ### 接手者验收与恢复
 
-- Sol 对照原验收条件核对实际变更、命令与退出码及结果。DSH 的 `completed` 需要退出码 0 和 `final.reason.kind=completed`，业务验收还需任务证据。A 模式由 Sol 自审。可在原范围解决的问题由 Sol 推进，向 Astra 明确报告完成，或报告阻塞、待决事项及已完成部分。
+- Sol 对照原验收条件核对实际变更、命令与退出码及结果。DSH 的 `completed` 需要退出码 0 和 `final.reason.kind=completed`，业务验收还需任务证据。A 模式由 Sol 自审。可在原范围解决的问题由 Sol 推进，按入口结构向 Astra 或直接向用户/宿主明确报告完成，或报告阻塞、待决事项及已完成部分。
 - 已知编译或测试失败、验收不足等可定位问题，在原任务剩余预算内交回原执行者修订，使用该入口支持的原会话继续能力和修订新键，保留原回执及关联。不能续跑的入口按其实际规则处理。预算不足或能力受限时报告，不擅自延长预算、换后端或重做未知任务。
 - Terra 核对实际模型、工具与结果，报告完成或阻塞。纯写作以返回文本为结果。动作任务以本地动作回执或调用记录为证据。限定范围 CUA 未关闭则报告未完成。关闭时确认未影响无关工作。API Terra 保留真实 Responses 回执、动作回执及 usage。
 - 分别记录源码或规则、目标机结构检查、实际宿主工具与代理就绪、获准的真实调用。普通 PowerShell 的代理状态只覆盖该 Windows 调用身份，API 计费验收以真实 Responses 回执及账单为准。各层保留最小调用证据：订阅来源的真实代理 ID、宿主模型/档位和实际 MCP 调用归属，API 的协调及 Responses 回执，执行层的任务 ID、根或实例、原键、实际后端与终态。宿主调用记录证明发起方，配置和报价目录分别作为路由与准入证据，实际计费查账单。
 - 结果未知、找不到任务、超时或断连时，各层先沿原入口按原 ID 和键核实回执与归属，由原执行所有者核实下游进程。取消按授权交原所有者并核对终态。保留锁和原进程，旧任务未核实前避免冲突的新派单。禁止因未知、超时或断连而自动重提或更换执行者。
-- 发现旧任务经 Astra 越级派发时，保留有效成果及原运行环境，停止新的越级派发并优先恢复原协调者。Astra 交接真实任务 ID、原键、cwd、回执、范围和带时间的状态。原协调者可安全访问时接续查询与验收，进程所有权无法接续时保留原进程等待并报告限制。下一项正常任务核对真实发起者。
+- 发现属于 `astra` 结构的旧任务经 Astra 越级派发时，保留有效成果及原运行环境，停止新的越级派发并优先恢复原协调者。Astra 交接真实任务 ID、原键、cwd、回执、范围和带时间的状态。原协调者可安全访问时接续查询与验收，进程所有权无法接续时保留原进程等待并报告限制。下一项正常任务核对真实发起者。

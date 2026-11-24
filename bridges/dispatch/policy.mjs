@@ -18,6 +18,8 @@
 // No backend or model is invented here. Unsupported combinations fail closed
 // and name the supported choices.
 
+import { normalizeEntryStructure } from '../entry-structure.mjs';
+
 export const DISPATCH_SCHEMA = 1;
 export const DISPATCH_POLICY_VERSION = '2026-11-21.layered-defaults-r1';
 
@@ -206,10 +208,11 @@ export function resolveDispatch(input = {}, { antigravityConfigured = false } = 
   if (!input || typeof input !== 'object' || Array.isArray(input)) {
     throw new DispatchPolicyError('DISPATCH_INPUT_INVALID', 'Dispatch input must be an object.');
   }
-  const allowed = new Set(['source', 'coordinatorMode', 'purpose', 'backend', 'prompt', 'task', 'permissionMode']);
+  const allowed = new Set(['source', 'coordinatorMode', 'purpose', 'backend', 'prompt', 'task', 'permissionMode', 'entryStructure']);
   for (const key of Object.keys(input)) {
     if (!allowed.has(key)) throw new DispatchPolicyError('DISPATCH_INPUT_INVALID', `Unsupported dispatch field "${key}".`);
   }
+  const entryStructure = normalizeEntryStructure(input.entryStructure);
   if (input.source !== undefined && input.coordinatorMode !== undefined) {
     if (normalizeSource(input.source) !== normalizeSource(input.coordinatorMode)) {
       throw new DispatchPolicyError('DISPATCH_SOURCE_CONFLICT', 'source and coordinatorMode select different sources.');
@@ -253,6 +256,7 @@ export function resolveDispatch(input = {}, { antigravityConfigured = false } = 
     policy_version: DISPATCH_POLICY_VERSION,
     source,
     source_explicit: sourceExplicit,
+    entry_structure: entryStructure,
     purpose,
     purpose_explicit: purposeExplicit,
     layer: specialist ? 'specialist' : 'coordinator',

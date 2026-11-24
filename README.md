@@ -1,15 +1,16 @@
 # ai_rule
 
-在 Codex 中，Astra 明确目标、授权范围和验收条件后交接任务，等待所属 Sol 或 Terra 的完成确认后据此向用户汇报。全新独立会话默认由订阅的 GPT-6.2 Sol Max 规划、派发和验收，底层用 DSH/OpenCode Go DSF。主机操作、验收、绘图与图像生成或识别由同一来源的 GPT-6.1 Terra Max 承担。宿主配置反重力后，新文本写作默认走 Antigravity CLI。规则见 [AGENTS.md](AGENTS.md) 和随附的 [multi-agent dispatch Skill](skills/multi-agent-dispatch/SKILL.md)。
+默认 `entryStructure: "astra"` 下，Astra 明确目标、授权范围和验收条件后交接任务，等待所属 Sol 或 Terra 的完成确认后据此向用户汇报。全新独立会话默认由订阅的 GPT-6.2 Sol Max 规划、派发和验收，底层用 DSH/OpenCode Go DSF。主机操作、验收、绘图与图像生成或识别由同一来源的 GPT-6.1 Terra Max 承担。宿主配置反重力后，新文本写作默认走 Antigravity CLI。用户也可选择由真实宿主直接进入 Sol 的 `entryStructure: "sol"`；缺少实际直连能力时报告不可用。[入口结构与证据](docs/entry-structure.md) · [AGENTS.md](AGENTS.md) · [multi-agent dispatch Skill](skills/multi-agent-dispatch/SKILL.md)。
 
 | 会话设置 | 全新会话默认 | 可选项 |
 |---|---|---|
+| 入口结构 | `astra` | `astra`、`sol` |
 | Sol 协调来源 | Codex 订阅 | 订阅、受保护 OpenAI Responses API |
 | 中间层模型 | GPT-6.2 Sol Max | 直接专家任务使用 GPT-6.1 Terra Max，Sol 可调用 Terra 或 GPT-6 Luna Max 协作 |
 | 底层执行 | DSH/OpenCode Go DSF | A 原生、DSH、WorkBuddy DSF、HY4 |
 | DSH 峰谷 | 1 无峰谷 | 1 无峰谷、2 实际峰时用 WorkBuddy DSF、3 原峰谷 |
 
-全新默认只用于独立新会话。已有的 A/外部模式、模式 3、来源、已受理任务和所有者沿用原记录。A 由原生 Sol 执行，外部模式由所选 Harness 执行和监守，WorkBuddy DSF 是底层显式替代。订阅来源由 Sol 自己调用宿主提供的 Terra 或 Luna 代理，API 来源由 API Sol 调用 `delegate_peer`。三者继承同一项目和父任务的读写、命令、约束及预算，实际动作随所选入口的能力生效。 [会话操作](docs/session-modes.md)
+全新默认只用于独立新会话。已有的入口结构、A/外部模式、模式 3、来源、已受理任务和所有者沿用原记录。A 由原生 Sol 执行，外部模式由所选 Harness 执行和监守，WorkBuddy DSF 是底层显式替代。订阅来源由 Sol 自己调用宿主提供的 Terra 或 Luna 代理，API 来源由 API Sol 调用 `delegate_peer`。三者继承同一项目和父任务的读写、命令、约束及预算，实际动作随所选入口的能力生效。 [会话操作](docs/session-modes.md)
 
 Terra 的动作类专家任务使用与 Sol 相同的中间来源。主机操作、验收和图像任务通过实际提供的 CUA、图像工具或项目预注册动作完成。反重力仅接收明确授权的文本，模型别名由宿主管理并支持热更新。现有 Terra 写作仍可显式选择。 [反重力配置和模型目录](docs/antigravity-text.md)
 
@@ -76,6 +77,6 @@ $manage = Join-Path $sourceRoot 'scripts\manage.mjs'
 
 无入口选项时，预览只列当前有效的全局 AGENTS 和 `~/.agents/skills/multi-agent-dispatch` 中的 Skill 及其引用。非空 `AGENTS.override.md` 是合并目标。验证时应看到 `rules_current: true`，表示这些文件与当前源码相符。若需更新某个 MCP 注册，按对应入口文档预览并应用。Git 同步的内容在各机器上分别安装，本机配置、凭据、会话及运行目录各自保留。
 
-会话内继续已有工作时，让 Astra 与原 Sol 显式重读已安装规则。现有任务先保留原进程和权限。更新桥接源码或注册后，在任务取得终态时通过宿主支持的方式加载相关服务一次，再确认工具可见。同一已批准项目里的任务输入变更直接随派单传入。
+会话内继续已有工作时，让原任务的协调者与接手者重读已安装规则；直接 Sol 入口由真实宿主与原 Sol 接续。现有任务先保留原进程和权限。更新桥接源码或注册后，在任务取得终态时通过宿主支持的方式加载相关服务一次，再确认工具可见。同一已批准项目里的任务输入变更直接随派单传入。
 
 应用命令输出本机备份 `manifest.json`，可用 `node $manage --rollback $manifest` 回滚，传入该 manifest 的绝对路径。安装后又修改过的目标需按哈希冲突提示核对并合并。备份留在本机。离线回归用 `npm.cmd --prefix $sourceRoot test`。 [实现边界与验收](docs/implementation.md)

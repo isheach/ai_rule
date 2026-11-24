@@ -194,9 +194,10 @@ test('protected Sol delegates an approved standalone text subtask through its ex
           : { verdict: 'accepted', report: 'The text subtask produced the paragraph.' }) }]
     } };
   } });
-  const result = await f.run('coordinated', { coordinatorMode: 'api', purpose: 'general', capability: 'text-only',
+  const result = await f.run('coordinated', { coordinatorMode: 'api', entryStructure: 'sol', purpose: 'general', capability: 'text-only',
     constraints: 'Omit the registered case name.' });
   assert.equal(result.status, 'completed', result.message);
+  assert.equal(result.entry_structure, 'sol');
   assert.equal(result.peer_results[0].antigravity.requested_model, 'fixture-draft');
   assert.equal(result.peer_results[0].usage.total_tokens, 48);
   assert.equal(result.usage.total_tokens, 20);
