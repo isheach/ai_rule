@@ -14,9 +14,10 @@ const AGENT = 'ai-rule-text';
 const MAX_STDOUT = 512_000;
 
 export class AntigravityError extends Error {
-  constructor(code, message) {
+  constructor(code, message, evidence = null) {
     super(message);
     this.code = code;
+    this.evidence = evidence;
   }
 }
 
@@ -280,14 +281,16 @@ export async function runAntigravityText(config, { model, prompt, signal, timeou
         }
       }
     });
+    const terminal = { exit_code: exit.code,
+      terminal_status: ['SUCCESS', 'ERROR', 'CANCELED', 'INTERRUPTED', 'INVALID', 'WAITING', 'RUNNING'].includes(result?.status) ? result.status : null };
     if (exit.code !== 0 || !init || result?.conversation_id !== init.conversation_id || result.status !== 'SUCCESS'
       || result.finished_reason || (result.denied_actions && (!Array.isArray(result.denied_actions) || result.denied_actions.length))
       || typeof result.response !== 'string' || !result.response.trim()) {
-      throw new AntigravityError('ANTIGRAVITY_RESULT_UNVERIFIED', 'The original Antigravity CLI run did not return a complete text result.');
+      throw new AntigravityError('ANTIGRAVITY_RESULT_UNVERIFIED', 'The original Antigravity CLI run did not return a complete text result.', terminal);
     }
     const response = safeVendorText(result.response, workspace.env.GEMINI_API_KEY);
     const usage = result.usage && Object.fromEntries(['input_tokens', 'output_tokens', 'thinking_tokens', 'cache_read_tokens', 'total_tokens']
       .filter(key => Number.isSafeInteger(result.usage[key]) && result.usage[key] >= 0).map(key => [key, result.usage[key]]));
-    return { ...init, response, usage: usage && Object.keys(usage).length ? usage : null };
+    return { ...init, ...terminal, response, usage: usage && Object.keys(usage).length ? usage : null };
   } finally { cleanup(workspace.directory); }
 }
