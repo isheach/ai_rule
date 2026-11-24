@@ -479,8 +479,10 @@ export class SolService {
       record.report = result.response;
       record.usage = result.usage;
       record.usage_unknown = result.usage === null;
-      record.antigravity.evidence_source = 'agy stream-json init and terminal result';
+      Object.assign(record.antigravity, { exit_code: result.exit_code, terminal_status: result.terminal_status,
+        evidence_source: 'agy stream-json init and terminal result' });
     } catch (error) {
+      if (error instanceof AntigravityError && error.evidence) Object.assign(record.antigravity, error.evidence);
       record.error_code = error instanceof AntigravityError ? error.code : 'ANTIGRAVITY_HOST_ERROR';
       record.message = error instanceof AntigravityError ? error.message : 'Inspect the original Antigravity host and configuration.';
       record.status = record.antigravity.conversation_id ? 'unknown_after_disconnect' : (active.parent ?? active).stopReason ?? 'blocked';

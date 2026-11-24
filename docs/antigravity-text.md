@@ -58,6 +58,8 @@
 - **API 父协调**：新 handoff 明确传 `acceptAntigravityUsage: true`，可选 `antigravityModel` 指定本机已登记别名，省略则采用该次接单时的默认别名。模型选择在父任务受理时冻结，后续修改模型文件只影响后来的任务。受保护 broker 的现有 `delegate_peer` 确已就绪时，API Sol 在自己的工具循环使用 `delegate_peer({ peer: "antigravity", goal, acceptance, contextSummary })`，等待子任务及其回执并完成父任务验收；这条 Google 路径不要求 `acceptPeerCharges`。如还要使用 Terra 或 Luna API，仍须各自满足原有授权、`acceptPeerCharges:true` 和相应模型就绪条件，不能把 Google 授权当成 OpenAI 协作授权。
 - **订阅 Sol**：原 Sol 可在授权及已加载能力范围内，使用 `run/start_sol_coordination` 的 Antigravity 写作入口并用该文本子任务原有的稳定键查询与续等；或在宿主实际注入 `nativeAntigravity` 适配器时，用 `delegatePeer({ peer: "antigravity", goal, acceptance, contextSummary, idempotencyKey })`。仍由原 Sol 接收结果与验收，不改变父任务所有者；适配器不存在或隔离条件不足时如实报告。
 
+使用原生适配器时，父任务的 `task.acceptAntigravityUsage` 须为 `true`，并在 `task.antigravityModel` 指定已批准的别名。在订阅宿主的适配器里，用宿主已核实的 `context_ref` 调用同一个 `run_sol_coordination`。从 `dispatch({request, authorization, signal})` 使用 `request.idempotencyKey`、`request.modelAlias`（传为 `antigravityModel`）、`request.goal`、`request.acceptance`、`request.contextSummary` 和适用的 `request.constraints`。用 `authorization.cwd` 验权，并在父任务剩余预算内设置 `timeoutMs`。固定传 `coordinatorMode:"subscription"`、`purpose:"writing"`、`backend:"Antigravity"`、`permissionMode:"read-only"`、`capability:"text-only"` 和已批准的 `acceptAntigravityUsage:true`。用宿主的 `signal` 接续或停止原调用，并把原结构化回执返回给 Sol。
+
 只读的 `get_sol_coordinator_mode` 返回 `peer_route_diagnostics`。在已核实目标宿主与身份的命令入口，也可用 `node bridges/sol/cli.mjs luna-status --config <ABS>` 查看 Luna，或用一次 `peer-status` 查看同一回执中的协作路由诊断；这些状态检查不等于真实模型调用。诊断显示的安装结构、broker 准备情况、模型就绪和实际调用证据应分别报告。检查 AGY 协作时还须独立核实 Google 配置及 broker 对 `delegate_peer` 的支持，不能把 Terra/Luna 诊断当成 AGY 已就绪。
 
 ## 本机隔离与证据
