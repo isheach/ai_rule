@@ -8,3 +8,5 @@
 安装器将全局规则的受管理块写入实际生效的 Codex 全局 AGENTS 或非空 override，将 Skill 与 `references/*.md` 写入目标用户主目录的 `.agents/skills/multi-agent-dispatch/`。AGENTS 通过已安装 Skill 名称进入，Skill 内的相对参考链接以该 Skill 目录为基准。不要把仓库根的相对路径写入全局 AGENTS。实际安装、升级、回滚与服务重启仍以项目授权、具体安装计划和宿主配置为准。
 
 按任务范围分开验收源码或规则、目标机结构安装、实际宿主代理与工具就绪、获准的真实模型调用。结构检查不证明宿主就绪或真实调用。保留各项证据和未验证部分。普通 PowerShell 的代理状态只覆盖该 Windows 调用身份，API 计费验收以真实 Responses 回执及账单为准。
+
+Antigravity 的 JS 协调入口及模型别名见 [Antigravity 纯文本路由](antigravity-text.md)。新接口首次更新后按宿主实际机制重载 MCP，模型目录热更新无需重复部署；已激活 Luna 的 broker 不因此重部署。

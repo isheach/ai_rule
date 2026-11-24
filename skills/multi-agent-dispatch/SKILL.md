@@ -6,9 +6,9 @@ description: Coordinate Astra handoffs, direct Terra specialist work, and GPT-6.
 
 # 多代理调度
 
-以当前生效的 AGENTS 为规则。全新独立会话默认订阅 GPT-6.2 Sol Max → DSH/OpenCode Go DSF。WorkBuddy DSF 是显式底层替代（既有模式 2 峰时交接除外）。纯主机操作/验收、写作、绘图或图像生成与识别交 GPT-6.1 Terra Max。Sol 可按需调用 Terra 或 GPT-6 Luna Max。三者沿用当前所选的同一来源。
+以当前生效的 AGENTS 为规则。全新独立会话默认订阅 GPT-6.2 Sol Max → DSH/OpenCode Go DSF。WorkBuddy DSF 是显式底层替代（既有模式 2 峰时交接除外）。纯主机操作/验收、绘图或图像生成与识别交 GPT-6.1 Terra Max。已配置 Antigravity 的 `sol-coordinator` 新 writing 默认走其纯文本入口；未配置的旧安装及显式 Terra 写作沿原路径。Sol 可按需调用 Terra 或 GPT-6 Luna Max，三者沿用当前所选的同一来源。获准的一般任务还可交给 Antigravity 做独立文本协作，其 Google 身份与计费单独核实。
 
-按需查阅：[会话上下文、路由与 API](references/session-api.md)、[安装前置与验收](references/installation.md)、[DSH 与峰谷设置](references/dsh.md)、[WorkBuddy DSF](references/workbuddy.md)、[HY4](references/hy4.md)、[模式 2 峰时交接](references/workbuddy-peak.md)、[Terra 专家入口及共享配额](references/terra-api.md)。LaTeX 工作读取 [LaTeX 最小改动](references/latex-minimal.md)。科研、实验或量化工作读取 [科研与量化可复现性](references/research-reproducibility.md)。
+按需查阅：[Antigravity 纯文本路由](references/antigravity-text.md)、[会话上下文、路由与 API](references/session-api.md)、[安装前置与验收](references/installation.md)、[DSH 与峰谷设置](references/dsh.md)、[WorkBuddy DSF](references/workbuddy.md)、[HY4](references/hy4.md)、[模式 2 峰时交接](references/workbuddy-peak.md)、[Terra 专家入口及共享配额](references/terra-api.md)。LaTeX 工作读取 [LaTeX 最小改动](references/latex-minimal.md)。科研、实验或量化工作读取 [科研与量化可复现性](references/research-reproducibility.md)。
 
 ## 1. 恢复选择并核实目标
 
@@ -19,7 +19,7 @@ description: Coordinate Astra handoffs, direct Terra specialist work, and GPT-6.
 
 ## 2. 交接完整任务
 
-Astra 根据用户指令和已有上下文一次交给实际的 Sol，或按专家路由直接交给 Terra，完成交接即等待。详细研究、业务资料核对和实施规划由接手者负责。已受理任务沿用原所有者和回执。
+Astra 根据用户指令和已有上下文一次交给实际的 Sol，或按专家路由直接交给 Terra；配置 Antigravity 的新纯文本写作经 `sol-coordinator` 交接。完成交接即等待。详细研究、业务资料核对和实施规划由接手者负责。已受理任务沿用原所有者和回执。
 
 交接应精简且足以执行，并将以下内容分开，避免把项目事实、任务合同和执行状态混成推测：
 
@@ -27,7 +27,7 @@ Astra 根据用户指令和已有上下文一次交给实际的 Sol，或按专�
 2. **本次任务合同**：明确交付目标和范围、不可变约束、允许与禁止的改动、验收标准及所需证据。写明已批准的读写、原生命令、能力与目录边界、授权依据、时间及剩余预算，附所选后端和可用工具。项目原权限与用户指令为范围依据，不用交接摘要扩大权限。Terra 任务另写明专家能力、来源、工具/动作范围、证据要求及限定范围 CUA 的关闭条件。
 3. **执行状态与回执**：区分尚未提交、运行中、已知完成/失败、阻塞及未知。对已有工作提供原协调者、任务及会话 ID、幂等键、实际后端、根或实例、原回执和带时间的状态。原回执优先于过时的状态摘要。未知不得写成完成或未受理。
 
-默认 Sol 规划并验收，底层 DSH/OpenCode Go DSF（`deepseek-v4.1-flash`、max）承担一般工作。显式选择的 WorkBuddy DSF 使用 `deepseek-v4-flash`。A 模式由 Sol 执行、自审，可按需用 Terra 或 Luna 协作，确有必要时由 Luna 监守原生 Sol。外部模式由所选 Harness 执行、测试、修复并监守其原任务。Sol 可请 Terra 或 Luna 独立协作，不能转移 Harness 的运行监守和控制。
+默认 Sol 规划并验收，底层 DSH/OpenCode Go DSF（`deepseek-v4.1-flash`、max）承担一般工作。显式选择的 WorkBuddy DSF 使用 `deepseek-v4-flash`。A 模式由 Sol 执行、自审，可按需用 Terra 或 Luna 协作，确有必要时由 Luna 监守原生 Sol。外部模式由所选 Harness 执行、测试、修复并监守其原任务。Sol 可请 Terra、Luna 或获准的 Antigravity 文本协作，不能转移 Harness 的运行监守和控制。
 
 外部执行者使用自己的原生工具循环，Sol 要求其报告实际变更、命令及退出码、可核实结果和未完成检查。按入口传非秘密 `idempotencyKey` 及权限参数，项目已有批准时在支持的 `authorizationNote` 引用批准来源。新独立工作或有意修订使用新键。原提交的回执查询使用原键。各后端原会话续跑方式见相应参考。
 
@@ -39,6 +39,10 @@ Astra 根据用户指令和已有上下文一次交给实际的 Sol，或按专�
 
 Sol 在自身上下文以当前所选来源发起独立协作，子任务继承父任务全部适用权限、约束和剩余预算，代理不递归派发。Sol 等待原子任务并负责整体验收。订阅时使用真实宿主代理及原 agent ID。API 协作须明确计费授权、对应模型就绪，通过同一受保护 broker 与父任务执行入口，并保存模型、用量和实际回执。具体 `delegatePeer` / `delegate_peer` 字段和检查见 [会话上下文、路由与 API](references/session-api.md)。
 
+### 由 Sol 调用 Antigravity 文本协作
+
+一般任务的纯文字协作由原 Sol 在授权范围内自行委派，不需用户先手工拆分。API 父 handoff 显式传 `acceptAntigravityUsage:true` 和可选 `antigravityModel`，所选别名在接单时冻结；受保护 `delegate_peer` 已就绪时可选 `peer:"antigravity"`，无需 `acceptPeerCharges`。订阅 Sol 使用现有文本协调入口或实际注入的 `nativeAntigravity`。父任务的来源、权限、所有者和预算不变，AGY 限获准的纯文本。细节见 [Antigravity 纯文本路由](references/antigravity-text.md) 与 [会话上下文、路由与 API](references/session-api.md)。
+
 ### 直接 Terra 专家任务
 
 订阅来源只使用宿主实际提供并已核对的 Terra 代理及所需 CUA/主机/图像工具。不可用时报告，不能假定任务分配等于工具就绪。纯写作返回文本即可。动作任务凭本地动作回执或调用记录验收，限定范围的 CUA 在完成、失败或取消后关闭，不影响无关工作。
@@ -48,11 +52,11 @@ API 来源使用固定的受保护 Terra 入口与 Windows 凭据代理，先只
 ### 各来源的交接
 
 - **订阅 Sol**：Astra 创建或恢复与本次模型和推理档位相符的真实 Sol，核对宿主 agent ID、模型与档位。一次性覆盖只用于新派发，只有用户明确要求持续沿用才保存。Sol 核实已加载工具及目标，在 A 模式执行，在外部模式实际调用所选 MCP 提交、查询、等待、取消或修订。缺失或拒绝时回报 Astra，附执行宿主及调用结果。Astra 用原 agent ID 等待。一个 Sol 可在允许的容量内协调独立任务，分别保存回执和归属。
-- **API Sol**：Astra 通过实际会话的 `sol-coordinator` 提交，在有需要时先核实就绪、执行入口及根池的当前日程。同步 `run` 或按原协调 ID 和键 `start`/`wait`。查询、等待和取消使用原键及返回的 `taskId`。一般协调由 API Sol 实际派发和验收，专家 purpose 按 Terra 路径执行。保留 Responses ID、返回模型、档位、用量及真实执行回执。完整字段、同意与日程步骤见 [会话上下文、路由与 API](references/session-api.md)。
+- **API Sol**：Astra 通过实际会话的 `sol-coordinator` 提交，在有需要时先核实就绪、执行入口及根池的当前日程。同步 `run` 或按原协调 ID 和键 `start`/`wait`。查询、等待和取消使用原键及返回的 `taskId`。一般协调由 API Sol 实际派发和验收，专家 purpose 按实际路由执行：已配置的 writing 默认 Antigravity，其他专家动作及保留的 Terra 写作按 Terra 路径执行。OpenAI 路径保留 Responses ID、返回模型、档位、用量及真实执行回执；Antigravity 保留实际 CLI 初始化和终态证据，不虚构 Responses ID。完整字段、同意与日程步骤见 [会话上下文、路由与 API](references/session-api.md)。
 
 ## 3. 等到有结果
 
-- Astra 只等待所属 Sol 或 Terra 的结果。宿主代理用原 agent ID，API 协调用同步返回或原协调 ID 与键等待，直接专家工具沿实际入口接收结果。Sol 在外部模式等待自己派出的原执行任务。实现、下游状态处理和验收由接手者负责。
+- Astra 只等待所属 Sol、Terra 或已交接的 Antigravity 协调任务结果。宿主代理用原 agent ID，API 协调用同步返回或原协调 ID 与键等待，直接专家工具沿实际入口接收结果。Sol 在外部模式等待自己派出的原执行任务。实现、下游状态处理和验收由接手者负责。
 - 有明确任务预算、无需提前取 ID 或中途介入，且已核实宿主、客户端和服务的实际单次超时覆盖预算及启动收尾余量时，Sol 优先用支持阻塞的 `run`。时长本身不能决定改用异步。执行结果返回后由 Sol 验收。
 - 需要提前取得 ID、途中观察或取消，或实际工具超时不足或未知时，用受支持的 `start` 和 `wait`。已有 `start` 任务继续用原 ID 等待。传统 DSH、根池、官方 ACP 入口和 API 协调的单次 `waitMs` 上限为 `60000`，省略为 `25000`。宿主允许时显式传 `60000`，较短限制内留通信余量并说明一次。WorkBuddy 按实际工具等待。API Terra 按客户端/CLI 的实际同步边界等待，不套用 DSH 的等待上限。
 - 正常 `running` 且无须决策时直接续等，每项任务保持一个在途 wait。等待窗口届满仍沿用原截止预算。出现完成、失败、超时、阻塞、审批请求、实质里程碑或用户询问时及时处理，遵守更高优先级更新要求。同步阻塞中的 Sol 与外部 Harness 各按实际可用机制工作。

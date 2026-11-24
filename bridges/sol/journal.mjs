@@ -76,7 +76,9 @@ export class SolJournal {
 
   get(rootId, key) {
     const record = read(this.file(rootId, key));
-    if (record && (record.schema !== 1 || record.root_id !== rootId || record.idempotency_key !== key || record.coordinator_mode !== CoordinatorMode.API)) {
+    if (record && (record.schema !== 1 || record.root_id !== rootId || record.idempotency_key !== key
+      || (record.coordinator_mode !== CoordinatorMode.API
+        && !(record.coordinator_mode === CoordinatorMode.SUBSCRIPTION && record.requested_backend === 'Antigravity')))) {
       throw Error('Coordinator receipt ownership or schema does not match the requested task.');
     }
     return record;

@@ -45,6 +45,14 @@ export function mechanicalVerdict(receipt) {
 }
 
 export function coordinationRouteEvidence(record) {
+  if (record.antigravity) return {
+    coordination_id: record.task_id,
+    coordinator: null,
+    executors: [{ backend: 'antigravity', actually_executed: record.antigravity.evidence_source ? 'observed' : 'unverified',
+      evidence_source: record.antigravity.evidence_source ?? null, task_id: record.task_id,
+      session_id: record.antigravity.conversation_id, returned_model: null,
+      cli_selected_model: record.antigravity.cli_selected_model ?? null, status: record.status }]
+  };
   const responses = record.responses.filter(response => response.response_id && !response.repeated_response_id).map(response => ({
     response_id: response.response_id, request_id: response.request_id ?? null,
     returned_model: response.returned_model ?? null, reasoning_effort: response.reasoning_effort ?? null

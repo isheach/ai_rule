@@ -1,7 +1,7 @@
 <!-- ai-rule-managed: 2026-11-23.luna-peer-api-r1 -->
 # Terra 专家入口
 
-Terra 用于用户明确交给 GPT-6.1 Terra Max 的专家任务：主机操作/验收、写作、绘图或图像生成与识别。Terra 使用与 Sol 相同的已选中间来源；不得因 Terra 不可用自动改走 DSF、Sol 或另一来源。
+Terra 用于用户明确交给 GPT-6.1 Terra Max 的主机操作/验收、绘图或图像生成与识别，以及保留的 Terra 写作。已配置 Antigravity 的 `sol-coordinator` 对省略 backend 的新 writing 采用纯文本路由；未配置的旧安装、已受理回执和显式 `backend: "Terra"` 的写作继续沿原 Terra 路径。详见 [Antigravity 纯文本路由](antigravity-text.md)。Terra 使用与 Sol 相同的已选中间来源；不得因 Terra 不可用自动改走 DSF、Sol 或另一来源。
 
 此页记录直接专家入口。Sol 调用 Terra 协作的步骤和继承边界见 [调度 Skill](../SKILL.md#由-sol-调用-terra-或-luna)。
 

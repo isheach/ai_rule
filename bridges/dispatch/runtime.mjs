@@ -558,6 +558,7 @@ export async function dispatchLayeredTask(input, options = {}) {
   validatePrompt(input.prompt);
   assertNoRawMedia(input);
   assertNoRawMedia(input.task);
+  if (plan.executor.backend === Backend.ANTIGRAVITY) return hostHandoff(plan);
   if (plan.layer === 'coordinator') return runGeneralCoordinator(plan, input, options);
   if (plan.source === DispatchSource.API) {
     return runApiTerraTask({

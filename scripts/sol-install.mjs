@@ -94,7 +94,8 @@ function validateCalendar(config) {
 }
 
 export function solEnvironmentNames(config) {
-  return [...new Set(['CODEX_HOME', ...(config.workbuddy?.envVars ?? [])])];
+  const google = config.antigravity?.credentialSource === 'gemini-api-key' ? ['GEMINI_API_KEY'] : [];
+  return [...new Set(['CODEX_HOME', ...(config.workbuddy?.envVars ?? []), ...google])];
 }
 
 function existingRegistration(filename) {
