@@ -114,7 +114,7 @@ async function runPeer({ request, scope, adapter, signal, idempotencyKey }) {
       ? {
         request: freezeScope({
           peer, source: DispatchSource.SUBSCRIPTION, coordinatorMode: DispatchSource.SUBSCRIPTION,
-          purpose: 'writing', acceptAntigravityUsage: true, antigravityModel: alias,
+          purpose: 'writing', acceptAntigravityUsage: true, modelAlias: alias,
           idempotencyKey, goal, acceptance, contextSummary, constraints, prompt
         }),
         // The cwd stays in host-side authorization metadata for local path
