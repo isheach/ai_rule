@@ -2,6 +2,10 @@
 
 部署本机 `sol-coordinator` 后，可在 Codex 会话内选择订阅或受保护 OpenAI Responses API。全新默认底层是 DSH/OpenCode Go DSF，WorkBuddy DSF 仅在明确选择或既有模式 2 峰时交接时使用。Sol 可按同一来源调用 Terra 或 Luna 协作，主机操作、验收、绘图与图像生成或识别保留 Terra 专家路由。已配置 Antigravity 的协调器默认用 CLI 处理新文本任务。 [调度 Skill](../skills/multi-agent-dispatch/SKILL.md) · [反重力文本与模型配置](antigravity-text.md)
 
+## 入口结构
+
+`entryStructure` 独立于协调来源、A/外部执行模式和峰谷。默认 `astra` 沿原 Astra → Sol 交接，选择 `sol` 时仅在实际宿主提供真实直连能力的情况下直接进入 Sol；持久设置、单次覆盖、根池身份限制与调用者证据见 [会话入口结构](entry-structure.md)。切换不改变已受理任务的来源、后端、所有者或原回执。
+
 ## 执行宿主与目标机
 
 先核实实际 shell 或 MCP 所在的执行宿主，以及要安装的 Windows 机器、Codex 用户身份及仓库路径。已有可达、获准的 Windows 入口时，可据此执行本机步骤。Linux shell 的结果只说明其自身的运行位置。只有云端源码入口时，可先完成 Git 修改和离线检查，Windows 注册、服务和实际宿主验收仍待目标机执行。判断目标是否断连以已核实的端点连接状态或原任务回执为据。现有入口和身份继续使用已核实的证据，变更或调用失败时复核受影响项。

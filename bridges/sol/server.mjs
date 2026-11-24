@@ -2,6 +2,7 @@ import path from 'node:path';
 import { pathToFileURL } from 'node:url';
 import { redact } from '../dsh/core.mjs';
 import { DSH_SCOPE_DESCRIPTION } from '../dsh/routing.mjs';
+import { codexEntryCaller, ENTRY_STRUCTURES } from '../entry-structure.mjs';
 import { scheduleModeProperty } from '../dsh/schedule.mjs';
 import { resolveContext } from '../pool/context.mjs';
 import { DSH_TIMEOUT_MS, WAIT_MS, preferRun, validateWaitMs, waitForExisting } from '../task-lifecycle.mjs';
@@ -14,9 +15,10 @@ const PROTOCOLS = ['2025-06-18', '2025-03-26', '2024-11-05'];
 const text = { type: 'string' };
 const choices = (...values) => ({ type: 'string', enum: values });
 const source = choices(...COORDINATOR_MODES);
+const entryStructure = choices(...ENTRY_STRUCTURES);
 const task = { idempotencyKey: text, taskId: text };
 const handoff = {
-  ...task, coordinatorMode: source, backend: choices(...EXECUTION_BACKENDS), purpose: choices(...PURPOSES), goal: text, cwd: text,
+  ...task, coordinatorMode: source, entryStructure, backend: choices(...EXECUTION_BACKENDS), purpose: choices(...PURPOSES), goal: text, cwd: text,
   permissionMode: choices(...EXECUTION_PERMISSIONS), authorizationNote: text, constraints: text, contextSummary: text,
   acceptance: text, acceptTerraCharges: { type: 'boolean', description: 'Explicit billing consent for a specialist API Terra task. Required before the protected Terra client sends a response.' },
   acceptPeerCharges: { type: 'boolean', description: 'Explicit billing consent for Sol to call available Terra or Luna collaborators when this API coordination needs one. No calls are made merely by enabling consent.' },
@@ -37,8 +39,12 @@ const tool = (name, description, properties = {}, required = [], readOnlyHint = 
 const TOOLS = [
   tool('get_sol_coordinator_mode', 'Read the selected Sol source for this verified Codex root, without an API call.', {}, [], true),
   tool('set_sol_coordinator_mode', 'Set this verified Codex root’s source for future work only, without an API call.', { mode: source }, ['mode']),
+  tool('get_sol_entry_structure', 'Read this verified root’s entry structure and caller evidence without calling a model.', {}, [], true),
+  tool('set_sol_entry_structure', 'Set this verified root’s entry structure for new tasks, independently of the selected source and executor.', {
+    entryStructure
+  }, ['entryStructure']),
   tool('resolve_layer_dispatch', 'Resolve the layered model route for this root without a model call. Configured Antigravity handles writing; Terra handles host and image work.', {
-    purpose: choices(...PURPOSES), backend: choices(...EXECUTION_BACKENDS)
+    purpose: choices(...PURPOSES), backend: choices(...EXECUTION_BACKENDS), entryStructure
   }, [], true),
   tool('get_antigravity_status', 'Read this host’s Antigravity configuration and approved aliases without starting the CLI.', {}, [], true),
   tool('list_antigravity_models', 'List model slugs available to this host’s configured Google credential route. Runs agy models without a generation request.', {}, [], true),
@@ -61,7 +67,8 @@ function validate(tool, args) {
   }
 }
 
-export function startSolServer({ configPath, stdin = process.stdin, stdout = process.stdout, callBroker, clock, sessionsRoot, dispatch = {} } = {}) {
+export function startSolServer({ configPath, stdin = process.stdin, stdout = process.stdout, callBroker, clock, sessionsRoot,
+  dispatch = {}, identifyEntryCaller } = {}) {
   const config = loadSolConfig(configPath);
   discardLegacyEnvironment(config);
   const antigravityKey = config.antigravity?.credentialSource === 'gemini-api-key' ? process.env.GEMINI_API_KEY : undefined;
@@ -85,15 +92,21 @@ export function startSolServer({ configPath, stdin = process.stdin, stdout = pro
     const selected = TOOLS.find(tool => tool.name === name);
     if (!selected) throw Error('Unknown Sol coordinator tool.');
     validate(selected, args);
-    const { rootId } = resolveContext({ config: config.contextConfig, reference: args.context, purpose: SERVICE, sessionsRoot });
+    const verifiedContext = resolveContext({ config: config.contextConfig, reference: args.context, purpose: SERVICE, sessionsRoot });
+    const { rootId } = verifiedContext;
     const { context, idempotencyKey: key, taskId } = args;
-    if (name === 'get_sol_coordinator_mode') return service.mode(rootId);
+    // A host adapter may supply the actual role. A task cannot label its caller.
+    const caller = () => codexEntryCaller(verifiedContext, identifyEntryCaller?.(verifiedContext));
+    if (name === 'get_sol_coordinator_mode') return service.mode(rootId, { entryCaller: caller() });
     if (name === 'set_sol_coordinator_mode') return service.setMode(rootId, args.mode);
+    if (name === 'get_sol_entry_structure') return service.getEntryStructure(rootId, caller());
+    if (name === 'set_sol_entry_structure') return service.setEntryStructure(rootId, args.entryStructure, caller());
     if (name === 'get_antigravity_status') return service.antigravityStatus();
     if (name === 'list_antigravity_models') return service.listAntigravityModels();
     if (name === 'resolve_layer_dispatch') return service.resolve(rootId, {
       ...(args.purpose === undefined ? {} : { purpose: args.purpose }),
-      ...(args.backend === undefined ? {} : { backend: args.backend })
+      ...(args.backend === undefined ? {} : { backend: args.backend }),
+      ...(args.entryStructure === undefined ? {} : { entryStructure: args.entryStructure })
     });
     if (name === 'get_sol_schedule') return service.schedule(rootId);
     if (name === 'set_sol_schedule') return service.setSchedule(rootId, args.scheduleMode);
@@ -106,7 +119,7 @@ export function startSolServer({ configPath, stdin = process.stdin, stdout = pro
     }
     const taskArgs = { ...args };
     delete taskArgs.context;
-    const started = await service.start(rootId, taskArgs);
+    const started = await service.start(rootId, taskArgs, caller());
     if (name !== 'run_sol_coordination' || started.status !== 'running' || started.replayed) return started;
     runs.set(id, { rootId, key, taskId: started.task_id });
     try { return await service.wait(rootId, key, started.task_id, started.timeout_ms + 12000); }

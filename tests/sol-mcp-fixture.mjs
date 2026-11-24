@@ -5,6 +5,7 @@ const clock = process.env.SOL_TEST_CLOCK;
 let next = 0;
 startSolServer({
   configPath: process.argv[2],
+  ...(process.env.SOL_TEST_ENTRY_CALLER ? { identifyEntryCaller: () => process.env.SOL_TEST_ENTRY_CALLER } : {}),
   async callBroker(envelope, signal) {
     if (process.env.SOL_TEST_BROKER_UNAVAILABLE) throw Error('Fixture broker unavailable.');
     signal.throwIfAborted();
