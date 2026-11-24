@@ -37,12 +37,12 @@ const taskSchema = {
     workBuddyContinuationKey: { type: 'string', description: 'Continue a recorded WorkBuddy DSF session in the same workspace, only during a peak in mode 2.' },
     sessionId: { type: 'string', description: `Resume a DSH session recorded by ${scoped} from the SAME cwd; never use an invented or foreign ID.` },
     purpose: { type: 'string', enum: PURPOSES, description: 'Explicit task purpose. Omitted means general; prompt keywords never select a purpose.' },
-    backend: { type: 'string', enum: ['DSH', 'WorkBuddy DSF', 'Terra'], description: 'Explicit supported backend. Omit to use the purpose default (DSH for general, Terra for a specialist purpose).' }
+    backend: { type: 'string', enum: ['DSH', 'WorkBuddy DSF', 'Terra', 'Antigravity'], description: 'Antigravity writing hands off to the configured text entry.' }
   }
 };
 const idSchema = { type: 'object', additionalProperties: false, required: ['taskId'], properties: { taskId: { type: 'string', description: `Task ID scoped to ${scoped}` } } };
 const tools = [
-  { name: 'resolve_layer_dispatch', description: 'Resolve the layered route for this subscription host without launching a model. General work -> gpt-6.2-sol max; specialist work -> gpt-6.1-terra max.', inputSchema: { type: 'object', additionalProperties: false, properties: { purpose: { type: 'string', enum: PURPOSES }, backend: { type: 'string', enum: ['DSH', 'WorkBuddy DSF', 'Terra'] } } }, annotations: { readOnlyHint: true } },
+  { name: 'resolve_layer_dispatch', description: 'Resolve the layered route for this subscription host without launching a model.', inputSchema: { type: 'object', additionalProperties: false, properties: { purpose: { type: 'string', enum: PURPOSES }, backend: { type: 'string', enum: ['DSH', 'WorkBuddy DSF', 'Terra', 'Antigravity'] } } }, annotations: { readOnlyHint: true } },
   { name: 'get_dsh_schedule_status', description: `Local phase and admission gate for ${scoped} Omit scheduleMode for the active/default mode, or supply one to preview. No model call.`, inputSchema: { type: 'object', additionalProperties: false, properties: { scheduleMode: scheduleModeProperty } }, annotations: { readOnlyHint: true } },
   {
     name: 'set_dsh_task_schedule',

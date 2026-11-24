@@ -8,10 +8,12 @@
 // Layers:
 //   general/coordinating -> gpt-6.2-sol (max) -> DSH's configured
 //     opencode-go/deepseek-v4.1-flash by default, WorkBuddy DSF selectable.
-//   computer_operation, acceptance, writing, image_generation,
+//   computer_operation, acceptance, image_generation,
 //     image_recognition -> gpt-6.1-terra (max), through the real native host
 //     on the subscription source or the protected Terra client on the API
 //     source.
+//   writing -> pinned Antigravity CLI on a configured host, with legacy Terra
+//     compatibility for existing or explicitly selected routes.
 //
 // No backend or model is invented here. Unsupported combinations fail closed
 // and name the supported choices.
@@ -39,7 +41,8 @@ export const PURPOSES = Object.freeze(Object.values(Purpose));
 export const Backend = Object.freeze({
   DSH: 'dsh',
   WORKBUDDY_DSF: 'workbuddy-dsf',
-  TERRA: 'terra'
+  TERRA: 'terra',
+  ANTIGRAVITY: 'antigravity'
 });
 export const BACKENDS = Object.freeze(Object.values(Backend));
 
@@ -84,7 +87,9 @@ const BACKEND_ALIASES = Object.freeze({
   'workbuddy-dsf': Backend.WORKBUDDY_DSF,
   wb: Backend.WORKBUDDY_DSF,
   terra: Backend.TERRA,
-  'gpt-6.1-terra': Backend.TERRA
+  'gpt-6.1-terra': Backend.TERRA,
+  antigravity: Backend.ANTIGRAVITY,
+  agy: Backend.ANTIGRAVITY
 });
 
 const SOURCE_ALIASES = Object.freeze({
@@ -133,7 +138,7 @@ export function normalizePurpose(value, fallback = Purpose.GENERAL) {
 
 export function normalizeBackend(value) {
   if (value === undefined || value === null || value === '') return null;
-  if (typeof value !== 'string') throw new DispatchPolicyError('DISPATCH_BACKEND_INVALID', 'backend must be DSH, WorkBuddy DSF or Terra.', { supported: BACKENDS });
+  if (typeof value !== 'string') throw new DispatchPolicyError('DISPATCH_BACKEND_INVALID', 'backend must be DSH, WorkBuddy DSF, Terra or Antigravity.', { supported: BACKENDS });
   const backend = BACKEND_ALIASES[value.trim().toLowerCase()];
   if (!backend) throw new DispatchPolicyError('DISPATCH_BACKEND_INVALID', `Unsupported backend "${value.trim().slice(0, 80)}".`, { supported: BACKENDS });
   return backend;
@@ -197,7 +202,7 @@ function terraExecutor(source) {
   };
 }
 
-export function resolveDispatch(input = {}) {
+export function resolveDispatch(input = {}, { antigravityConfigured = false } = {}) {
   if (!input || typeof input !== 'object' || Array.isArray(input)) {
     throw new DispatchPolicyError('DISPATCH_INPUT_INVALID', 'Dispatch input must be an object.');
   }
@@ -216,22 +221,31 @@ export function resolveDispatch(input = {}) {
   const purpose = normalizePurpose(input.purpose);
   const explicitBackend = normalizeBackend(input.backend);
   const specialist = SPECIALIST_PURPOSES.has(purpose);
+  const choices = !specialist ? [Backend.DSH, Backend.WORKBUDDY_DSF]
+    : purpose === Purpose.WRITING ? [Backend.ANTIGRAVITY, Backend.TERRA] : [Backend.TERRA];
 
   let backend;
-  if (explicitBackend === null) backend = specialist ? Backend.TERRA : Backend.DSH;
-  else if (specialist && explicitBackend !== Backend.TERRA) {
+  if (explicitBackend === null) backend = purpose === Purpose.WRITING && antigravityConfigured ? Backend.ANTIGRAVITY
+    : (specialist ? Backend.TERRA : Backend.DSH);
+  else if (specialist && !choices.includes(explicitBackend)) {
     throw new DispatchPolicyError('DISPATCH_BACKEND_PURPOSE_CONFLICT',
       `${purpose} tasks are routed to ${TERRA_MODEL}; ${explicitBackend} is not a supported backend for that purpose.`,
-      { purpose, requested_backend: explicitBackend, supported: [Backend.TERRA] });
+      { purpose, requested_backend: explicitBackend, supported: choices });
   } else if (!specialist && explicitBackend === Backend.TERRA) {
     throw new DispatchPolicyError('DISPATCH_BACKEND_PURPOSE_CONFLICT',
       `Terra is selected only for explicitly specialized purposes; general/coordinating work uses ${SOL_MODEL}.`,
       { purpose, requested_backend: explicitBackend, supported: [Backend.DSH, Backend.WORKBUDDY_DSF] });
+  } else if (!choices.includes(explicitBackend)) {
+    throw new DispatchPolicyError('DISPATCH_BACKEND_PURPOSE_CONFLICT', 'Antigravity is restricted to writing.',
+      { purpose, requested_backend: explicitBackend, supported: choices });
   } else backend = explicitBackend;
 
   const executor = backend === Backend.DSH ? dshExecutor()
     : backend === Backend.WORKBUDDY_DSF ? workBuddyExecutor()
-      : terraExecutor(source);
+      : backend === Backend.ANTIGRAVITY
+        ? { backend, backend_name: 'Antigravity', label: 'Google Antigravity CLI', provider: 'google-antigravity-cli',
+          model: null, reasoning_effort: null, transport: 'antigravity-cli', server_name: 'sol-coordinator' }
+        : terraExecutor(source);
   const required = CAPABILITY_POLICY[purpose].required;
 
   return Object.freeze({
@@ -248,7 +262,7 @@ export function resolveDispatch(input = {}) {
     output: CAPABILITY_POLICY[purpose].output,
     capabilities: Object.freeze({
       required,
-      transport: specialist
+      transport: backend === Backend.ANTIGRAVITY ? 'isolated-host-text' : specialist
         ? (source === DispatchSource.API ? 'protected-terra-actions' : 'native-host')
         : 'executor-native',
       media: 'excluded-by-default',
@@ -257,7 +271,7 @@ export function resolveDispatch(input = {}) {
     choices: Object.freeze({
       sources: SOURCES,
       purposes: PURPOSES,
-      backends: specialist ? Object.freeze([Backend.TERRA]) : Object.freeze([Backend.DSH, Backend.WORKBUDDY_DSF])
+      backends: Object.freeze(choices)
     })
   });
 }
@@ -269,6 +283,11 @@ export const resolveLayerDispatch = resolveDispatch;
 export const resolveLayeredDispatch = resolveDispatch;
 
 export function hostHandoff(plan, { reason = null } = {}) {  if (!plan || plan.schema !== DISPATCH_SCHEMA) throw new DispatchPolicyError('DISPATCH_PLAN_INVALID', 'A resolved dispatch plan is required.');
+  if (plan.executor.backend === Backend.ANTIGRAVITY) return {
+    status: 'not_dispatched', handoff: true, reason_code: 'ANTIGRAVITY_HOST_HANDOFF',
+    selected_source: plan.source, selected_backend: Backend.ANTIGRAVITY, dispatch: plan,
+    next_step: 'Use the configured sol-coordinator Antigravity text entry with explicit authorization.'
+  };
   const specialist = plan.layer === 'specialist';
   const nextStep = specialist
     ? `Run the task with the current host's native Terra capability (${TERRA_MODEL}, effort ${TERRA_REASONING_EFFORT}). No billable model was substituted and no native route was invoked by this bridge.`

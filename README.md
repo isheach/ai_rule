@@ -1,6 +1,6 @@
 # ai_rule
 
-在 Codex 中，Astra 明确目标、授权范围和验收条件后交接任务，等待所属 Sol 或 Terra 的完成确认后据此向用户汇报。全新独立会话默认由订阅的 GPT-6.2 Sol Max 规划、派发和验收，底层用 DSH/OpenCode Go DSF。主机操作/验收、写作、绘图/图像生成与识别由同一来源的 GPT-6.1 Terra Max 承担。规则见 [AGENTS.md](AGENTS.md) 和随附的 [multi-agent dispatch Skill](skills/multi-agent-dispatch/SKILL.md)。
+在 Codex 中，Astra 明确目标、授权范围和验收条件后交接任务，等待所属 Sol 或 Terra 的完成确认后据此向用户汇报。全新独立会话默认由订阅的 GPT-6.2 Sol Max 规划、派发和验收，底层用 DSH/OpenCode Go DSF。主机操作、验收、绘图与图像生成或识别由同一来源的 GPT-6.1 Terra Max 承担。宿主配置反重力后，新文本写作默认走 Antigravity CLI。规则见 [AGENTS.md](AGENTS.md) 和随附的 [multi-agent dispatch Skill](skills/multi-agent-dispatch/SKILL.md)。
 
 | 会话设置 | 全新会话默认 | 可选项 |
 |---|---|---|
@@ -11,7 +11,7 @@
 
 全新默认只用于独立新会话。已有的 A/外部模式、模式 3、来源、已受理任务和所有者沿用原记录。A 由原生 Sol 执行，外部模式由所选 Harness 执行和监守，WorkBuddy DSF 是底层显式替代。订阅来源由 Sol 自己调用宿主提供的 Terra 或 Luna 代理，API 来源由 API Sol 调用 `delegate_peer`。三者继承同一项目和父任务的读写、命令、约束及预算，实际动作随所选入口的能力生效。 [会话操作](docs/session-modes.md)
 
-Terra 专家任务使用与 Sol 相同的已选中间来源。纯写作可直接返回文本；主机操作/验收、绘图或图像生成与识别只通过实际提供的 CUA/图像工具或项目预注册动作，限定范围的 CUA 完成后关闭，不虚构工具动作。API 仅在用户明确选择后使用，付费调用只在授权后执行。
+Terra 的动作类专家任务使用与 Sol 相同的中间来源。主机操作、验收和图像任务通过实际提供的 CUA、图像工具或项目预注册动作完成。反重力仅接收明确授权的文本，模型别名由宿主管理并支持热更新。现有 Terra 写作仍可显式选择。 [反重力配置和模型目录](docs/antigravity-text.md)
 
 ## Windows 安装
 
@@ -53,7 +53,8 @@ Sol、Terra 与 Luna API 共用同一 Windows 项目、broker 和每小时配额
 | 启用官方 CodeBuddy ACP 的 HY4 | [CodeBuddy ACP](docs/codebuddy-acp.md) |
 | DSH 谷时治理及模式 2 实际峰时的 WorkBuddy 交接 | [峰谷调度](docs/offpeak-schedule.md) |
 | 模式 3 中明确授权的 DSH → HY4 预准入回退 | [HY4 回退](docs/hy4-fallback.md) |
-| Terra 专家任务（主机操作/验收、写作、绘图/图像） | [Terra 受保护入口](docs/terra-api.md) |
+| 反重力文本写作及模型目录 | [Antigravity CLI 文本入口](docs/antigravity-text.md) |
+| Terra 专家任务（主机操作、验收、绘图及图像） | [Terra 受保护入口](docs/terra-api.md) |
 
 只部署 DSH 的电脑可以使用默认订阅 Sol → DSH、A 及所配日历的 DSH 时段。WorkBuddy 的注册检查在这类电脑上可以是 `false`。项目入口的模板使用只读示例。已经批准读写或命令的研究项目按实际授权设置一次，同一项目的后续论文、数据、脚本与任务直接随派单更换。 [项目权限设置](docs/workbuddy-project-entry.md#项目配置)
 
