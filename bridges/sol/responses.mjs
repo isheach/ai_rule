@@ -18,6 +18,92 @@ const PEERS = Object.freeze({
 });
 export const PEER_NAMES = Object.freeze(Object.keys(PEERS));
 
+const POLICY_REFUSALS = new Set([
+  'BROKER_FORBIDDEN', 'BROKER_PROTOCOL', 'BROKER_POLICY_DENIED', 'BROKER_INPUT_LIMIT',
+  'BROKER_CREDENTIAL_MISSING', 'BROKER_RATE_LIMITED', 'BROKER_BUSY', 'BROKER_STORAGE_UNAVAILABLE', 'UPSTREAM_UNSENT'
+]);
+
+const diagnostic = (state, code, statusObserved, action, deploymentRequired, ready, dispatchReady, message) => ({
+  ready, dispatch_ready: dispatchReady, state, code, status_observed: statusObserved,
+  deployment_required: deploymentRequired, action, message
+});
+
+function statusWasObserved(broker, peer, route) {
+  if (broker?.status_observed === true || broker?.ready === true) return true;
+  if (broker?.peer_api && typeof broker.peer_api === 'object') return true;
+  if (broker?.peer === peer && typeof broker?.code === 'string' && broker.code.startsWith(`${peer.toUpperCase()}_BROKER_`)) return true;
+  if (typeof route?.code === 'string' && route.code.startsWith(`${peer.toUpperCase()}_BROKER_`)) return true;
+  return ['SOL_BROKER_NOT_READY', 'SOL_BROKER_ROUTE_MISMATCH'].includes(broker?.code);
+}
+
+function diagnosePeer(broker, peer, route) {
+  const prefix = peer.toUpperCase();
+  const code = route?.code ?? broker?.code ?? null;
+  const observed = statusWasObserved(broker, peer, route);
+  const ready = route?.ready === true;
+  const canDelegate = typeof broker?.delegate_peer === 'boolean' ? broker.delegate_peer : null;
+  const dispatchReady = !ready || !observed ? null : canDelegate === null ? null : canDelegate;
+  const routeMismatch = code === `${prefix}_BROKER_ROUTE_MISMATCH` || code === `${prefix}_BROKER_UNSUPPORTED`;
+
+  if (ready) {
+    if (dispatchReady === false) {
+      return diagnostic('mismatch', 'SOL_PEER_TOOL_UNAVAILABLE', true, 'inspect_route', null, true, false,
+        'The peer model route is ready but the Sol delegation tool is not advertised. Inspect the existing broker route; do not reinstall automatically.');
+    }
+    return diagnostic('ready', null, true, 'none', false, true, dispatchReady,
+      'Protected peer route is ready. Broker redeployment is not required. Reload sol-coordinator only if its JavaScript changed; actual API collaboration still needs task-level billing consent.');
+  }
+  if (code === `${prefix}_BROKER_DISABLED`) {
+    return diagnostic('disabled', code, true, 'enable_protected_policy', true, false, false,
+      'Broker status confirms this peer policy is disabled. Enable it once through the existing protected broker policy upgrade; this status check sent no Responses request.');
+  }
+  if (routeMismatch) {
+    return diagnostic('mismatch', code, observed, 'inspect_route', null, false, false,
+      'The broker responded, but its fixed role route or advertised tools do not match. Check the reviewed broker and coordinator route; do not reinstall automatically.');
+  }
+  if (code === `${prefix}_BROKER_NOT_READY` || code === 'SOL_BROKER_NOT_READY') {
+    return diagnostic('not_ready', code, observed, 'check_protected_credential', false, false, false,
+      'The broker route is present but its protected credential is not ready. Check the existing local broker credential state; no reinstall is indicated by this result.');
+  }
+  if (POLICY_REFUSALS.has(code)) {
+    return diagnostic('refused', code, false, 'review_refusal', null, false, null,
+      'The protected broker refused this status or route check. A refusal does not prove that the peer policy is disabled; review the returned code and do not reinstall automatically.');
+  }
+  if (code === 'SOL_BROKER_ROUTE_MISMATCH') {
+    return diagnostic('mismatch', code, true, 'inspect_route', null, false, null,
+      'The broker status was observed, but the configured Sol route does not match. Peer readiness cannot be concluded; inspect the existing route and do not reinstall automatically.');
+  }
+  return diagnostic('unknown', code, observed, 'check_status', null, false, null,
+    'Protected broker status was not sufficient to determine this peer policy. Check the existing broker connection and status; do not redeploy based on an unavailable or unobserved status.');
+}
+
+/**
+ * Turn an already-observed readiness result into read-only peer diagnostics.
+ * Accepts the aggregate ResponsesClient.readiness() result, or a peer-specific
+ * result wrapped with `peer: 'terra' | 'luna'`. This function never calls a broker.
+ * @typedef {'ready'|'disabled'|'not_ready'|'mismatch'|'refused'|'unknown'} PeerRouteState
+ * @typedef {'none'|'enable_protected_policy'|'check_protected_credential'|'inspect_route'|'review_refusal'|'check_status'} PeerRouteAction
+ * @typedef {Object} PeerRouteDiagnostic
+ * @property {boolean} ready
+ * @property {boolean|null} dispatch_ready
+ * @property {PeerRouteState} state
+ * @property {string|null} code
+ * @property {boolean} status_observed
+ * @property {boolean|null} deployment_required
+ * @property {PeerRouteAction} action
+ * @property {string} message
+ * @typedef {Record<'terra'|'luna', PeerRouteDiagnostic>} PeerRouteDiagnostics
+ * @param {object} broker An existing ResponsesClient.readiness() result; no request is made.
+ * @returns {PeerRouteDiagnostics}
+ */
+export function peerRouteDiagnostics(broker) {
+  const value = broker && typeof broker === 'object' ? broker : {};
+  return Object.fromEntries(PEER_NAMES.map(peer => {
+    const route = value.peer === peer ? value : value.peer_api?.[peer];
+    return [peer, diagnosePeer(value, peer, route)];
+  }));
+}
+
 function peerReadiness(body, peer) {
   const { model, effort, confirm } = PEERS[peer];
   const tools = [confirm, 'delegate_work', 'finish_coordination'];

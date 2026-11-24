@@ -2,6 +2,7 @@ import path from 'node:path';
 import { pathToFileURL } from 'node:url';
 import { redact } from '../dsh/core.mjs';
 import { DSH_SCOPE_DESCRIPTION } from '../dsh/routing.mjs';
+import { codexEntryCaller, ENTRY_STRUCTURES } from '../entry-structure.mjs';
 import { scheduleModeProperty } from '../dsh/schedule.mjs';
 import { resolveContext } from '../pool/context.mjs';
 import { DSH_TIMEOUT_MS, WAIT_MS, preferRun, validateWaitMs, waitForExisting } from '../task-lifecycle.mjs';
@@ -14,12 +15,15 @@ const PROTOCOLS = ['2025-06-18', '2025-03-26', '2024-11-05'];
 const text = { type: 'string' };
 const choices = (...values) => ({ type: 'string', enum: values });
 const source = choices(...COORDINATOR_MODES);
+const entryStructure = choices(...ENTRY_STRUCTURES);
 const task = { idempotencyKey: text, taskId: text };
 const handoff = {
-  ...task, coordinatorMode: source, backend: choices(...EXECUTION_BACKENDS), purpose: choices(...PURPOSES), goal: text, cwd: text,
+  ...task, coordinatorMode: source, entryStructure, backend: choices(...EXECUTION_BACKENDS), purpose: choices(...PURPOSES), goal: text, cwd: text,
   permissionMode: choices(...EXECUTION_PERMISSIONS), authorizationNote: text, constraints: text, contextSummary: text,
   acceptance: text, acceptTerraCharges: { type: 'boolean', description: 'Explicit billing consent for a specialist API Terra task. Required before the protected Terra client sends a response.' },
   acceptPeerCharges: { type: 'boolean', description: 'Explicit billing consent for Sol to call available Terra or Luna collaborators when this API coordination needs one. No calls are made merely by enabling consent.' },
+  antigravityModel: { type: 'string', description: 'Optional host-approved Antigravity alias for writing. Omit for this host’s configured default alias.' },
+  acceptAntigravityUsage: { type: 'boolean', description: 'Explicit approval to send supplied task text to the configured Google CLI route and use its entitlement. Required for a new Antigravity task.' },
   timeoutMs: { type: 'integer', minimum: DSH_TIMEOUT_MS.minimum, maximum: DSH_TIMEOUT_MS.maximum,
     description: 'Total coordination budget. The local API Sol configuration can impose a lower maximum and defines the default.' },
   capability: choices('default', 'text-only', 'workspace-read', 'workspace-write'),
@@ -35,13 +39,19 @@ const tool = (name, description, properties = {}, required = [], readOnlyHint = 
 const TOOLS = [
   tool('get_sol_coordinator_mode', 'Read the selected Sol source and local route readiness for this verified Codex root without a model call.', {}, [], true),
   tool('set_sol_coordinator_mode', 'Set this verified Codex root’s source for future work only, without an API call.', { mode: source }, ['mode']),
-  tool('resolve_layer_dispatch', 'Resolve the layered model route for this root without a model call. Omit purpose for general/coordinating work; omit backend to use the purpose default (DSH or Terra).', {
-    purpose: choices(...PURPOSES), backend: choices(...EXECUTION_BACKENDS)
+  tool('get_sol_entry_structure', 'Read this verified root’s entry structure and caller evidence without calling a model.', {}, [], true),
+  tool('set_sol_entry_structure', 'Set this verified root’s entry structure for new tasks, independently of the selected source and executor.', {
+    entryStructure
+  }, ['entryStructure']),
+  tool('resolve_layer_dispatch', 'Resolve the layered model route for this root without a model call. Configured Antigravity handles writing; Terra handles host and image work.', {
+    purpose: choices(...PURPOSES), backend: choices(...EXECUTION_BACKENDS), entryStructure
   }, [], true),
+  tool('get_antigravity_status', 'Read this host’s Antigravity configuration and approved aliases without starting the CLI.', {}, [], true),
+  tool('list_antigravity_models', 'List model slugs available to this host’s configured Google credential route. Runs agy models without a generation request.', {}, [], true),
   tool('get_sol_schedule', 'Read the DSH root pool schedule and current phase.', {}, [], true),
   tool('set_sol_schedule', 'Apply an explicitly requested root-pool schedule mode, including to active DSH workers in this root.', { scheduleMode: scheduleModeProperty }, ['scheduleMode']),
-  tool('start_sol_coordination', `Start API Sol coordination for an early task ID or later intervention. Keep the returned task ID and the original idempotency key. ${DSH_SCOPE_DESCRIPTION}`, handoff, requireHandoff),
-  tool('run_sol_coordination', `Start and wait for one API Sol coordination. ${preferRun('start_sol_coordination', 'wait_sol_coordination')} Recover an interrupted call with the original idempotency key. ${DSH_SCOPE_DESCRIPTION}`, handoff, requireHandoff),
+  tool('start_sol_coordination', `Start API Sol coordination or configured Antigravity writing. Keep the returned task ID and original idempotency key. ${DSH_SCOPE_DESCRIPTION}`, handoff, requireHandoff),
+  tool('run_sol_coordination', `Start and wait for API Sol coordination or configured Antigravity writing. ${preferRun('start_sol_coordination', 'wait_sol_coordination')} Recover an interrupted call with the original idempotency key. ${DSH_SCOPE_DESCRIPTION}`, handoff, requireHandoff),
   tool('get_sol_coordination', 'Read the original API coordination receipt by its root-scoped idempotency key.', task, ['idempotencyKey'], true),
   tool('wait_sol_coordination', `Wait for existing coordination in this verified root. ${waitForExisting}`, { ...task, waitMs: WAIT_MS }, ['idempotencyKey'], true),
   tool('cancel_sol_coordination', 'Request cancellation of this connection’s originally owned coordination and report the confirmed outcome.', task, ['idempotencyKey'])
@@ -57,11 +67,18 @@ function validate(tool, args) {
   }
 }
 
-export function startSolServer({ configPath, stdin = process.stdin, stdout = process.stdout, callBroker, clock, sessionsRoot, dispatch = {} } = {}) {
+export function startSolServer({ configPath, stdin = process.stdin, stdout = process.stdout, callBroker, clock, sessionsRoot,
+  dispatch = {}, identifyEntryCaller } = {}) {
   const config = loadSolConfig(configPath);
   discardLegacyEnvironment(config);
+  const antigravityKey = config.antigravity?.credentialSource === 'gemini-api-key' ? process.env.GEMINI_API_KEY : undefined;
+  if (config.antigravity?.credentialSource === 'gemini-api-key') {
+    // The key belongs only to the configured CLI. Do not leave it available
+    // for DSH, a WorkBuddy adapter, or the OpenAI broker helper to inherit.
+    for (const name of Object.keys(process.env)) if (name.toUpperCase() === 'GEMINI_API_KEY') delete process.env[name];
+  }
   const responses = new ResponsesClient({ config, callBroker });
-  const service = new SolService({ config, responses, clock, dispatch });
+  const service = new SolService({ config, responses, clock, dispatch: { ...dispatch, antigravityKey } });
   const runs = new Map();
   let initialized = false;
   let input = '';
@@ -75,13 +92,22 @@ export function startSolServer({ configPath, stdin = process.stdin, stdout = pro
     const selected = TOOLS.find(tool => tool.name === name);
     if (!selected) throw Error('Unknown Sol coordinator tool.');
     validate(selected, args);
-    const { rootId } = resolveContext({ config: config.contextConfig, reference: args.context, purpose: SERVICE, sessionsRoot });
+    const verifiedContext = resolveContext({ config: config.contextConfig, reference: args.context, purpose: SERVICE, sessionsRoot });
+    const { rootId } = verifiedContext;
     const { context, idempotencyKey: key, taskId } = args;
-    if (name === 'get_sol_coordinator_mode') return service.mode(rootId, { mcpLoaded: true });
+    // This optional resolver is provided by the actual host adapter. A tool
+    // request can supply a structure preference but cannot label its caller.
+    const caller = () => codexEntryCaller(verifiedContext, identifyEntryCaller?.(verifiedContext));
+    if (name === 'get_sol_coordinator_mode') return service.mode(rootId, { mcpLoaded: true, entryCaller: caller() });
     if (name === 'set_sol_coordinator_mode') return service.setMode(rootId, args.mode);
+    if (name === 'get_sol_entry_structure') return service.getEntryStructure(rootId, caller());
+    if (name === 'set_sol_entry_structure') return service.setEntryStructure(rootId, args.entryStructure, caller());
+    if (name === 'get_antigravity_status') return service.antigravityStatus();
+    if (name === 'list_antigravity_models') return service.listAntigravityModels();
     if (name === 'resolve_layer_dispatch') return service.resolve(rootId, {
       ...(args.purpose === undefined ? {} : { purpose: args.purpose }),
-      ...(args.backend === undefined ? {} : { backend: args.backend })
+      ...(args.backend === undefined ? {} : { backend: args.backend }),
+      ...(args.entryStructure === undefined ? {} : { entryStructure: args.entryStructure })
     });
     if (name === 'get_sol_schedule') return service.schedule(rootId);
     if (name === 'set_sol_schedule') return service.setSchedule(rootId, args.scheduleMode);
@@ -94,7 +120,7 @@ export function startSolServer({ configPath, stdin = process.stdin, stdout = pro
     }
     const taskArgs = { ...args };
     delete taskArgs.context;
-    const started = await service.start(rootId, taskArgs);
+    const started = await service.start(rootId, taskArgs, caller());
     if (name !== 'run_sol_coordination' || started.status !== 'running' || started.replayed) return started;
     runs.set(id, { rootId, key, taskId: started.task_id });
     try { return await service.wait(rootId, key, started.task_id, started.timeout_ms + 12000); }

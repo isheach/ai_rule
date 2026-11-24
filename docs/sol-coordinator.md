@@ -1,6 +1,10 @@
 # Sol 协调器
 
-部署本机 `sol-coordinator` 后，可在 Codex 会话内选择订阅或受保护 OpenAI Responses API。全新默认底层是 DSH/OpenCode Go DSF，WorkBuddy DSF 仅在明确选择或既有模式 2 峰时交接时使用。Sol 可按同一来源调用 Terra 或 Luna 协作，直接的主机操作/验收、写作、绘图或图像生成与识别保留 Terra 专家路由。 [调度 Skill](../skills/multi-agent-dispatch/SKILL.md)
+部署本机 `sol-coordinator` 后，可在 Codex 会话内选择订阅或受保护 OpenAI Responses API。全新默认底层是 DSH/OpenCode Go DSF，WorkBuddy DSF 仅在明确选择或既有模式 2 峰时交接时使用。Sol 可按同一来源调用 Terra 或 Luna 协作，主机操作、验收、绘图与图像生成或识别保留 Terra 专家路由。已配置 Antigravity 的协调器默认用 CLI 处理新文本任务。 [调度 Skill](../skills/multi-agent-dispatch/SKILL.md) · [反重力文本与模型配置](antigravity-text.md)
+
+## 入口结构
+
+`entryStructure` 独立于协调来源、A/外部执行模式和峰谷。默认 `astra` 沿原 Astra → Sol 交接，选择 `sol` 时仅在实际宿主提供真实直连能力的情况下直接进入 Sol；持久设置、单次覆盖、根池身份限制与调用者证据见 [会话入口结构](entry-structure.md)。切换不改变已受理任务的来源、后端、所有者或原回执。
 
 ## 执行宿主与目标机
 
